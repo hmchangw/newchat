@@ -374,6 +374,16 @@ Rules:
   names, unit and labels still match, so a generic RPC dashboard still finds and
   groups the series; only `histogram_quantile`'s interpolation points differ.
 
+**Reading a p99 of 10 seconds.** `10` is the last finite boundary, so
+`histogram_quantile` cannot report a value above it: a route whose true p99 is
+120s reads as exactly 10. Treat any quantile sitting at 10 as "at least 10
+seconds, amount unknown" and reach for traces or the `_count`/`_sum` ratio
+instead. `docs/specs/o11y/storage-dependency-metrics.md` writes the same caveat
+for the storage families; it applies here for the same reason. Raising the
+ceiling is deliberately out of scope for the branch that introduced the method
+vocabulary.
+
+
 - **A latency SLO's bound must land on a bucket boundary.** This is a constraint
   on the SLO, not on the histogram. `rate(…_bucket{le="B"}) / rate(…_count)` is
   an exact ratio only when `B` is a boundary; otherwise the nearest boundary
@@ -706,7 +716,7 @@ instrument name** you grep for in source underneath where the two differ.
 | `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
 | `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | the 14 services that wire a `natsmetrics.Publisher` — **not** every publisher; see below | on first failure | none — the broker has no record of a publish that never arrived | campaign |
 | `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
-| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="channel_history"`) and **SLO-5** (`le="0.25"`, `rpc_method="thread_open"`) — the denominator filters `error_type` to the eligible set, never `_count` as a whole; see `sli-slo.md` §3 and the `rpc.method` coverage note below |
+| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="list_channel_messages"`) and **SLO-5** (`le="0.25"`, `rpc_method="list_thread_messages"`) — the denominator filters `error_type` to the eligible set, never `_count` as a whole; see `sli-slo.md` §3 and the `rpc.method` note below |
 
 These two are the only families here that do not carry the `chat_` prefix, and
 the exception is deliberate: they implement the OpenTelemetry RPC semantic
@@ -725,49 +735,225 @@ histogram **and** a counter (`chat.nats.requests`, `chat.nats.request.handled`):
 a histogram already publishes `_count`, so the counters were the same numbers on
 a second series built from a second attribute set.
 
-**`rpc.method` coverage is partial.** All ten `natsrouter` services emit the
-histogram, but the label is derived by
-`natsmetrics.RequestOperationFromSubject`, whose operation vocabulary covers
-room-service and history-service only. The other eight (user-service,
-search-service, media-service, room-worker, bot-message-handler,
-bot-room-service, translation-service, user-presence-service) record
-`rpc_method="unknown"` on every route — their latency and `error.type` are still real — so SLO-4/5 can
-slice by method for room-service and history-service and nowhere else. Extending
-the vocabulary to the other seven is deliberately a separate change: it is a
-decision about how fine `rpc.method` should be and what that costs in
-cardinality, not a rename.
+**`rpc.method` is supplied at route registration, not derived from the
+subject.** `natsrouter.Register`, `RegisterNoBody` and `RegisterOptionalBody`
+each take a required `natsmetrics.RPCMethod`, so a route registered without one
+does not compile. `RegisterVoid` takes no method and records no
+`rpc.server.call.duration` sample at all — which is why user-presence-service's
+`hello`/`ping`/`activity`/`bye` heartbeat lane no longer appears in this family:
+the `rpc_method="unknown"` series has disappeared, not shrunk.
 
-**Where the vocabulary is fine, it is fine for a reason.** Most operations are
-coarse categories, but `channel_history` and `thread_open` are single routes,
-because each is the entire numerator and denominator of an SLO:
+Three gates keep the vocabulary closed, from cheapest to last-resort:
 
-| `rpc.method` | Route | Reads |
-|---|---|---|
-| `channel_history` | `.msg.history` → `LoadHistory` | **SLO-4** — 95% within 500 ms |
-| `thread_open` | `.msg.thread` → `GetThreadMessages` | **SLO-5** — 95% within 250 ms |
+1. **`.semgrep/rpcmethod.yml`**, a SAST rule, requires the method argument to
+   be a `natsmetrics.Method*` selector *written at the call site*. It is an
+   allowlist, not a list of known-bad shapes: a string literal, an explicit
+   `natsmetrics.RPCMethod(...)` conversion, a variable — even one holding a
+   legitimate constant — and `MethodOther` itself are all refused, in
+   single-line and gofmt-wrapped spellings alike. An aliased or dot-imported
+   `natsmetrics` is refused too rather than allowed: the qualifier is spelled
+   literally in the rule, so an alias is a false positive, which fails in the
+   safe direction. The type
+   system alone catches none of these, because an untyped string constant is
+   assignable to `RPCMethod` and a conversion accepts any string, so
+   `Register(r, pattern, "rename_room", fn)` and
+   `Register(r, pattern, natsmetrics.RPCMethod("typo"), fn)` both compile. A
+   variable is refused rather than resolved because the rule matches syntax,
+   not values: it cannot distinguish one holding `MethodOpenRoom` from one
+   holding a typo, so it admits neither.
 
-They were split out of `history_read` because sharing one label made both SLOs
-unmeasurable, in opposite directions: channel load walks `messages_by_room`
-buckets while thread open slices one partition, so the shared series dragged
-thread open's ratio down with walk latency and diluted channel load's violations
-with fast thread traffic — at a ratio that drifts with traffic mix, so not even a
-fixed correction was available.
+   **Scope: every method argument that is actually passed, on both lanes.**
+   The rule covers `natsrouter`'s three method-bearing registrars and
+   `Publisher.RecordRPCClientCall`, which records `rpc.client.call.duration`
+   and takes the same `RPCMethod`.
 
-`history_read` keeps everything the SLOs do not describe: `.msg.next` (scroll),
-`.msg.surrounding` (jump), `.msg.get`, `.msg.get.ids`, `.msg.pinned.list`,
-`.msg.thread.parent`, and the server-to-server thread lanes. Two consequences
-worth stating: `.msg.thread.parent` is a second handler and not part of the
-verified "Enter thread" path, so it stays out of SLO-5; and `.msg.next` is
-user-triggered scrolling with a different cost model from an initial load, so it
-remains residual contamination in any channel-load view built from
-`history_read`. Splitting it out is the obvious next step if SLO-4 calibration
-comes back noisy.
+   An earlier version of this paragraph said the outbound lane "carries no
+   `rpc.client` instrument yet, so it has no method argument to constrain".
+   That was wrong twice over: the publisher *is* the recorder (then spelled
+   `Publisher.Request`), and call sites were already passing it a method while
+   the claim stood — carrying exactly the hole this rule closes on the server
+   side.
 
-Until then the classifier is anchored on the subject's family token, so an
-unclassified subject stays honestly `unknown` instead of borrowing another
-service's label. It did borrow one: user-service's
-`chat.user.{account}.request.user.{site}.chatlist.section.create` ends in
-`.create` and was recorded as `rpc_method="room_mutation"`.
+   How many there are is deliberately not written down here. The number was
+   six, then seven, then fourteen inside a week, and a count in prose is wrong
+   from the first commit that adds one. `git grep -c "\.RecordRPCClientCall("`
+   is the answer and stays correct.
+
+   What remains outside: `search-service/room_client.go`, the one raw
+   `nc.Request` call site that still records no client metric. It was nine when
+   the vocabulary landed; notification-worker's badge client and user-service's
+   seven closed the rest, leaving the caller whose fan-out crosses the fewest
+   services. A rule cannot constrain an argument that is never passed, so that
+   site needs the instrument first. Read a passing scan as "every method
+   argument that is passed names a constant directly", not as "every
+   outbound call is measured".
+
+   The client lane is one exact pattern, `$P.RecordRPCClientCall(...)`, with
+   no receiver or duration heuristic: the name is unique in the tree, so the
+   match is unambiguous however the publisher is stored and however the
+   duration is computed.
+
+   That is the reason the recorder is named `RecordRPCClientCall` rather than
+   `Request`. Under the old name it collided with `nats.Conn.Request(ctx,
+   subject, payload, timeout)` — same arity, same first argument, unrelated
+   meaning — so a bare `$P.Request(...)` flagged 26 ordinary outbound calls.
+   Working around that meant guessing: a branch on the `metrics` field name, a
+   branch on an inline `time.Since`, a branch on an explicit `RPCMethod`
+   conversion. A publisher under any other field name, timed any other way,
+   given a bare literal, escaped all three. Renaming the recorder removed the
+   ambiguity rather than compensating for it, and let three heuristic branches
+   collapse into one exact rule.
+
+   The alternative was type resolution — `golang.org/x/tools/go/packages`,
+   since semgrep OSS does not infer Go types and stdlib `go/types` with a
+   hand-built loader is brittle across modules, build tags and platforms. That
+   would have been a new direct dependency to work around a name collision the
+   repo controls. A name change was the cheaper fix and needs no dependency.
+2. **Each service's `routes_test.go`**, comparing `Router.Routes()` to
+   `testdata/routes.golden` via `testutil.AssertRoutesGolden`, catches a
+   *valid* but wrong constant — one that compiles, passes every runtime check,
+   and simply names the wrong route. This is what actually pins a route to its
+   correct method: a copy-pasted wrong constant shows up as a one-line diff in
+   review. Ten goldens, 92 routes.
+
+   Two things make it harder to switch this gate off, and one hole stays open.
+   File selection is delegated to `go/build`'s own `Context.MatchFile` rather
+   than reimplemented — an earlier hand-rolled evaluator understood only GOOS,
+   GOARCH and `unix`, so it read `//go:build !go1.25` backwards (unknown tag
+   treated as false, negation true) and counted a file the toolchain never
+   compiles.
+   `AssertRoutesGolden` refuses a table containing `MethodOther` *before* it
+   reads or generates the golden file, so a route that degraded at
+   registration can neither be baked into a regenerated golden nor
+   hand-written into an existing one — the fallback never becomes an accepted
+   spelling. And `TestEveryRPCRouteRegistrationHasAGoldenFile` (in
+   `pkg/natsrouter`) parses every non-test `.go` file in the repo: a directory
+   that registers a method-bearing route must have both `testdata/routes.golden`
+   *and* a `_test.go` beside it, compiled by the default build, that calls
+   `AssertRoutesGolden`. Checking only for the file would let someone delete
+   the test and leave an unread fixture that agrees with nothing; ignoring
+   build constraints would let the call move behind `//go:build integration`,
+   which `make test` never compiles.
+
+   The hole: this proves the call is *written*, not that it *runs*. A
+   `t.Skip`, an early return, or a call in a helper nothing invokes all leave
+   the gate green. No source scan closes that, so it is stated here rather
+   than claimed away. The scan also skips `.git`, `node_modules`,
+   `.superpowers`, `docs`, `.semgrep` and `_`-prefixed directories — a route
+   registered inside one of those would not be seen.
+3. **Runtime, in `addRPCRoute`**, is the backstop for whatever reaches it
+   anyway: an undeclared method logs `slog.Error` and degrades that route to
+   `MethodOther` (`_OTHER`) rather than panicking; a method already claimed by
+   another route in the same router logs and registers both routes anyway,
+   merging their samples into one series rather than dropping either route.
+   Registration no longer panics, deliberately: every service builds its
+   publisher through `NewFromProviderIfEnabled`, so with metrics off a bad
+   label records nothing at all — panicking would kill the process over a
+   value it might not even record. Eight of the ten services had no test that
+   ran their real registration table before gate 2 above existed, so the
+   panic's first firing could as easily be a production pod as a review
+   comment.
+
+Gate 2's remaining limits, by construction rather than oversight:
+
+- Duplicate registrations are rejected, not merely shown. `Routes()` is an
+  append-only slice of `{Method, Pattern, NATSSubject}` — one entry per
+  registration call, never keyed — and `AssertRoutesGolden` refuses two routes
+  sharing a method and two routes sharing a canonical NATS subject.
+
+  Three shapes of this were live at different points and each is worth
+  knowing, because each looked closed from where the previous one was fixed.
+  Keyed by method, the later registration overwrote the earlier and a
+  duplicate that registered *first* produced a byte-identical golden. Rekeyed
+  by pattern, that closed but the mirror opened: one pattern registered twice
+  lost its first claimant. Comparing patterns as strings then still missed
+  `{account}` versus `{user}` — different patterns, one subscription after the
+  router replaces every placeholder with `*`, so NATS splits the traffic
+  between both handlers. Only the canonical subject settles it.
+- A `t.Skip` or an unreached call site leaves the gate green (above).
+- A subject pattern registered twice is rejected outright by
+  `AssertRoutesGolden` rather than reported as a golden diff: both
+  subscriptions are live on NATS, so a request is answered by whichever
+  handler NATS picks, which is a routing defect before it is a metrics one.
+- `RegisterVoid` routes carry no method and never enter `Routes()`, so they
+  are invisible to this gate by construction. See the follow-up below —
+  those four routes currently emit no server-side latency signal at all. user-presence-service's four
+  fire-and-forget routes (`hello`/`ping`/`activity`/`bye`) are pinned by
+  nothing.
+
+Names follow `<verb>_<object>[_qualifier]` in lower `snake_case`, guarded by
+`pkg/natsmetrics/rpcmethod_test.go`: 91 method names cover 92 routes
+(`mark_all_threads_read` is registered by both room-service and user-service —
+two halves of one operation across a hop), plus one client-only method
+(`get_presence_snapshot`), giving 92 constants. Uniqueness is per router, not
+per fleet: `service_name` + `rpc_method` is the identity key, and
+natsrouter's duplicate check is scoped to one router accordingly — it does not
+enforce the key, it only logs a collision within a service (see gate 2's blind
+spots above). That scoping is what lets room-service and user-service each
+register their own `mark_all_threads_read` without colliding.
+
+Which verb is *right* is a semantic rule the guard cannot check — it reads the
+first token against a closed set, not the handler's response type:
+
+| Prefix | Use for |
+| --- | --- |
+| `get_` | one logical resource, or a single view of one |
+| `list_` | a collection. Whether the response carries a total is irrelevant |
+| `batch_get_` | several specific resources, by keys the caller supplied |
+| `search_` | a query: matching, ranking or scoring against criteria |
+
+This follows Google AIP-131/132/190, where `total_size` is an optional field on
+a List response and never what makes a method a List. It is written down because
+`list_thread_messages`, `list_channel_messages`, `list_next_messages` and
+`list_surrounding_messages` were all spelled `get_` at some point on the grounds
+that they returned no total — leaving one golden file with two contradictory
+precedents for the same `[]Message` + cursor shape.
+
+
+### Required follow-up: the RegisterVoid lane has no latency metric
+
+`RegisterVoid` leaving `rpc.server.call.duration` was correct — those routes
+have no reply subject, so there is no call to time, and recording them as RPC
+would have misrepresented fire-and-forget traffic as request/reply. But the
+replacement was never built, and the four routes it affects
+(`hello`/`ping`/`activity`/`bye` on user-presence-service) are the fleet's
+highest-volume traffic. They emit **no server-side latency signal today**.
+Sampled traces and on-demand logs do not substitute for a steady-state
+latency metric on the busiest lane in the system.
+
+This is deliberately deferred out of this change, not overlooked, and it is a
+P1 follow-up tracked at
+[hmchangw/newchat#473](https://github.com/hmchangw/newchat/issues/473): a
+separate messaging-handler instrument, `chat.nats.handler.duration`, with its
+own bounded `operation` label (`presence_hello`, `presence_ping`,
+`presence_activity`, `presence_bye`), a `result` attribute reusing the existing
+`RequestResult` vocabulary, and **no `rpc.method`** — these are not RPCs and
+must not be labelled as though they were. Their subjects say so too: they are
+`chat.user.{account}.event.presence.{siteID}.…`, on the `.event.` lane rather
+than `.request.`.
+
+The `result` attribute is not decoration. `register.go:116,122` still compute
+`c.requestResult` for these routes, but `recordHandled` returns before reading
+it, so what was lost is a count and a result classification, not only a
+duration — a Valkey script failure would fail every heartbeat with no series to
+alert on. Saturation and shutdown rejections get a separate
+`chat.nats.handler.dropped{operation, reason}` counter instead of a
+near-zero duration sample, which would drag every percentile down.
+
+The original justification in `register.go` — that recording these would pull
+every percentile down — held only while every route shared one label. This
+branch's own change invalidated it, which is why the lane needs its own
+instrument rather than readmission to the RPC family.
+
+Three methods carry no live traffic today, found while auditing the
+vocabulary:
+
+- `chat.server.request.room.{site}.key.ensure` (`ensure_room_key`) and
+  `chat.server.bot.request.room.{site}.get` (`get_bot_room`) have no caller
+  anywhere in the repo.
+- `chat.presence.{site}.request.snapshot` (`get_presence_snapshot`) has a
+  caller (notification-worker) but no subscriber, and is gated off by
+  `PRESENCE_RPC_ENABLED=false`.
 
 The five JetStream consumers are `message-gatekeeper`, `message-worker`,
 `broadcast-worker`, `notification-worker`, and `room-worker`. `room-service` and

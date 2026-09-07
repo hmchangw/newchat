@@ -180,13 +180,45 @@ convention's instrument names, unit and labels verbatim (verified against
 on failure per the convention, so a successful call carries no error label at
 all.
 
-Bucket boundaries are the one deliberate deviation: these histograms use
+There are three deliberate deviations, all recorded in
+`pkg/natsmetrics/rpcsemconv.go` rather than left implicit — a claimed
+conformance is worse than a stated deviation.
+
+The first is bucket boundaries: these histograms use
 `o11y.DefaultLatencyBuckets()` (11 boundaries), not the convention's own table
 (14). The SDK overrides the identical table for `http.server.*` so that p99 is
 directly comparable across services, and an RPC family on different boundaries
 would break exactly that. Interop is unaffected in the part that matters — a
 generic RPC panel still finds and groups these series by name and label; only
 `histogram_quantile`'s interpolation points differ.
+
+**Reading a p99 of 10 seconds.** `10` is the last finite boundary, so
+`histogram_quantile` cannot report a value above it: a route whose true p99 is
+120s reads as exactly 10. Treat any quantile sitting at 10 as "at least 10
+seconds, amount unknown" and reach for traces or the `_count`/`_sum` ratio
+instead. `docs/specs/o11y/storage-dependency-metrics.md` writes the same caveat
+for the storage families; it applies here for the same reason. Raising the
+ceiling is deliberately out of scope for the branch that introduced the method
+vocabulary.
+
+
+The second is `rpc.method`'s spelling. The convention asks for a
+fully-qualified name (its own example is `EchoService/Echo`); the values here
+are short (`rename_room`), chosen for Grafana readability. `service_name` is
+already a constant label on every series via `WithResourceAsConstantLabels`, so
+it carries the qualifier a fully-qualified name would —
+`service_name="room-service"` plus `rpc_method="rename_room"` is the same join
+key as `RoomService/RenameRoom`, split across two labels instead of one string.
+
+That reasoning covers `rpc.server.call.duration` only. On
+`rpc.client.call.duration` `service_name` is the **caller**, so the pair says who
+made the call rather than who served it, and carries no callee or
+destination-site label — it cannot attribute a slow dependency or a cross-site
+hop. The convention has `server.address` for that; this family does not emit it,
+which is a third deviation and the one worth closing first if the client family
+is ever read for cross-site health.
+The `_OTHER` fallback for an unrecognized method follows the convention
+unchanged.
 
 The two `chat.nats.client.*` families are the exception: they carry no `site`
 at all, because they are emitted from the opt-in connection helper, which sits
@@ -197,15 +229,20 @@ labels. `nats_slow_consumer_events_total` is scoped the same way.
 All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
 `not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
-Room and history operations are coarse bounded categories — `room_read`,
-`room_mutation`, `member_read`, `member_mutation`, `channel_history`,
-`thread_open`, `history_read`, `history_mutation`, `room_publish`,
-`member_publish`, `outbox_publish`. `channel_history` and `thread_open` are
-deliberately finer than the rest: each is the whole numerator and denominator of
-an SLO (SLO-4 and SLO-5), which the coarse `history_read` cannot serve because it
-also carries scroll, jump, single and batch reads, pinned lists and thread
-parents. Subject families that do not map normalize to `unknown` rather than
-minting a label.
+Publish operations stay subject-derived and coarse — `canonical_publish`,
+`client_response`, `recipient_publish`, `notification_publish`,
+`push_publish`, `thread_tcount`, `teams_user_upsert`, `room_publish`,
+`member_publish`, `outbox_publish` — and a subject that does not map normalizes
+to `unknown` rather than minting a label.
+
+`rpc.method`, by contrast, is supplied at route registration, not derived from
+the subject: each of the fleet's 92 routes declares its own lower-snake-case
+`<verb>_<object>[_qualifier]` method. A duplicate claim within a service is
+logged, not rejected; each service's `testdata/routes.golden` file is what
+is what pins one method per route in review, so there is no coarse-bucket collapsing left to
+describe — `list_channel_messages` (SLO-4) and `list_thread_messages` (SLO-5) are
+just two entries in that one-method-per-route vocabulary, not a finer carve-out
+of a shared category. See the metrics contract's §13.1.
 Raw subjects, room IDs, account IDs, site IDs parsed out of subject tokens, and
 error strings are never labels.
 

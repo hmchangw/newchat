@@ -87,7 +87,34 @@ Publisher / request-reply (label `site`):
 | `rpc_server_call_duration_seconds` | histogram | `rpc_method`, `error_type` | Inbound handler latency at the `natsrouter` boundary, same shape. SLO-4/5 read this; see [`docs/load-testing/common/sli-slo.md`](../../docs/load-testing/common/sli-slo.md) §3 for the good/valid expressions — the denominator is **not** the bare `_count`, because the 4xx classes are excluded from valid events. |
 
 Both RPC families carry `rpc_system_name="nats"`. `rpc_method` is a bounded operation, never the
-subject: services whose subjects have no operation mapping yet record `rpc_method="unknown"`.
+subject: it is declared at route registration (`natsrouter.Register`/`RegisterNoBody`/
+`RegisterOptionalBody` take a required `natsmetrics.RPCMethod` argument, and `.semgrep/rpcmethod.yml`
+is what forces that argument to be a `Method*` constant — the compiler alone accepts a bare string
+literal), and `RegisterVoid`
+routes (fire-and-forget, no reply) carry no method and record no `rpc_server_call_duration_seconds`
+sample at all — they are absent from this family, not present with an empty label.
+`rpc_method="_OTHER"` is **not** a fallback bucket for an unmapped subject. It should be zero in
+steady state — alert on any non-zero rate — but where it comes from differs by family, and so does
+what to go and look at:
+
+- On `rpc_server_call_duration_seconds` it means registration itself was wrong: an undeclared
+  method reached `addRPCRoute`, which the semgrep rule and each service's `routes_test.go` golden
+  test are meant to catch first. The offending pattern is named in one `slog.Error` at pod start,
+  and nowhere else — the metric carries no route identity, so past log retention the series says
+  a route degraded but not which.
+- On `rpc_client_call_duration_seconds` there is no registration to inspect. The label is
+  normalized at record time in `Publisher.RecordRPCClientCall`, so `_OTHER` there means a call
+  site passed a method outside the vocabulary. `.semgrep/rpcmethod.yml` is the only gate on that
+  path; there is no golden file for outbound calls.
+
+**Reading the p99.** These histograms use `o11y.DefaultLatencyBuckets()`, whose last finite
+boundary is `10`. A quantile cannot exceed it, so a p99 of exactly 10 means "at least 10 seconds,
+amount unknown", not "about 10 seconds".
+
+**`service_name` on the client family names the caller, not the callee.** The server family's
+`service_name` + `rpc_method` identifies one handler; the client family's identifies *who made the
+call*, with no callee or destination-site label, so it cannot attribute a slow dependency or a
+cross-site hop. semconv supplies `server.address` for this and it is not emitted today.
 
 **`pkg/cachemetrics`** — `cache_hits_total` / `cache_misses_total` / `cache_errors_total`, labels
 `cache`, `tier`. A collapsing hit ratio or rising `cache_errors_total` = a cache tier degraded → backing-store load rises.
