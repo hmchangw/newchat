@@ -349,6 +349,12 @@ func main() {
 			sem <- struct{}{}
 			wg.Add(1)
 			go func(msgCtx context.Context, msg jetstream.Msg) {
+				// Next hands the message over with its receive span already
+				// ended, so without this one the identity the handler
+				// establishes lands on a closed span and is dropped, and
+				// nothing times the processing. See obs.DeliveryTracer.
+				msgCtx, span := consumerMetrics.StartHandling(msgCtx)
+				defer span.End()
 				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msg = tracked
 				msgCtx = tracked.Context(msgCtx)

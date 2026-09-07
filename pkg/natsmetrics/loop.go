@@ -53,6 +53,12 @@ func Consume(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers,
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(msgCtx context.Context, msg jetstream.Msg) {
+			// The ctx Next returned carries a span otel-nats already ended at
+			// handover; without this one, every attribute the worker sets on
+			// the current span is dropped and nothing times the processing.
+			msgCtx, span := consumer.StartHandling(msgCtx)
+			defer span.End()
+
 			eventType := EventUnknown
 			if classify != nil {
 				eventType = NormalizeEventType(string(classify(msg)))

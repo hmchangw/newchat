@@ -15,7 +15,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/obs"
 )
 
 // fakeJetstreamMsg implements the full jetstream.Msg interface (a superset of
@@ -393,4 +398,53 @@ func TestConsumeLoop_DrainsEarlyWhenMentionsCrossTheBudget(t *testing.T) {
 
 	assert.NotEmpty(t, store.mentions,
 		"the batch must drain on the budget rather than wait for a ticker that has not run")
+}
+
+// TestConsumeLoop_DeliverySpanCarriesIdentity is the regression test for
+// identity vanishing from this worker's traces. otel-nats ends each pull
+// delivery's receive span at handover, so the ctx Next returns already carries
+// a closed span and obs.ContextWithIdentity's SetAttributes on it is dropped.
+// The loop must open a span of its own that is still live when identity is
+// established.
+func TestConsumeLoop_DeliverySpanCarriesIdentity(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		_ = tp.Shutdown(context.Background())
+	})
+	t.Setenv("O11Y_ENABLED", "true")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	t.Setenv("OTEL_SERVICE_NAME", "roomlist-worker-span-test")
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "0")
+	_, shutdown, err := obs.Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	// obs.Init installs its own provider as the global; the recorder is what
+	// this test needs to read back.
+	otel.SetTracerProvider(tp)
+
+	good := &fakeJetstreamMsg{
+		subject: "chat.msg.canonical.site-a.created",
+		data:    wellFormedEventBytes(t),
+		headers: nats.Header{},
+	}
+	iter := &fakeIterator{msgs: []jetstream.Msg{good}}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	consumeLoop(iter, newFlusher(&stubStore{}, 0, 0), &wg, &consumeState{})
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1, "the consume loop must open one span per delivery")
+	attrs := make(map[string]string)
+	for _, attr := range ended[0].Attributes() {
+		attrs[string(attr.Key)] = attr.Value.AsString()
+	}
+	assert.Equal(t, "r1", attrs[obs.RoomIDKey], "the event's room must land on a live span")
+	assert.Equal(t, "site-a", attrs[obs.SiteIDKey])
 }

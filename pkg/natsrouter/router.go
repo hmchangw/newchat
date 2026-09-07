@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/obs"
 )
 
 // Router manages NATS subscriptions with pattern-based routing and middleware.
@@ -209,6 +210,17 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 	all = append(all, traceIdentity(r.siteID))
 	all = append(all, handlers...)
 
+	// otel-nats opens the consumer span around the callback below and ends it
+	// the moment that callback returns — before the spawned goroutine has run a
+	// single middleware — so traceIdentity's SetAttributes would land on a
+	// closed span and the consumer span would time dispatch rather than the
+	// request. See obs.DeliveryTracer. Resolved here, at registration, rather
+	// than per delivery: the lookup takes the provider's lock.
+	tracer := obs.DeliveryTracer()
+	// Named after the subscription's wildcard subject, never the delivered one,
+	// which carries the account and room id.
+	spanName := "handle " + rt.natsSubject
+
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {
 		started := time.Now()
 		operation := natsmetrics.RequestOperationFromSubject(m.Subject)
@@ -229,6 +241,10 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 		go func() {
 			defer r.wg.Done()
 			defer release()
+			// Registered before every defer below so it runs last: the span
+			// covers the panic backstop and the metrics record too.
+			msgCtx, span := tracer.Start(msgCtx, spanName)
+			defer span.End()
 			// Process-safety backstop: catch any panic that bypassed
 			// user-installed Recovery middleware. Recovery middleware (when
 			// configured via r.Use) catches first and sends a structured

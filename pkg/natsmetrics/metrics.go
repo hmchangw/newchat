@@ -22,6 +22,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/hmchangw/chat/pkg/obs"
 )
 
 // ScopeName is the instrumentation scope for every instrument in this package.
@@ -292,16 +295,46 @@ type Consumer struct {
 	loopOpt metric.MeasurementOption
 	message *optTable[consumerKey]
 	termOpt *optTable[terminalKey]
+	span    string
+	tracer  trace.Tracer
 	up      atomic.Bool
+}
+
+// consumerSpanName names Consume's processing span after the consumer rather
+// than the message subject: a subject carries the room id and the account, and
+// span names are a cardinality-sensitive dimension in every trace backend.
+func consumerSpanName(cfg ConsumerConfig) string {
+	return "handle " + cfg.Stream + "/" + cfg.Consumer
+}
+
+// spanName tolerates a nil or zero-value Consumer for the same reason Track
+// and Finish do — the worker loops call it unconditionally.
+func (c *Consumer) spanName() string {
+	if c == nil || c.span == "" {
+		return "handle nats delivery"
+	}
+	return c.span
+}
+
+// StartHandling opens the span covering one delivery's processing and returns
+// it for the caller to End. Consume calls it; worker loops that roll their own
+// pull loop must call it too. See obs.DeliveryTracer for why a consume loop
+// cannot use the span it was handed.
+func (c *Consumer) StartHandling(ctx context.Context) (context.Context, trace.Span) {
+	if c == nil || c.tracer == nil {
+		return obs.DeliveryTracer().Start(ctx, c.spanName())
+	}
+	return c.tracer.Start(ctx, c.spanName())
 }
 
 func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
 	// A nil Metrics means metrics are toggled off. Return a live Consumer with
 	// no instruments rather than nil: the worker loops call Track and Finish
 	// unconditionally, and every recorder below already guards on a nil
-	// metrics field.
+	// metrics field. The span name is set on both paths because the trace and
+	// metrics pillars toggle independently.
 	if m == nil {
-		return &Consumer{}
+		return &Consumer{span: consumerSpanName(cfg), tracer: obs.DeliveryTracer()}
 	}
 	base := []attribute.KeyValue{
 		attribute.String("site", cfg.Site),
@@ -316,6 +349,8 @@ func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
 	}
 	return &Consumer{
 		metrics: m,
+		span:    consumerSpanName(cfg),
+		tracer:  obs.DeliveryTracer(),
 		loopOpt: metric.WithAttributes(base...),
 		message: newOptTable(func(key consumerKey) metric.MeasurementOption {
 			return withEvent(key.event, attribute.String("outcome", string(key.outcome)))

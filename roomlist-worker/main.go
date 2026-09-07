@@ -221,6 +221,10 @@ func main() {
 	)
 }
 
+// consumeSpanName names consumeLoop's per-delivery span. It is bounded by the
+// consumer rather than the delivered subject, which carries the room id.
+const consumeSpanName = "handle MESSAGES-CANONICAL/roomlist-worker"
+
 // messageIterator is the slice of the o11y/nats MessagesContext the consume loop
 // drives — an interface so the loop is testable without a live consumer.
 type messageIterator interface {
@@ -333,6 +337,11 @@ func (s *consumeState) Check() health.Check {
 // consumeState.
 func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *consumeState) {
 	defer wg.Done()
+	// Resolved once, here, rather than per message: the lookup takes the
+	// provider's lock. Next hands each message over with its receive span
+	// already ended, so without a span of this loop's own the identity set
+	// below is written to a closed span and dropped — see obs.DeliveryTracer.
+	tracer := obs.DeliveryTracer()
 	for {
 		msgCtx, msg, err := iter.Next()
 		if err != nil {
@@ -362,6 +371,8 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 		// the stream. On panic the message stays un-acked and JetStream
 		// redelivers it after AckWait, same as any other transient failure.
 		jobguard.Guard(msg.Subject(), func() {
+			msgCtx, span := tracer.Start(msgCtx, consumeSpanName)
+			defer span.End()
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 
 			var evt eventProjection
