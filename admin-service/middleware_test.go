@@ -34,7 +34,7 @@ func newTestContext(method, path, authHeader string) (*gin.Context, *httptest.Re
 func TestRequireAdmin(t *testing.T) {
 	const (
 		// #nosec G101 -- fake fixture, not a live credential.
-		// nosemgrep: gosec.G101-1
+		// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 		rawToken       = "valid-raw-token-abc123"
 		configuredSite = "site-local"
 	)

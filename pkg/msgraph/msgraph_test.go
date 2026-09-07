@@ -922,7 +922,7 @@ func TestProxyCredentials_SentAsBasicAuth(t *testing.T) {
 // parsed host if it were inlined, so it must survive verbatim here.
 func TestProxyCredentials_SpecialCharactersNeedNoEncoding(t *testing.T) {
 	// #nosec G101 -- fixture password for a local httptest proxy, not a real credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const password = "p@ss:w/rd?#%"
 	c, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
@@ -1035,6 +1035,8 @@ func TestProxyCredentials_PasswordWithoutUsernameFails(t *testing.T) {
 // proxy settings reach a log line. errcode.Classify writes construction errors
 // to the server log, and CLAUDE.md forbids logging passwords.
 func TestProxyCredentials_ErrorNeverLeaksPassword(t *testing.T) {
+	// Fixture proxy password; the test asserts it never reaches an error string.
+	// nosemgrep: hardcoded-credential-literal
 	const password = "sup3rs3cr3t"
 	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
 		t.Run(proxy, func(t *testing.T) {
@@ -1123,6 +1125,9 @@ func TestNewDirectoryClient_InvalidProxyURL(t *testing.T) {
 // in the returned error — and from there into the server log via
 // errcode.Classify. Redacted() cannot help, since it needs a parsed URL.
 func TestProxyCredentials_MalformedURLNeverLeaksEmbeddedPassword(t *testing.T) {
+	// Fixture password embedded in a malformed proxy URL; the test asserts no parse
+	// error carries it.
+	// nosemgrep: hardcoded-credential-literal
 	const password = "sup3rs3cr3t"
 	for _, proxy := range []string{
 		"://user:" + password + "@proxy.corp:8080",
@@ -1252,6 +1257,9 @@ func TestApplyProxy_AllowsColonInSocksUsername(t *testing.T) {
 // Opaque, leaving User nil — so Redacted(), which only masks a populated User,
 // returns the raw string password and all. No error may interpolate the value.
 func TestProxyCredentials_SchemelessURLNeverLeaksPassword(t *testing.T) {
+	// Fixture password in a schemeless proxy URL; the test asserts the value never
+	// reaches the returned error.
+	// nosemgrep: hardcoded-credential-literal
 	const password = "supersecret"
 	for _, proxy := range []string{
 		"user:" + password + "@proxy.corp:8080",
@@ -1270,6 +1278,9 @@ func TestProxyCredentials_SchemelessURLNeverLeaksPassword(t *testing.T) {
 // send ":secret", which an authenticating proxy answers with 407 — after
 // construction has already succeeded.
 func TestApplyProxy_RejectsEmbeddedEmptyUsername(t *testing.T) {
+	// Fixture password in userinfo the constructor must reject; the test asserts the
+	// rejection does not carry it.
+	// nosemgrep: hardcoded-credential-literal
 	const password = "secret"
 	_, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
@@ -1299,6 +1310,9 @@ func TestApplyProxy_RejectsPortWithoutHostname(t *testing.T) {
 // deployment this setting exists for — so the warning is the whole mitigation
 // and must actually fire, without quoting the credentials.
 func TestApplyProxy_WarnsOnUnencryptedCredentialHop(t *testing.T) {
+	// Fixture password for the unencrypted-hop warning; the test asserts the warning
+	// fires without quoting the credentials.
+	// nosemgrep: hardcoded-credential-literal
 	const password = "sup3rs3cr3t"
 	tests := []struct {
 		name     string

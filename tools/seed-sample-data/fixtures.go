@@ -32,7 +32,7 @@ var seedBaseTime = time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
 // expects (see botplatform-service/handler.go).
 const (
 	// #nosec G101 -- local dev sample-data seed, not a production credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	demoAdminPassword   = "AdminDev123!"
 	demoAdminBcryptHash = "$2a$10$yqCFQ.M73mHH7yoHAtvHxuc61Q3yktq1TYMyiTTYBsBGPPABSDayK"
 )

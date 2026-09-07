@@ -36,7 +36,7 @@ const (
 	testSiteID  = "site-a"
 	testAccount = "alice"
 	// #nosec G101 -- fabricated test fixture, not a live credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	testSSOToken = "tok-integration"
 )
 

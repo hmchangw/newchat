@@ -79,8 +79,16 @@ GOVULNCHECK := $(GOBIN_DIR)/govulncheck
 # (loadgen, nats-debug) that are not deployed services; chat-frontend is
 # JS. -tests=true scans *_test.go so PR gating catches issues in test code
 # too (mocks are filtered by -exclude-generated). Gate: medium+ severity.
+#
+# .semgrep holds the rule fixtures, whose whole purpose is to contain
+# deliberate violations — SEMGREP_FLAGS excludes it for the same reason. gosec
+# walks the tree itself rather than going through the Go toolchain, so a dot
+# directory does not fall out of scope the way it does for go build; the
+# exclusion has to be explicit or a fixture's planted credential reads as a
+# real G101.
 GOSEC_FLAGS := -quiet -severity medium -confidence low -tests=true \
-               -exclude-generated -exclude-dir=tools -exclude-dir=testdata
+               -exclude-generated -exclude-dir=tools -exclude-dir=testdata \
+               -exclude-dir=.semgrep
 
 # semgrep: fail on medium+ (WARNING/ERROR; INFO is informational/low).
 SEMGREP_FLAGS := --error --severity=WARNING --severity=ERROR --metrics=off \

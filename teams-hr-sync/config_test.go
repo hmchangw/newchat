@@ -134,6 +134,8 @@ func TestConfig_GraphProxy(t *testing.T) {
 	e := validEnv()
 	e["GRAPH_PROXY_URL"] = "http://proxy.corp:8080"
 	e["GRAPH_PROXY_USERNAME"] = "proxyuser"
+	// Fixture proxy password for a config-parsing test, not a live credential.
+	// nosemgrep: hardcoded-credential-literal
 	e["GRAPH_PROXY_PASSWORD"] = "p@ss:w/rd"
 
 	cfg, err := env.ParseAsWithOptions[config](env.Options{Environment: e})

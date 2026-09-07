@@ -30,7 +30,7 @@ type VaultHandle struct {
 
 const (
 	// #nosec G101 -- root token for an ephemeral test container, not a production credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	vaultRootToken    = "test-root-token"
 	vaultTransitMount = "transit"
 )
