@@ -1036,7 +1036,7 @@ func TestProxyCredentials_PasswordWithoutUsernameFails(t *testing.T) {
 // to the server log, and CLAUDE.md forbids logging passwords.
 func TestProxyCredentials_ErrorNeverLeaksPassword(t *testing.T) {
 	// Fixture proxy password; the test asserts it never reaches an error string.
-	// nosemgrep: hardcoded-credential-literal
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const password = "sup3rs3cr3t"
 	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
 		t.Run(proxy, func(t *testing.T) {
@@ -1127,7 +1127,7 @@ func TestNewDirectoryClient_InvalidProxyURL(t *testing.T) {
 func TestProxyCredentials_MalformedURLNeverLeaksEmbeddedPassword(t *testing.T) {
 	// Fixture password embedded in a malformed proxy URL; the test asserts no parse
 	// error carries it.
-	// nosemgrep: hardcoded-credential-literal
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const password = "sup3rs3cr3t"
 	for _, proxy := range []string{
 		"://user:" + password + "@proxy.corp:8080",
@@ -1259,7 +1259,7 @@ func TestApplyProxy_AllowsColonInSocksUsername(t *testing.T) {
 func TestProxyCredentials_SchemelessURLNeverLeaksPassword(t *testing.T) {
 	// Fixture password in a schemeless proxy URL; the test asserts the value never
 	// reaches the returned error.
-	// nosemgrep: hardcoded-credential-literal
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const password = "supersecret"
 	for _, proxy := range []string{
 		"user:" + password + "@proxy.corp:8080",
@@ -1280,7 +1280,7 @@ func TestProxyCredentials_SchemelessURLNeverLeaksPassword(t *testing.T) {
 func TestApplyProxy_RejectsEmbeddedEmptyUsername(t *testing.T) {
 	// Fixture password in userinfo the constructor must reject; the test asserts the
 	// rejection does not carry it.
-	// nosemgrep: hardcoded-credential-literal
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const password = "secret"
 	_, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
@@ -1312,7 +1312,7 @@ func TestApplyProxy_RejectsPortWithoutHostname(t *testing.T) {
 func TestApplyProxy_WarnsOnUnencryptedCredentialHop(t *testing.T) {
 	// Fixture password for the unencrypted-hop warning; the test asserts the warning
 	// fires without quoting the credentials.
-	// nosemgrep: hardcoded-credential-literal
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const password = "sup3rs3cr3t"
 	tests := []struct {
 		name     string
