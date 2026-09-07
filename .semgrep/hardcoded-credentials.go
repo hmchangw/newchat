@@ -101,8 +101,24 @@ func qualifiedNames() {
 	proxyPassword := "value-that-is-long-enough" // nosemgrep: gosec.G101-1
 	// ruleid: hardcoded-credential-literal
 	clientSecretValue := "value-that-is-long-enough" // nosemgrep: gosec.G101-1
+	// usernamePassword is the case that made the name exclusions anchored. An
+	// unanchored "name" matches the middle of this identifier and vetoed it.
+	// ruleid: hardcoded-credential-literal
+	usernamePassword := "value-that-is-long-enough" // nosemgrep: gosec.G101-1
 
-	_, _ = proxyPassword, clientSecretValue
+	_, _, _ = proxyPassword, clientSecretValue, usernamePassword
+}
+
+// valueForms pins the two literal shapes the value regex accepts. The escaped
+// case is the one a naive regex misses: an embedded quote must not end the
+// match, or `"p\"ass"` reads as a non-literal and walks straight past the gate.
+func valueForms() {
+	// ruleid: hardcoded-credential-literal
+	escapedPassword := "p\"ass" // nosemgrep: gosec.G101-1
+	// ruleid: hardcoded-credential-literal
+	rawSecret := `raw-string-secret` // nosemgrep: gosec.G101-1
+
+	_, _ = escapedPassword, rawSecret
 }
 
 // --- negatives: shapes the rule must not flag ---
