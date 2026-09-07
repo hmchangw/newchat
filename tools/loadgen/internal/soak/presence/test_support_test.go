@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/tools/loadgen/internal/soak/read"
 	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
@@ -33,17 +32,6 @@ type testSleeper struct{}
 
 func (*testSleeper) Sleep(ctx context.Context, _ time.Duration) error {
 	return ctx.Err()
-}
-
-type testReadRecorder struct {
-	mu      sync.Mutex
-	samples []read.Sample
-}
-
-func (r *testReadRecorder) Record(sample *read.Sample) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.samples = append(r.samples, *sample)
 }
 
 type testObserver struct {
@@ -97,13 +85,18 @@ func (o *testObserver) connection(status model.PresenceStatus) int {
 	return o.connections[status]
 }
 
-func testTopology(candidates int) *topology.Topology {
-	users := make([]model.User, 0, candidates+2)
-	for i := range candidates + 2 {
+// testTopology builds the pair every presence test runs against. It took a
+// candidate count that never reached the caller — both call sites got exactly
+// these two users whatever they asked for — so the knob is gone rather than
+// made real: widening the population would change the fixture the assertions
+// on user-a0 and user-b0 are written against.
+func testTopology() *topology.Topology {
+	users := make([]model.User, 0, 2)
+	for i := range 2 {
 		users = append(users, model.User{
 			ID:      "u" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
 			Account: "user-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
 		})
 	}
-	return &topology.Topology{ActiveUsers: users[:2]}
+	return &topology.Topology{ActiveUsers: users}
 }

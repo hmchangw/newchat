@@ -62,7 +62,7 @@ func newPresenceFixture(t *testing.T, queryShare float64, reply []byte) *presenc
 		observer:  newTestObserver(),
 		now:       time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
 	}
-	topology := testTopology(3)
+	topology := testTopology()
 	lane, err := New(
 		Config{
 			SiteID: "site-a", Connections: 2, QueryShare: queryShare,
@@ -73,7 +73,7 @@ func newPresenceFixture(t *testing.T, queryShare float64, reply []byte) *presenc
 		fixture.publisher,
 		rpc.NewClient(fixture.transport, rpc.RetryConfig{MaxAttempts: 1}, &testSleeper{}, nil),
 		fixture.observer,
-		&testReadRecorder{},
+		nil,
 		rand.New(rand.NewSource(1)),
 		func() time.Time { return fixture.now },
 	)
@@ -258,7 +258,7 @@ func TestSoakPresenceLane_RejectsInvalidConstruction(t *testing.T) {
 	require.Error(t, err)
 
 	_, err = New(
-		Config{SiteID: "site-a"}, testTopology(1), nil, nil, nil, nil,
+		Config{SiteID: "site-a"}, testTopology(), nil, nil, nil, nil,
 		nil, nil,
 	)
 	require.Error(t, err)
