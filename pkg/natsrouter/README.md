@@ -23,7 +23,7 @@ router := natsrouter.Default(nc, "my-service")
 // Add HandlerTimeout explicitly — duration varies per service.
 router.Use(natsrouter.HandlerTimeout(5 * time.Second))
 
-natsrouter.Register(router, "chat.user.{account}.msg.send", svc.SendMessage)
+natsrouter.Register(router, "chat.user.{account}.request.room.{roomID}.site-a.rename", natsmetrics.MethodRenameRoom, svc.RenameRoom)
 
 // On shutdown:
 router.Shutdown(ctx)
@@ -99,7 +99,7 @@ When admission control is enabled, a non-blocking acquire on a semaphore inside 
 
 ### Important properties
 
-- **Per-route overrides are not supported today.** A single router-wide semaphore (when admission control is enabled) covers every route. The `Registrar` interface is intentionally minimal so a future wrapper (e.g. a route group with its own admission semaphore) can be added without breaking the existing API. Route-level isolation should wait until real evidence of noisy-neighbor contention surfaces in production.
+- **Per-route overrides are not supported today.** A single router-wide semaphore (when admission control is enabled) covers every route. The registrars take `*Router` directly, so a future wrapper (e.g. a route group with its own admission semaphore) would need an interface introduced first. Route-level isolation should wait until real evidence of noisy-neighbor contention surfaces in production.
 
 - **Per-subject FIFO ordering is NOT preserved.** Two messages that arrive on the same subscription are spawned into independent goroutines and race; whichever wins the goroutine schedule runs first. Handlers must be idempotent or use external coordination (Cassandra LWTs, Mongo conditional updates) to ensure correctness under concurrent invocation.
 
@@ -165,33 +165,37 @@ func WithMaxConcurrency(n int) Option
 
 ### Registration Functions
 
-All accept a `Registrar` (currently `*Router`). They are free functions, not `*Router` methods, because Go's type-parameter rules (as of Go 1.22) do not permit type parameters on methods. `Register[Req, Resp]`'s typed handlers can only live on a free function.
+All accept a `*Router`. They are free functions, not `*Router` methods, because Go's type-parameter rules (as of Go 1.22) do not permit type parameters on methods. `Register[Req, Resp]`'s typed handlers can only live on a free function.
 
 ```go
 // Request body + JSON response. The standard request/reply handler.
 func Register[Req, Resp any](
-    r Registrar,
+    r *Router,
     pattern string,
+    method natsmetrics.RPCMethod,
     fn func(c *Context, req Req) (*Resp, error),
 )
 
 // No request body, JSON response. For GET-style lookups where all data is in the subject.
 func RegisterNoBody[Resp any](
-    r Registrar,
+    r *Router,
     pattern string,
+    method natsmetrics.RPCMethod,
     fn func(c *Context) (*Resp, error),
 )
 
 // Request body, no response. For fire-and-forget events.
 // CAUTION: messages on saturated routers are silently dropped (see Concurrency Model).
 func RegisterVoid[Req any](
-    r Registrar,
+    r *Router,
     pattern string,
     fn func(c *Context, req Req) error,
 )
 ```
 
 All three **panic** if the NATS subscription fails. This is intentional — registration happens at startup, and a failed subscription means the service cannot function (same pattern as `http.HandleFunc`).
+
+`Register`, `RegisterNoBody`, and `RegisterOptionalBody` do **not** panic over `method`. If `method` is not a valid, declared member of the `natsmetrics` RPC method vocabulary (`RPCMethod.Valid()` is false — this covers `""` and an unregistered string), `addRPCRoute` logs via `slog.Error` and degrades the route to `natsmetrics.MethodOther` (`"_OTHER"`) instead. If `method` is already claimed by another route registered on the same router, it also logs and registers the route anyway — both routes stay live, but their samples merge into one `rpc_method` series. Neither case stops the process: metrics are opt-in (`NewFromProviderIfEnabled`), so panicking here would kill a service over a value it might not even record. The real gates are earlier — `.semgrep/rpcmethod.yml` requires `method` to be a `natsmetrics.Method*` selector written at the call site (a string literal, an `RPCMethod(...)` conversion, a variable, and `MethodOther` are all refused), and each service's `routes_test.go` (comparing `Router.Routes()` to `testdata/routes.golden`) catches a valid-but-wrong constant and refuses a table that contains `MethodOther` at all. `RegisterVoid` takes no method and is unaffected by either check; its routes never appear in `Routes()`.
 
 ### Context
 
@@ -354,19 +358,19 @@ Three handler shapes for three use cases:
 |----------|-------------|----------|----------|
 | `Register[Req, Resp]` | Yes | Yes | Standard request/reply (most endpoints) |
 | `RegisterNoBody[Resp]` | No | Yes | GET-style lookups where subject has all info |
-| `RegisterVoid[Req]` | Yes | No | Fire-and-forget events (under `WithMaxConcurrency` saturation: dropped with a Warn log; under unbounded default: always spawns) |
+| `RegisterVoid[Req]` | Yes | No | Fire-and-forget events (under `WithMaxConcurrency` saturation: dropped with a Warn log; under unbounded default: always spawns). Takes no `method` argument and records no `rpc.server.call.duration` sample — a route with no reply subject is not an RPC call. |
 
 ```go
 // Request/reply — the most common pattern.
-natsrouter.Register(router, "chat.user.{account}.msg.send",
-    func(c *natsrouter.Context, req SendRequest) (*SendResponse, error) {
-        account := c.Param("account")
+natsrouter.Register(router, "chat.user.{account}.request.room.{roomID}.site-a.rename", natsmetrics.MethodRenameRoom,
+    func(c *natsrouter.Context, req RenameRoomRequest) (*Room, error) {
+        roomID := c.Param("roomID")
         // ... business logic ...
-        return &SendResponse{ID: msg.ID}, nil
+        return &Room{ID: roomID, Name: req.Name}, nil
     })
 
 // GET-style — no request body needed.
-natsrouter.RegisterNoBody(router, "chat.user.{account}.rooms.get.{roomID}",
+natsrouter.RegisterNoBody(router, "chat.user.{account}.request.room.{roomID}.site-a.open", natsmetrics.MethodOpenRoom,
     func(c *natsrouter.Context) (*Room, error) {
         return store.FindRoom(c, c.Param("roomID"))
     })

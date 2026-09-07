@@ -38,8 +38,8 @@ func startOtelNATS(t *testing.T) *o11ynats.Conn {
 func TestHistoryMessageReader_RecordsBoundedRequestResult(t *testing.T) {
 	nc := startOtelNATS(t)
 	recorder := NewMockrequestRecorder(gomock.NewController(t))
-	recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationHistoryGetMessage, gomock.Any(), gomock.Nil()).
-		Do(func(_ context.Context, _ natsmetrics.Operation, duration time.Duration, _ error) {
+	recorder.EXPECT().RecordRPCClientCall(gomock.Any(), natsmetrics.MethodGetMessage, gomock.Any(), gomock.Nil()).
+		Do(func(_ context.Context, _ natsmetrics.RPCMethod, duration time.Duration, _ error) {
 			assert.GreaterOrEqual(t, duration, time.Duration(0))
 		})
 	const siteID = "site-a"
@@ -73,7 +73,7 @@ func TestHistoryMessageReader_RecordsFinalRequestFailure(t *testing.T) {
 				require.NoError(t, err)
 			}
 			recorder := NewMockrequestRecorder(gomock.NewController(t))
-			recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationHistoryGetMessage, gomock.Any(), gomock.Not(gomock.Nil()))
+			recorder.EXPECT().RecordRPCClientCall(gomock.Any(), natsmetrics.MethodGetMessage, gomock.Any(), gomock.Not(gomock.Nil()))
 			r := newHistoryMessageReader(nc, siteID, withHistoryRequestRecorder(recorder))
 
 			_, _, err := r.GetMessageReadMeta(context.Background(), "alice", "room-a", "message-a")
@@ -235,6 +235,26 @@ func TestHistoryMessageReader_GetMessageReadMeta(t *testing.T) {
 		assert.False(t, found)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unmarshal")
+	})
+
+	// Parse recognises this envelope; Code.Valid() does not. Gating the whole
+	// branch on Valid() let an unrecognised code fall through to the decoder,
+	// which ignores unknown fields, so the call returned zero-value read meta,
+	// a nil error, and a success sample.
+	t.Run("unknown remote error code — returns error, not a zero-value success", func(t *testing.T) {
+		nc := startOtelNATS(t)
+
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
+		})
+		require.NoError(t, err)
+
+		r := newHistoryMessageReader(nc, siteID)
+		meta, found, err := r.GetMessageReadMeta(context.Background(), account, roomID, messageID)
+		require.Error(t, err)
+		assert.False(t, found)
+		assert.Equal(t, MessageReadMeta{}, meta)
+		assert.Contains(t, err.Error(), "upstream_only_code")
 	})
 
 	t.Run("no responder degrades to unavailable", func(t *testing.T) {

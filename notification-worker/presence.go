@@ -76,22 +76,31 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 				slog.Warn("presence marshal failed", "error", err)
 				return
 			}
+			// resultErr is the chunk's final outcome, not the transport's. This
+			// lane degrades by logging and returning, so a remote errcode
+			// envelope and a decode failure both reach the recorder as a
+			// successful read unless they are captured — which labelled two of
+			// the three failure modes success and lost error.type.
+			var resultErr error
 			started := time.Now()
+			defer func() {
+				b.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodGetPresenceSnapshot, time.Since(started), resultErr)
+			}()
 			msg, err := b.req.Request(ctx, subj, data, b.timeout)
-			b.metrics.Request(ctx, natsmetrics.OperationPresenceLookup, time.Since(started), err)
 			if err != nil {
+				resultErr = err
 				slog.Warn("presence rpc failed", "error", err, "chunk", len(ch))
 				return
 			}
-			if errResp, ok := errcode.Parse(msg.Data); ok {
+			if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+				resultErr = remoteErr
 				slog.Warn("presence rpc returned error response",
-					"error", errResp.Message,
-					"code", errResp.Code,
-					"chunk", len(ch))
+					"error", remoteErr, "chunk", len(ch))
 				return
 			}
 			var reply model.PresenceSnapshotReply
 			if err := sonic.Unmarshal(msg.Data, &reply); err != nil {
+				resultErr = err
 				slog.Warn("presence unmarshal failed", "error", err)
 				return
 			}

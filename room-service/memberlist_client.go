@@ -36,7 +36,7 @@ type natsMemberListClient struct {
 }
 
 type requestRecorder interface {
-	Request(context.Context, natsmetrics.Operation, time.Duration, error)
+	RecordRPCClientCall(context.Context, natsmetrics.RPCMethod, time.Duration, error)
 }
 
 type memberListClientOption func(*natsMemberListClient)
@@ -93,13 +93,20 @@ func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string
 		if errors.Is(outcome, errNotRoomMember) {
 			outcome = nil
 		}
-		c.metrics.Request(ctx, natsmetrics.OperationMemberRead, time.Since(started), outcome)
+		c.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodListMembers, time.Since(started), outcome)
 	}()
 	reply, err := c.nc.RequestMsgWithContext(reqCtx, out)
 	if err != nil {
 		return nil, fmt.Errorf("member.list request to %s: %w", ch.SiteID, err)
 	}
 
+	// Deliberately not errcode.FromReply: this site remaps a remote reason onto a
+	// local sentinel and needs the parsed envelope's Reason before deciding, and
+	// it degrades a non-canonical envelope to Internal-with-a-warn rather than to
+	// an untyped error so a legacy peer is still classifiable. It already handles
+	// the unrecognised-code case, which is what FromReply exists to stop people
+	// forgetting; any new outbound client should use FromReply instead.
+	// nosemgrep: remote-envelope-must-use-fromreply -- remaps a remote Reason onto a local sentinel and needs the parsed envelope before deciding; already handles !Code.Valid() by degrading to Internal with a warn
 	if ee, ok := errcode.Parse(reply.Data); ok {
 		// Map the remote not-member reason back onto the local sentinel so callers
 		// can use errors.Is(err, errNotRoomMember) uniformly regardless of which

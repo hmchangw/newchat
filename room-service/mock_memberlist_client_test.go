@@ -82,14 +82,14 @@ func (m *MockrequestRecorder) EXPECT() *MockrequestRecorderMockRecorder {
 	return m.recorder
 }
 
-// Request mocks base method.
-func (m *MockrequestRecorder) Request(arg0 context.Context, arg1 natsmetrics.Operation, arg2 time.Duration, arg3 error) {
+// RecordRPCClientCall mocks base method.
+func (m *MockrequestRecorder) RecordRPCClientCall(arg0 context.Context, arg1 natsmetrics.RPCMethod, arg2 time.Duration, arg3 error) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Request", arg0, arg1, arg2, arg3)
+	m.ctrl.Call(m, "RecordRPCClientCall", arg0, arg1, arg2, arg3)
 }
 
-// Request indicates an expected call of Request.
-func (mr *MockrequestRecorderMockRecorder) Request(arg0, arg1, arg2, arg3 any) *gomock.Call {
+// RecordRPCClientCall indicates an expected call of RecordRPCClientCall.
+func (mr *MockrequestRecorderMockRecorder) RecordRPCClientCall(arg0, arg1, arg2, arg3 any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Request", reflect.TypeOf((*MockrequestRecorder)(nil).Request), arg0, arg1, arg2, arg3)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecordRPCClientCall", reflect.TypeOf((*MockrequestRecorder)(nil).RecordRPCClientCall), arg0, arg1, arg2, arg3)
 }

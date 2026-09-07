@@ -52,21 +52,29 @@ type parentMessageProjection struct {
 // and projects it to ParentMessageInfo. account is the reply sender, who can always
 // see the parent they are replying to. Any error (timeout, no responder, remote
 // errcode envelope, unmarshal) is wrapped and returned so the caller NAKs.
-func (f *historyParentFetcher) FetchParent(ctx context.Context, account, roomID, siteID, messageID string) (*ParentMessageInfo, error) {
+func (f *historyParentFetcher) FetchParent(ctx context.Context, account, roomID, siteID, messageID string) (_ *ParentMessageInfo, resultErr error) {
 	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
 		return nil, errcode.MarshalFailed("GetMessageByID request", err)
 	}
+	// Recorded from the function's final outcome, not from nc.Request's return.
+	// A remote errcode envelope and a decode failure both arrive as a
+	// successful transport read, so recording at the call site labelled them
+	// success and lost error.type — the client histogram then disagreed with
+	// the callee's server histogram about whether the call failed.
 	started := time.Now()
+	defer func() {
+		f.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodGetMessage, time.Since(started), resultErr)
+	}()
 	msg, err := f.nc.Request(ctx, subject.MsgGet(account, roomID, siteID), reqBytes, parentFetchTimeout)
-	f.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
 	if err != nil {
 		return nil, natsutil.RequestFailure(fmt.Sprintf("history request for parent %s", messageID), err)
 	}
-	// The errcode envelope has a top-level "error"; a real Message never does, so this
-	// can't false-positive. Propagate the typed remote error for accurate classification.
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 	var parent parentMessageProjection
 	if err := sonic.Unmarshal(msg.Data, &parent); err != nil {

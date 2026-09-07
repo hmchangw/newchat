@@ -71,26 +71,32 @@ type quotedParentProjection struct {
 func (f *historyParentFetcher) FetchQuotedParent(
 	ctx context.Context,
 	account, roomID, siteID, messageID string,
-) (*cassandra.QuotedParentMessage, error) {
+) (_ *cassandra.QuotedParentMessage, resultErr error) {
 	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
 		return nil, errcode.MarshalFailed("GetMessageByID request", err)
 	}
 
 	subj := subject.MsgGet(account, roomID, siteID)
+	// Recorded from the function's final outcome, not from nc.Request's return.
+	// A remote errcode envelope and a decode failure both arrive as a
+	// successful transport read, so recording at the call site labelled them
+	// success and lost error.type — the client histogram then disagreed with
+	// the callee's server histogram about whether the call failed.
 	started := time.Now()
+	defer func() {
+		f.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodGetMessage, time.Since(started), resultErr)
+	}()
 	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
-	f.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
 	if err != nil {
 		return nil, natsutil.RequestFailure("history request", err)
 	}
 
-	// Detect the errcode error envelope first; a real Message has no top-level
-	// "error" field so this cannot false-positive. Propagate the typed remote
-	// errcode so the caller can preserve the upstream classification (a
-	// transient infra failure stays unavailable, not collapsed to not_found).
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 
 	var parent quotedParentProjection

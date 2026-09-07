@@ -19,6 +19,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -61,7 +62,7 @@ func TestIntegration_ConcurrentRequestsWithCopy(t *testing.T) {
 	var asyncCompleted atomic.Int64
 	var asyncStarted sync.WaitGroup
 
-	Register(r, "chat.user.{account}.echo.{room}",
+	Register(r, "chat.user.{account}.echo.{room}", natsmetrics.MethodGetChatlist,
 		func(c *Context, req echoReq) (*echoResp, error) {
 			c.Set("account", c.Param("account"))
 			c.Set("room", c.Param("room"))
@@ -145,7 +146,7 @@ func TestIntegration_ShutdownUnderLoad(t *testing.T) {
 			var completed atomic.Int64
 			started := make(chan struct{})
 			var startOnce sync.Once
-			Register(r, "load.{id}",
+			Register(r, "load.{id}", natsmetrics.MethodCreateChatlistSection,
 				func(c *Context, req echoReq) (*echoResp, error) {
 					startOnce.Do(func() { close(started) })
 					time.Sleep(time.Duration(1+req.Seq%7) * time.Millisecond)
@@ -206,7 +207,7 @@ func TestIntegration_BusyReplyOnSaturation(t *testing.T) {
 	// signals `entered` before blocking on `gate`, so the busy-reply poll
 	// only starts once the slot is genuinely held.
 	entered := make(chan struct{}, 1)
-	Register(r, "busy.{id}",
+	Register(r, "busy.{id}", natsmetrics.MethodDeleteChatlistSection,
 		func(c *Context, req echoReq) (*echoResp, error) {
 			select {
 			case entered <- struct{}{}:
@@ -275,7 +276,7 @@ func TestIntegration_SpawnSitePanicBackstop(t *testing.T) {
 	// observe slot release.
 	r := New(nc, "integration-panic-backstop", WithMaxConcurrency(1))
 
-	Register(r, "boom.{id}",
+	Register(r, "boom.{id}", natsmetrics.MethodRenameChatlistSection,
 		func(c *Context, req echoReq) (*echoResp, error) {
 			panic("intentional handler panic")
 		})
@@ -293,7 +294,7 @@ func TestIntegration_SpawnSitePanicBackstop(t *testing.T) {
 	assert.Equal(t, "internal error", payload.Error, "expected internal error reply from backstop")
 
 	// Process survived: a follow-up normal request must succeed.
-	Register(r, "ok.{id}",
+	Register(r, "ok.{id}", natsmetrics.MethodReorderChatlistSections,
 		func(c *Context, req echoReq) (*echoResp, error) {
 			return &echoResp{Seq: req.Seq}, nil
 		})
@@ -327,7 +328,7 @@ func TestIntegration_ShutdownWaitsForSpawnedHandlers(t *testing.T) {
 	}()
 	var entered atomic.Int64
 	var completed atomic.Int64
-	Register(r, "wg.{id}",
+	Register(r, "wg.{id}", natsmetrics.MethodSetChatlistSectionSortMode,
 		func(c *Context, req echoReq) (*echoResp, error) {
 			entered.Add(1)
 			<-gate
@@ -407,7 +408,7 @@ func TestIntegration_MultipleRouterInstances(t *testing.T) {
 	for idx := 0; idx < instances; idx++ {
 		idx := idx
 		r := New(nc, queue)
-		Register(r, "qg.work.{id}",
+		Register(r, "qg.work.{id}", natsmetrics.MethodListSubscriptions,
 			func(c *Context, req echoReq) (*echoResp, error) {
 				hits[idx].Add(1)
 				return &echoResp{Seq: req.Seq}, nil

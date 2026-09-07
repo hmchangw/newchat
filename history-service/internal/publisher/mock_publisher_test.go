@@ -42,7 +42,7 @@ func (m *MockfailureRecorder) EXPECT() *MockfailureRecorderMockRecorder {
 }
 
 // Failure mocks base method.
-func (m *MockfailureRecorder) Failure(arg0 context.Context, arg1 natsmetrics.DestinationKind, arg2 natsmetrics.Operation, arg3 error) {
+func (m *MockfailureRecorder) Failure(arg0 context.Context, arg1 natsmetrics.DestinationKind, arg2 natsmetrics.PublishOperation, arg3 error) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "Failure", arg0, arg1, arg2, arg3)
 }

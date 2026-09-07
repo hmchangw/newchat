@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -86,6 +87,29 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 		var ee *errcode.Error
 		require.ErrorAs(t, err, &ee)
 		assert.Equal(t, errcode.CodeNotFound, ee.Code)
+	})
+
+	// Parse recognises this envelope; Code.Valid() does not. Gating the whole
+	// branch on Valid() let an unrecognised code — a newer or cross-site peer's
+	// — fall through to the decoder, which ignores unknown fields, so the call
+	// returned a zero value, a nil error, and a success sample on
+	// rpc.client.call.duration.
+	t.Run("unknown remote error code — returns error, not a zero-value success", func(t *testing.T) {
+		nc := startTestNATS(t)
+
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
+		})
+		require.NoError(t, err)
+
+		fetcher := newHistoryParentFetcher(nc, natsmetrics.Publisher{})
+		got, err := fetcher.FetchParent(context.Background(), account, roomID, siteID, messageID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "upstream_only_code", "the unrecognised code must reach the message")
+		assert.Nil(t, got)
+		var ee *errcode.Error
+		assert.False(t, errors.As(err, &ee),
+			"an unknown code must not be relayed as a typed errcode — that is what Code.Valid() guards")
 	})
 
 	t.Run("no responder — returns error", func(t *testing.T) {

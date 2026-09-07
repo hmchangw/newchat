@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 )
@@ -314,7 +315,7 @@ func TestRouter_AutomaticallyEnrichesIdentityWithoutOptInMiddleware(t *testing.T
 	nc := startTestNATS(t)
 	r := New(nc, "identity-test")
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity",
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.MethodGetCurrentUser,
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil
@@ -342,7 +343,7 @@ func TestRouter_DropsForgedIdentityOnClientFacingRoutes(t *testing.T) {
 	nc := startTestNATSWithBaggage(t)
 	r := New(nc, "forged-identity-test")
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity",
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.MethodGetUserStatus,
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil
@@ -375,7 +376,7 @@ func TestRouter_KeepsUpstreamIdentityOnInternalRoutes(t *testing.T) {
 	nc := startTestNATSWithBaggage(t)
 	r := New(nc, "internal-identity-test")
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.server.request.room.{roomID}.identity",
+	Register(r, "chat.server.request.room.{roomID}.identity", natsmetrics.MethodGetUserProfile,
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil
@@ -439,7 +440,7 @@ func TestRouter_ClientFacingRouteLabelsSiteFromConfig(t *testing.T) {
 	nc := startTestNATSWithBaggage(t)
 	r := New(nc, "configured-site-test", WithSiteID("site-1"))
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity",
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.MethodSetUserStatus,
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil

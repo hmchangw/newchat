@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -67,7 +68,7 @@ func (r *historyMessageReader) GetMessageReadMeta(
 	started := time.Now()
 	defer func() {
 		if r.metrics != nil {
-			r.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), resultErr)
+			r.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodGetMessage, time.Since(started), resultErr)
 		}
 	}()
 	msg, err := r.nc.Request(ctx, subject.MsgGet(account, roomID, r.siteID), reqBytes, historyRequestTimeout)
@@ -80,11 +81,16 @@ func (r *historyMessageReader) GetMessageReadMeta(
 	// An errcode envelope (a real Message has no top-level "error" field, so this
 	// cannot false-positive). NotFound maps to found=false so the handler returns
 	// its canonical errMessageNotFound; other classifications propagate intact.
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		if ee.Code == errcode.CodeNotFound {
+	// A NotFound reply is this route's "no read receipt yet", not a failure, so
+	// it is unwrapped rather than returned — and errors.As finds nothing for an
+	// unrecognised code, which is exactly right: an unknown code must not be
+	// mistaken for the NotFound this branch is looking for.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		var ee *errcode.Error
+		if errors.As(remoteErr, &ee) && ee.Code == errcode.CodeNotFound {
 			return MessageReadMeta{}, false, nil
 		}
-		return MessageReadMeta{}, false, ee
+		return MessageReadMeta{}, false, remoteErr
 	}
 
 	// Decode a narrow projection, not the full cassandra.Message: that type embeds

@@ -14,6 +14,7 @@ import (
 func Register[Req, Resp any](
 	r *Router,
 	pattern string,
+	method natsmetrics.RPCMethod,
 	fn func(c *Context, req Req) (*Resp, error),
 ) {
 	handler := HandlerFunc(func(c *Context) {
@@ -35,13 +36,14 @@ func Register[Req, Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addRPCRoute(pattern, method, []HandlerFunc{handler})
 }
 
 // RegisterNoBody subscribes a handler that takes no request body.
 func RegisterNoBody[Resp any](
 	r *Router,
 	pattern string,
+	method natsmetrics.RPCMethod,
 	fn func(c *Context) (*Resp, error),
 ) {
 	handler := HandlerFunc(func(c *Context) {
@@ -54,13 +56,14 @@ func RegisterNoBody[Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addRPCRoute(pattern, method, []HandlerFunc{handler})
 }
 
 // RegisterOptionalBody is like Register but treats a zero-length payload as the zero-value request instead of a bad_request (e.g. sso.refresh).
 func RegisterOptionalBody[Req, Resp any](
 	r *Router,
 	pattern string,
+	method natsmetrics.RPCMethod,
 	fn func(c *Context, req Req) (*Resp, error),
 ) {
 	handler := HandlerFunc(func(c *Context) {
@@ -81,10 +84,27 @@ func RegisterOptionalBody[Req, Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addRPCRoute(pattern, method, []HandlerFunc{handler})
 }
 
 // RegisterVoid subscribes a handler that processes a request without replying.
+//
+// It takes no rpc.method and records no rpc.server.call.duration sample: with
+// no reply subject there is no call to time, so timing it as an RPC would
+// report local handler cost as a round trip.
+//
+// The percentile-dilution argument that used to sit here — that the presence
+// heartbeat lane would drag every quantile down — held only while every route
+// shared one rpc_method label, and this vocabulary removed that. The reason
+// to keep these out of the RPC family is the semantic one above, not the
+// statistical one.
+//
+// These routes therefore have no latency signal at all today, which is a gap,
+// not a resting state: the presence lane is the fleet's highest-volume
+// traffic. The replacement is a separate chat.nats.handler.duration with its
+// own bounded operation label and no rpc.method — tracked as a P1 follow-up in
+// docs/specs/o11y/nats-metrics-contract.md and at
+// https://github.com/hmchangw/newchat/issues/473.
 func RegisterVoid[Req any](
 	r *Router,
 	pattern string,
@@ -104,7 +124,7 @@ func RegisterVoid[Req any](
 		}
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addVoidRoute(pattern, []HandlerFunc{handler})
 }
 
 // replyErr classifies err and sends the errcode envelope on the reply subject.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +46,23 @@ type Router struct {
 
 	mu   sync.Mutex
 	subs []*nats.Subscription
+	// rpcRoutes records every method-bearing registration, in order, one entry
+	// per call. Append-only and never keyed: any map here loses a duplicate to
+	// last-write-wins, and both spellings of a duplicate are exactly what the
+	// golden file has to show. Keyed by method, a repeated constant hid the
+	// earlier route; keyed by pattern, a repeated pattern hid it instead —
+	// and a repeated pattern is the worse case, because both subscriptions
+	// are live on NATS and a request can be answered by either handler.
+	rpcRoutes []natsmetrics.RPCRoute
+
+	// subjects maps each canonical NATS subject to the first pattern that
+	// produced it, so two placeholder spellings of one subject are caught.
+	subjects map[string]string
+
+	// methods maps each claimed rpc.method to the pattern that claimed it. A
+	// second route naming the same method is logged and both routes are
+	// registered, merging into one metric series rather than being rejected.
+	methods map[natsmetrics.RPCMethod]string
 }
 
 // Option configures a Router on construction.
@@ -98,8 +116,10 @@ func WithMetrics(metrics natsmetrics.Publisher) Option {
 // control). Use WithMaxConcurrency to opt into a concurrency cap.
 func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := &Router{
-		nc:    nc,
-		queue: queue,
+		nc:       nc,
+		queue:    queue,
+		methods:  map[natsmetrics.RPCMethod]string{},
+		subjects: map[string]string{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -199,8 +219,82 @@ func (r *Router) Use(mw ...HandlerFunc) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
+// addRPCRoute registers a reply-bearing route. Both checks log and degrade
+// rather than panic: every production call site passes a compile-time
+// constant, so a bad method is a code defect caught by .semgrep/rpcmethod.yml
+// and by the service's registration test — both cheaper than a crash loop.
+// Metrics are opt-in (NewFromProviderIfEnabled), so a panic here would kill a
+// process over a value it may not even record.
+func (r *Router) addRPCRoute(pattern string, method natsmetrics.RPCMethod, handlers []HandlerFunc) {
+	if !method.Valid() {
+		slog.Error("natsrouter: route declares an rpc method outside the vocabulary; its samples record as _OTHER",
+			"pattern", pattern, "method", method)
+		method = natsmetrics.MethodOther
+	}
+	natsSubject := parsePattern(pattern).natsSubject
+
+	r.mu.Lock()
+	if claimedBy, dup := r.subjects[natsSubject]; dup {
+		// Distinct patterns, one subscription: NATS delivers each request to
+		// exactly one of the two handlers, chosen by queue-group balancing.
+		slog.Error("natsrouter: two patterns resolve to one NATS subject; requests will be split between their handlers",
+			"subject", natsSubject, "pattern", pattern, "claimed_by", claimedBy)
+	} else {
+		// First claimant wins, so a third colliding route still names the
+		// original in claimed_by rather than the previous collision. Matches
+		// how rejectDuplicateSubject reports it.
+		r.subjects[natsSubject] = pattern
+	}
+	if claimed, dup := r.methods[method]; dup {
+		// Registering anyway: refusing would drop the route, and a merged
+		// series is a blunt signal where a missing API is an outage.
+		slog.Error("natsrouter: rpc method already claimed; these routes' samples merge into one series",
+			"method", method, "claimed_by", claimed, "pattern", pattern)
+	} else {
+		r.methods[method] = pattern
+	}
+	r.rpcRoutes = append(r.rpcRoutes, natsmetrics.RPCRoute{Method: method, Pattern: pattern, NATSSubject: natsSubject})
+	r.mu.Unlock()
+
+	r.addRoute(pattern, method, true, handlers)
+}
+
+// Routes returns every method-bearing registration this router made, copied so
+// a caller cannot reach the dispatch state. Each service's registration test
+// compares it to a golden file, which is what pins a route to its correct
+// method — the duplicate check above only catches method collisions, and only
+// in a log line.
+//
+// A slice, not a map: one entry per registration call, so neither a repeated
+// method nor a repeated pattern can hide behind the other. Both show up as an
+// extra golden line, which is the diff a reviewer sees.
+func (r *Router) Routes() []natsmetrics.RPCRoute {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.rpcRoutes)
+}
+
+// addVoidRoute registers a fire-and-forget route. It has no reply subject, so
+// there is no call to time and no method to name.
+func (r *Router) addVoidRoute(pattern string, handlers []HandlerFunc) {
+	r.addRoute(pattern, "", false, handlers)
+}
+
+// recordHandled reports one handler result, or nothing at all for a
+// fire-and-forget route. Routed through one helper so the three record sites
+// (stopping gate, admission rejection, handler completion) cannot disagree
+// about whether a void route is recorded.
+func (r *Router) recordHandled(ctx context.Context, rt route, started time.Time, result natsmetrics.RequestResult) {
+	if !rt.recordRPC {
+		return
+	}
+	r.metrics.HandledRequest(ctx, rt.method, time.Since(started), result)
+}
+
+func (r *Router) addRoute(pattern string, method natsmetrics.RPCMethod, recordRPC bool, handlers []HandlerFunc) {
 	rt := parsePattern(pattern)
+	rt.method = method
+	rt.recordRPC = recordRPC
 	all := make([]HandlerFunc, 0, len(r.middleware)+1+len(handlers))
 	all = append(all, r.middleware...)
 	// Identity enrichment is router plumbing, not an opt-in middleware. Keep it
@@ -211,18 +305,17 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {
 		started := time.Now()
-		operation := natsmetrics.RequestOperationFromSubject(m.Subject)
 		// Stopping gate: reject before admit so Shutdown's contract holds
 		// even if a callback fires mid-drain or after Shutdown's ctx expired.
 		if r.stopping.Load() {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			r.recordHandled(msgCtx, rt, started, natsmetrics.RequestUnavailable)
 			return
 		}
 		admitted, release := r.admit()
 		if !admitted {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			r.recordHandled(msgCtx, rt, started, natsmetrics.RequestUnavailable)
 			return
 		}
 		r.wg.Add(1)
@@ -239,7 +332,7 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all, r.reply)
 			defer releaseContext(c)
 			defer func() {
-				r.metrics.HandledRequest(msgCtx, operation, time.Since(started), c.requestResult)
+				r.recordHandled(msgCtx, rt, started, c.requestResult)
 			}()
 			defer func() {
 				if rec := recover(); rec != nil {

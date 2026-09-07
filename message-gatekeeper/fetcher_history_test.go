@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -128,11 +129,38 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
-		assert.Equal(t, uint64(1), requests(requestSucceeded),
-			"a replied-to request is a transport success even when the payload is an error envelope")
+		assert.Equal(t, uint64(1), requests("other_error"),
+			"a remote error envelope is a failed call, not a success: the transport read succeeded, "+
+				"but the operation did not, and recording it as success made the client histogram "+
+				"disagree with the callee's server histogram about whether the call failed")
 		var ec *errcode.Error
 		require.ErrorAs(t, err, &ec, "the history error envelope must survive as a typed errcode")
 		assert.Equal(t, errcode.CodeNotFound, ec.Code)
+	})
+
+	// Parse recognises this envelope; Code.Valid() does not. Gating the whole
+	// branch on Valid() let an unrecognised code fall through to the decoder,
+	// which ignores unknown fields, so the call returned a zero-value snapshot,
+	// a nil error, and a success sample.
+	t.Run("unknown remote error code — returns error and records a failure", func(t *testing.T) {
+		nc := startTestNATS(t)
+
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
+		})
+		require.NoError(t, err)
+
+		pub, requests := requestMetricFor(t)
+		fetcher := newHistoryParentFetcher(nc, baseURL, pub)
+		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
+		require.Error(t, err)
+		assert.Nil(t, got, "a failed call must not hand back a zero-value success")
+		assert.Contains(t, err.Error(), "upstream_only_code")
+		assert.Equal(t, uint64(1), requests("other_error"),
+			"an unrecognised code is a failed call, not a success")
+		var ee *errcode.Error
+		assert.False(t, errors.As(err, &ee),
+			"an unknown code must not be relayed as a typed errcode — that is what Code.Valid() guards")
 	})
 
 	t.Run("no responder — returns error", func(t *testing.T) {
@@ -180,7 +208,7 @@ func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(errorType strin
 					for _, kv := range dp.Attributes.ToSlice() {
 						got[string(kv.Key)] = kv.Value.String()
 					}
-					if got["rpc.method"] != string(natsmetrics.OperationHistoryGetMessage) {
+					if got["rpc.method"] != string(natsmetrics.MethodGetMessage) {
 						continue
 					}
 					methodTotal += dp.Count

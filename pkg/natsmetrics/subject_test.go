@@ -58,59 +58,12 @@ func TestRoomEventTypeFromSubject(t *testing.T) {
 	}
 }
 
-func TestRequestOperationFromSubject(t *testing.T) {
-	teamsMeeting, err := subject.TeamsMeeting("alice", "room-a", "site-a")
-	assert.NoError(t, err)
-	tests := []struct {
-		name string
-		subj string
-		want Operation
-	}{
-		// SLO-4 and SLO-5 each need their own rpc.method. They have different
-		// bounds because their cost models differ — channel load walks
-		// messages_by_room buckets, thread open slices one partition — so a
-		// shared label mixes a slow family into a fast one's ratio and a fast
-		// family into a slow one's, in opposite directions.
-		{name: "channel history is its own method (SLO-4)", subj: subject.MsgHistory("alice", "room-a", "site-a"), want: OperationChannelHistory},
-		{name: "thread open is its own method (SLO-5)", subj: "chat.user.alice.request.room.room-a.site-a.msg.thread", want: OperationThreadOpen},
-		// Everything else stays history_read. Splitting further would put routes
-		// into an SLO denominator that the SLO does not describe: thread.parent is
-		// a second handler, not part of the verified "Enter thread" path, and
-		// next/surrounding are scroll and jump, not an initial load.
-		{name: "thread parent read stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.thread.parent", want: OperationHistoryRead},
-		{name: "scroll page stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.next", want: OperationHistoryRead},
-		{name: "jump to message stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.surrounding", want: OperationHistoryRead},
-		{name: "single message read stays history read", subj: subject.MsgGet("alice", "room-a", "site-a"), want: OperationHistoryRead},
-		{name: "batch message read stays history read", subj: subject.MsgGetIDs("alice", "room-a", "site-a"), want: OperationHistoryRead},
-		{name: "pinned list stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.pinned.list", want: OperationHistoryRead},
-		{name: "history mutation", subj: subject.MsgEdit("alice", "room-a", "site-a"), want: OperationHistoryMutation},
-		{name: "history migration mutation", subj: subject.MigrationInternalMsgEdit("site-a"), want: OperationHistoryMutation},
-		{name: "thread subscription read", subj: subject.ThreadSubscriptionList("site-a"), want: OperationHistoryRead},
-		{name: "room read", subj: subject.RoomKeyGet("alice", "room-a", "site-a"), want: OperationRoomRead},
-		{name: "room mutation", subj: subject.RoomRename("alice", "room-a", "site-a"), want: OperationRoomMutation},
-		{name: "member read", subj: subject.MemberList("alice", "room-a", "site-a"), want: OperationMemberRead},
-		{name: "organization member read", subj: subject.OrgMembers("alice", "org-a", "site-a"), want: OperationMemberRead},
-		{name: "member mutation", subj: subject.MemberAdd("alice", "room-a", "site-a"), want: OperationMemberMutation},
-		{name: "teams account does not hijack member mutation", subj: subject.MemberAdd("teams", "room-a", "site-a"), want: OperationMemberMutation},
-		{name: "msg room does not hijack room read", subj: subject.RoomKeyGet("alice", "msg", "site-a"), want: OperationRoomRead},
-		{name: "teams room", subj: teamsMeeting, want: OperationTeamsRoom},
-		{name: "server room read", subj: subject.RoomsInfoBatchSubscribe("site-a"), want: OperationRoomRead},
-		{name: "server room mutation", subj: subject.RoomKeyEnsure("site-a"), want: OperationRoomMutation},
-		{name: "dynamic unknown", subj: "chat.user.alice.request.room.room-a.site-a.unbounded.value", want: OperationUnknown},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, RequestOperationFromSubject(tt.subj))
-		})
-	}
-}
-
 func TestPublishLabelsFromSubject(t *testing.T) {
 	tests := []struct {
 		name        string
 		subj        string
 		destination DestinationKind
-		operation   Operation
+		operation   PublishOperation
 	}{
 		{name: "canonical message mutation", subj: subject.MsgCanonicalUpdated("site-a"), destination: DestinationCanonical, operation: OperationCanonicalPublish},
 		{name: "room create with member site", subj: subject.RoomCanonical("member", "create"), destination: DestinationRoomCanonical, operation: OperationRoomPublish},
@@ -134,46 +87,6 @@ func TestPublishLabelsFromSubject(t *testing.T) {
 			destination, operation := PublishLabelsFromSubject(tt.subj)
 			assert.Equal(t, tt.destination, destination)
 			assert.Equal(t, tt.operation, operation)
-		})
-	}
-}
-
-// Suffix matching must not classify subjects that are not requests at all.
-// Every label in this family is derived from fixed token positions precisely so
-// a subject from another family cannot mint one.
-func TestRequestOperationFromSubject_NonRequestSubjectsAreUnknown(t *testing.T) {
-	for _, subj := range []string{
-		"chat.dynamic.member.list",
-		"chat.room.canonical.site-a.member.add",
-		"chat.inbox.site-a.external.create",
-		"chat.server.broadcast.site-a.message.read",
-	} {
-		t.Run(subj, func(t *testing.T) {
-			assert.Equal(t, OperationUnknown, RequestOperationFromSubject(subj))
-		})
-	}
-}
-
-// Suffix rules must not cross service families. Every subject below belongs to
-// a service other than room-service, and each one ends in a tail that
-// room-service also uses. The first is not hypothetical: user-service's
-// chatlist.section.create was classified as room_mutation, so its traffic
-// landed in room-service's rpc.method series.
-//
-// Unknown is the right answer for these until the operation vocabulary is
-// extended deliberately — a wrong bounded label is worse than an honest
-// unknown, because a wrong one is silently aggregated with real traffic.
-func TestRequestOperationFromSubject_DoesNotCrossServiceFamilies(t *testing.T) {
-	for _, subj := range []string{
-		subject.UserChatlistSectionCreate("alice", "site-a"),
-		"chat.user.alice.request.user.site-a.chatlist.section.rename",
-		"chat.user.alice.request.user.site-a.member.list",
-		"chat.user.alice.request.user.site-a.key.get",
-		"chat.user.alice.request.search.site-a.messages",
-		"chat.user.alice.request.media.site-a.open",
-	} {
-		t.Run(subj, func(t *testing.T) {
-			assert.Equal(t, OperationUnknown, RequestOperationFromSubject(subj))
 		})
 	}
 }

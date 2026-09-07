@@ -13,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
@@ -86,15 +87,15 @@ func newHandler(store RoomStore, siteID string, allSiteIDs []string, pub outboxP
 
 func (h *handler) Register(r *natsrouter.Router) {
 	natsrouter.Register[BotCreateRoomRequest, BotCreateRoomResponse](r,
-		subject.ServerBotRoomCreate(h.siteID), h.handleCreate)
+		subject.ServerBotRoomCreate(h.siteID), natsmetrics.MethodCreateBotRoom, h.handleCreate)
 	natsrouter.Register[BotMembersBatchRequest, BotAddResponse](r,
-		subject.ServerBotRoomMemberAddPattern(h.siteID), h.handleAdd)
+		subject.ServerBotRoomMemberAddPattern(h.siteID), natsmetrics.MethodAddBotRoomMembers, h.handleAdd)
 	natsrouter.Register[BotMembersBatchRequest, BotRemoveResponse](r,
-		subject.ServerBotRoomMemberRemovePattern(h.siteID), h.handleRemove)
+		subject.ServerBotRoomMemberRemovePattern(h.siteID), natsmetrics.MethodRemoveBotRoomMembers, h.handleRemove)
 	natsrouter.Register[BotRoomGetRequest, BotRoomGetResponse](r,
-		subject.ServerBotRoomGet(h.siteID), h.handleGet)
+		subject.ServerBotRoomGet(h.siteID), natsmetrics.MethodGetBotRoom, h.handleGet)
 	natsrouter.Register[BotDMEnsureRequest, BotDMEnsureResponse](r,
-		subject.ServerBotRoomDMEnsure(h.siteID), h.handleDMEnsure)
+		subject.ServerBotRoomDMEnsure(h.siteID), natsmetrics.MethodEnsureBotDMRoom, h.handleDMEnsure)
 }
 
 // handleDMEnsure materializes a DM room + subscriptions; this site becomes the DM's origin.

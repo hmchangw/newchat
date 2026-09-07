@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -52,6 +53,13 @@ func (p Params) Require(key string) (string, error) {
 type route struct {
 	natsSubject string         // "chat.user.*.request.room.*.*.msg.history"
 	params      map[int]string // {2: "account", 5: "roomID", 6: "siteID"}
+	// method is the bounded rpc.method this route records under, resolved once
+	// at registration and validated there.
+	method natsmetrics.RPCMethod
+	// recordRPC separates "fire-and-forget" from "method not set". Without it an
+	// empty method would silently mean void, so one mistyped argument would drop
+	// a real route out of the RPC family with nothing to notice it.
+	recordRPC bool
 }
 
 // parsePattern converts a pattern with {name} placeholders into a route.
