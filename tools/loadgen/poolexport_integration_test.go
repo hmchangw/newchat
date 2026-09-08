@@ -35,6 +35,11 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 		bson.M{"_id": "x3", "siteId": "site-a", "roomType": "botDM", "u": bson.M{"account": "botOnly"}},
 		bson.M{"_id": "x4", "siteId": "site-a", "roomType": "channel", "open": false, "u": bson.M{"account": "closed"}},
 		bson.M{"_id": "x5", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": ""}},
+		// Teams-origin: hidden from subscription.list under the default
+		// SHOW_TEAMS_ROOM=false, so this account would walk to an empty plan
+		// and report ready while measuring nothing.
+		bson.M{"_id": "x6", "siteId": "site-a", "roomType": "channel",
+			"origin": "teams", "u": bson.M{"account": "teamsOnly"}},
 	}
 	_, err := db.Collection("subscriptions").InsertMany(ctx, docs)
 	require.NoError(t, err)
@@ -46,6 +51,24 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 	// on: every pod slices the same array, so an unstable one would overlap
 	// or skip accounts across pods.
 	assert.Equal(t, []string{"anna", "bob", "carol"}, got)
+}
+
+// An account with BOTH a Teams room and an ordinary channel is still a valid
+// pool member: it has something to walk. Only Teams-only accounts drop out.
+func TestIntegration_MongoPoolSource_KeepsAccountsWithANonTeamsChannel(t *testing.T) {
+	db := testutil.MongoDB(t, "poolexport-mixed")
+	ctx := context.Background()
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "m1", "siteId": "site-a", "roomType": "channel",
+			"origin": "teams", "u": bson.M{"account": "mixed"}},
+		bson.M{"_id": "m2", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "mixed"}},
+	})
+	require.NoError(t, err)
+
+	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"mixed"}, got)
 }
 
 // A site with nobody must come back empty rather than erroring, so the caller

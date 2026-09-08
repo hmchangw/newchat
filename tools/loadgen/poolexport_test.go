@@ -47,6 +47,14 @@ func (f *fakePublisher) Put(_ context.Context, key string, a *poolartifact.Artif
 	return nil
 }
 
+func (f *fakePublisher) Load(_ context.Context, key, _ string) (*poolartifact.Artifact, error) {
+	a, ok := f.artifacts[key]
+	if !ok {
+		return nil, poolartifact.ErrObjectNotFound
+	}
+	return a, nil
+}
+
 func (f *fakePublisher) PutJSON(_ context.Context, key string, v any) error {
 	if f.putErr != nil {
 		return f.putErr
@@ -138,4 +146,39 @@ func TestExportPool_PropagatesSourceAndSinkErrors(t *testing.T) {
 	_, err = exportPool(context.Background(), &fakeAccountSource{accounts: []string{"a"}}, pub,
 		poolExportOptions{RunID: "r", SiteID: "s"})
 	assert.ErrorIs(t, err, boom)
+}
+
+// Overwriting a run ID with a DIFFERENT population breaks the invariant the
+// single object exists to hold. Pods that started before the overwrite and
+// pods that restart after would slice different arrays, so shardSlice would
+// hand out overlapping or disjoint ranges — accounts connected twice or not
+// at all, with every pod still reporting ready.
+func TestExportPool_RefusesToOverwriteADifferentPopulation(t *testing.T) {
+	pub := newFakePublisher()
+	opts := poolExportOptions{RunID: "run-1", SiteID: "site-a"}
+
+	_, err := exportPool(context.Background(), &fakeAccountSource{accounts: []string{"anna", "bob"}}, pub, opts)
+	require.NoError(t, err)
+
+	// The same population is genuinely idempotent: a retried Job must not fail.
+	_, err = exportPool(context.Background(), &fakeAccountSource{accounts: []string{"anna", "bob"}}, pub, opts)
+	require.NoError(t, err, "re-exporting the same population is a safe retry")
+
+	// A changed one is not.
+	_, err = exportPool(context.Background(), &fakeAccountSource{accounts: []string{"anna", "carol"}}, pub, opts)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "--run-id")
+	assert.Equal(t, []string{"anna", "bob"}, pub.artifacts["site-a/run-1/pool.json.gz"].Accounts,
+		"the published pool must be left as it was")
+}
+
+// The run ID becomes a path segment. path.Join normalises "..", so an
+// unvalidated one could write the artifact into another site's scope.
+func TestValidatePoolRunID(t *testing.T) {
+	for _, ok := range []string{"run-1", "soak20260908a", "a.b_c-d"} {
+		assert.NoError(t, validatePoolRunID(ok), ok)
+	}
+	for _, bad := range []string{"", "..", ".", "../site-b/r", "a/b", "-leading", "with space"} {
+		assert.Error(t, validatePoolRunID(bad), bad)
+	}
 }

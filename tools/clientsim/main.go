@@ -216,19 +216,31 @@ func loadPool(ctx context.Context, cfg *config) (*poolartifact.Artifact, error) 
 	if cfg.PoolFile != "" {
 		return poolartifact.Load(cfg.PoolFile, cfg.SiteID)
 	}
-	bucket, key, err := poolartifact.ParsePoolURL(cfg.PoolURL)
+	store, key, err := poolStoreFor(cfg)
 	if err != nil {
 		return nil, err
 	}
-	// The URL names the bucket, so it wins over POOL_S3_BUCKET: one env var
-	// locates the whole object, and the two cannot then disagree.
-	store := cfg.Pool
-	store.Bucket = bucket
-	s, err := poolartifact.NewStore(&store)
+	s, err := poolartifact.NewStore(store)
 	if err != nil {
 		return nil, err
 	}
 	return s.Load(ctx, key, cfg.SiteID)
+}
+
+// poolStoreFor resolves the object-store config the URL implies. One function
+// so validation and loading cannot disagree: validating the raw config first
+// demanded POOL_S3_BUCKET even when the URL already named the bucket, which
+// made the documented k8s setup fail to start.
+func poolStoreFor(cfg *config) (*poolartifact.StoreConfig, string, error) {
+	bucket, key, err := poolartifact.ParsePoolURL(cfg.PoolURL)
+	if err != nil {
+		return nil, "", err
+	}
+	// The URL wins over POOL_S3_BUCKET: one env var locates the whole object,
+	// and the two cannot then disagree.
+	store := cfg.Pool
+	store.Bucket = bucket
+	return &store, key, nil
 }
 
 // validatePoolSource enforces exactly one pool source. Preferring one over
@@ -245,15 +257,19 @@ func validatePoolSource(cfg *config) error {
 	// A partly-set store is an error even on the file path: it means someone
 	// meant to use the object store and mistyped, and staying silent would
 	// hand them a run against the wrong pool.
-	if cfg.PoolURL != "" || cfg.Pool.Configured() {
-		if err := cfg.Pool.Validate(); err != nil {
-			return err
-		}
-	}
 	if cfg.PoolURL != "" {
-		if _, _, err := poolartifact.ParsePoolURL(cfg.PoolURL); err != nil {
+		// Resolve first, validate second: the URL supplies the bucket.
+		store, _, err := poolStoreFor(cfg)
+		if err != nil {
 			return err
 		}
+		return store.Validate()
+	}
+	// A partly-set store is an error even on the file path: it means someone
+	// meant to use the object store and mistyped, and staying silent would
+	// hand them a run against the wrong pool.
+	if cfg.Pool.Configured() {
+		return cfg.Pool.Validate()
 	}
 	return nil
 }

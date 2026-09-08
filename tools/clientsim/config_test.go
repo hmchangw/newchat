@@ -345,6 +345,14 @@ func TestValidateConfig_PoolSourceIsExactlyOne(t *testing.T) {
 			c.PoolFile = ""
 			c.PoolURL = "s3://b/k.json.gz"
 		}, "POOL_S3_ENDPOINT"},
+		// The URL names the bucket, and the contract says POOL_S3_BUCKET is
+		// then unnecessary. Validating the raw config first demanded it
+		// anyway, so the documented k8s setup could not start at all.
+		{"url supplies the bucket", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "s3://from-url/k.json.gz"
+			c.Pool = poolartifact.StoreConfig{Endpoint: "e", AccessKey: "a", SecretKey: "s"}
+		}, ""},
 		{"url that is not s3", func(c *config) {
 			c.PoolFile = ""
 			c.PoolURL = "https://example.com/pool.json"

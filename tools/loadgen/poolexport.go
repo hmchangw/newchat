@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/poolartifact"
 )
 
@@ -26,6 +28,18 @@ type poolPublisher interface {
 	Key(siteID, runID, name string) string
 	Put(ctx context.Context, key string, a *poolartifact.Artifact) error
 	PutJSON(ctx context.Context, key string, v any) error
+	Load(ctx context.Context, key, wantSiteID string) (*poolartifact.Artifact, error)
+}
+
+// validatePoolRunID keeps the run ID a single safe path segment. It becomes
+// one, and path.Join normalises "..", so an unvalidated value could write the
+// artifact into another site's scope. Same pattern the soak ledger uses.
+func validatePoolRunID(runID string) error {
+	if !failureRunIDPattern.MatchString(runID) || runID == "." || runID == ".." {
+		return fmt.Errorf("--run-id must be a single path segment matching %s, got %q",
+			failureRunIDPattern.String(), runID)
+	}
+	return nil
 }
 
 const (
@@ -41,7 +55,7 @@ const (
 // channel: clientsim opens room lanes only for channels, because DM traffic
 // arrives on the user lane instead. An account with no channel subscription
 // would connect cleanly and then measure nothing.
-const poolExportQuery = `subscriptions: {siteId, roomType: "channel", open: {$ne: false}} -> distinct u.account, sorted`
+const poolExportQuery = `subscriptions: {siteId, roomType: "channel", open: {$ne: false}, origin: {$ne: "teams"}} -> distinct u.account, sorted`
 
 type poolExportOptions struct {
 	RunID  string
@@ -110,6 +124,23 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 		RunID: opts.RunID, SiteID: opts.SiteID, ConfigDigest: digest, Accounts: accounts,
 	}
 	artifactKey := pub.Key(opts.SiteID, opts.RunID, poolArtifactName)
+
+	// A run ID names one immutable population. Overwriting it with a
+	// different one breaks the invariant the single object exists to hold:
+	// pods that started before and pods that restart after would slice
+	// different arrays, so shardSlice hands out overlapping or disjoint
+	// ranges — accounts connected twice or not at all, every pod still ready.
+	// Re-exporting the SAME population stays a safe retry.
+	switch existing, err := pub.Load(ctx, artifactKey, opts.SiteID); {
+	case errors.Is(err, poolartifact.ErrObjectNotFound):
+	case err != nil:
+		return poolExportResult{}, fmt.Errorf("check the published pool for run %q: %w", opts.RunID, err)
+	case existing.ConfigDigest != digest:
+		return poolExportResult{}, fmt.Errorf(
+			"run %q already holds a pool of %d accounts (digest %s); this export is a different population of %d (digest %s) — use a new --run-id rather than overwrite a pool a fleet may already be reading",
+			opts.RunID, len(existing.Accounts), existing.ConfigDigest, len(accounts), digest)
+	}
+
 	if err := pub.Put(ctx, artifactKey, art); err != nil {
 		return poolExportResult{}, fmt.Errorf("publish pool artifact: %w", err)
 	}
@@ -149,6 +180,18 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 			"siteId":   siteID,
 			"roomType": "channel",
 			"open":     bson.M{"$ne": false},
+			// user-service hides Teams-origin rooms from subscription.list
+			// unless SHOW_TEAMS_ROOM (default false) or the account is
+			// allowlisted. Without this an account whose only channel
+			// subscriptions are Teams rooms is exported, walks to an EMPTY
+			// plan, and reports ready while subscribing to nothing — exactly
+			// the failure the readiness design exists to prevent.
+			//
+			// Applied unconditionally rather than mirroring the per-account
+			// allowlist: for a load pool, under-selecting costs a few
+			// connections and over-selecting costs silent measurement loss,
+			// so it fails safe in the same direction as roomGlobal.
+			"origin": bson.M{"$ne": model.OriginTeams},
 		}}},
 		{{Key: "$group", Value: bson.M{"_id": "$u.account"}}},
 		{{Key: "$sort", Value: bson.M{"_id": 1}}},
@@ -185,6 +228,10 @@ func runPoolExport(ctx context.Context, cfg *config, args []string) int {
 	_ = fs.Parse(args)
 	if *runID == "" {
 		fmt.Fprintln(os.Stderr, "--run-id required")
+		return 2
+	}
+	if err := validatePoolRunID(*runID); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	if *limit < 0 {

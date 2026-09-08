@@ -13,14 +13,17 @@ import (
 
 // fakeObjects is an in-memory object store keyed by "bucket/key".
 type fakeObjects struct {
-	data   map[string][]byte
-	putErr error
-	getErr error
+	data         map[string][]byte
+	contentTypes map[string]string
+	putErr       error
+	getErr       error
 }
 
-func newFakeObjects() *fakeObjects { return &fakeObjects{data: map[string][]byte{}} }
+func newFakeObjects() *fakeObjects {
+	return &fakeObjects{data: map[string][]byte{}, contentTypes: map[string]string{}}
+}
 
-func (f *fakeObjects) put(_ context.Context, bucket, key string, r io.Reader, _ int64) error {
+func (f *fakeObjects) put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string) error {
 	if f.putErr != nil {
 		return f.putErr
 	}
@@ -29,6 +32,7 @@ func (f *fakeObjects) put(_ context.Context, bucket, key string, r io.Reader, _ 
 		return err
 	}
 	f.data[bucket+"/"+key] = b
+	f.contentTypes[bucket+"/"+key] = contentType
 	return nil
 }
 
@@ -38,7 +42,7 @@ func (f *fakeObjects) get(_ context.Context, bucket, key string) (io.ReadCloser,
 	}
 	b, ok := f.data[bucket+"/"+key]
 	if !ok {
-		return nil, errors.New("no such object")
+		return nil, ErrObjectNotFound
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
@@ -239,4 +243,32 @@ func TestStore_UncompressedKeyRoundTrips(t *testing.T) {
 	got, err := s.Load(context.Background(), "plain.json", "site-a")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"alice", "bob"}, got.Accounts)
+}
+
+// The manifest is plain JSON under a plain key, so labelling every object
+// application/gzip made tooling that reads object metadata unable to parse
+// it without guessing. Content type follows the key, like compression does.
+func TestStore_ContentTypeFollowsTheKey(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	ctx := context.Background()
+
+	require.NoError(t, s.Put(ctx, "pool.json.gz", testArtifact()))
+	assert.Equal(t, "application/gzip", f.contentTypes["b/pool.json.gz"])
+
+	require.NoError(t, s.PutJSON(ctx, "pool-manifest.json", map[string]string{"a": "b"}))
+	assert.Equal(t, "application/json", f.contentTypes["b/pool-manifest.json"])
+
+	require.NoError(t, s.PutJSON(ctx, "big-manifest.json.gz", map[string]string{"a": "b"}))
+	assert.Equal(t, "application/gzip", f.contentTypes["b/big-manifest.json.gz"])
+}
+
+// A missing object has to be distinguishable from a broken one: the exporter
+// treats "nothing published yet" as the normal first run and any other
+// failure as an error, and it cannot tell them apart from an opaque string.
+func TestStore_LoadReportsAMissingObject(t *testing.T) {
+	s := newStore(newFakeObjects(), "b", "p")
+	_, err := s.Load(context.Background(), "never-written.json.gz", "site-a")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrObjectNotFound)
 }

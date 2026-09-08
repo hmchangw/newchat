@@ -24,8 +24,17 @@ reasons behind the parts that look optional but are not.
   └──────────────────────────────┘
 ```
 
-Run the Job before the StatefulSet. `pool-export` is idempotent for a given
-`--run-id`: re-running it overwrites the same two objects.
+Run the Job before the StatefulSet.
+
+**A run ID names one immutable population.** Re-running `pool-export` with the
+same `--run-id` succeeds only while the population is unchanged — a retried
+Job is safe. If the accounts have changed, it **fails** and tells you to use a
+new run ID, because overwriting a pool a fleet may already be reading is the
+one thing that breaks the invariant below: pods that started before and pods
+that restart after would slice different arrays.
+
+`--run-id` becomes a path segment, so it must match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` and be neither `.` nor `..`.
 
 ## Why not each pod querying MongoDB itself
 
@@ -71,7 +80,8 @@ Env — all of these already exist in the loadgen half of the chart except the
 ### What it exports
 
 ```text
-subscriptions: {siteId, roomType: "channel", open: {$ne: false}}
+subscriptions: {siteId, roomType: "channel", open: {$ne: false},
+                origin: {$ne: "teams"}}
              → distinct u.account, sorted ascending
 ```
 
@@ -80,7 +90,32 @@ clientsim opens room lanes only for channels, because DM traffic arrives on
 the user lane instead. An account with no channel subscription would connect
 cleanly and then measure nothing.
 
+The **`origin` exclusion matters for the same reason**. user-service hides
+Teams-origin rooms from `subscription.list` unless `SHOW_TEAMS_ROOM` (default
+`false`) or the account is allowlisted. Without it, an account whose only
+channel subscriptions are Teams rooms is exported, walks to an *empty* plan,
+and reports ready while subscribing to nothing. It is applied unconditionally
+rather than mirroring the per-account allowlist: for a load pool,
+under-selecting costs a few connections and over-selecting costs silent
+measurement loss.
+
 The sort is load-bearing, not cosmetic — see the sharding note above.
+
+### Index
+
+The query starts on `siteId + roomType + open`, and the subscriptions
+collection carries no index for that shape (`u.account + roomType` and
+`name + roomType` today). Note that an index would help here by being
+**covering**, not by being selective: on a single-site deployment the query
+legitimately needs most of the channel subscriptions, so the win is skipping
+the document fetches, not the scan.
+
+A covering index would be `{siteId: 1, roomType: 1, open: 1, "u.account": 1}`.
+It is **not** created by this tool — a load tool must not mutate the schema of
+the database under test, and the write amplification on a hot collection is
+the subscriptions owner's call. Until it exists, expect the Job to do a
+collection scan; measure with `explain("executionStats")` against a
+production-sized collection before deciding.
 
 An empty result **fails the Job**. A fleet started against nobody reports a
 healthy zero, and this is the last place that can say why.

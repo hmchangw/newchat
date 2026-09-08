@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -69,8 +70,23 @@ func (c *StoreConfig) Validate() error {
 // returns *minio.Object — a concrete type a test cannot fabricate, which
 // would force every store test through a container.
 type objects interface {
-	put(ctx context.Context, bucket, key string, r io.Reader, size int64) error
+	put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) error
 	get(ctx context.Context, bucket, key string) (io.ReadCloser, error)
+}
+
+// ErrObjectNotFound distinguishes "nothing published yet" from a broken
+// store. The exporter treats the first as a normal first run and anything
+// else as a failure, and it cannot tell them apart from an opaque string.
+var ErrObjectNotFound = errors.New("pool object not found")
+
+// contentTypeFor follows the key, exactly as compression does, so the two
+// cannot disagree: a plain-JSON manifest labelled application/gzip is
+// unparseable to anything reading object metadata.
+func contentTypeFor(key string) string {
+	if isGzipPath(key) {
+		return "application/gzip"
+	}
+	return "application/json"
 }
 
 // Store reads and writes pool artifacts in an object store.
@@ -82,9 +98,9 @@ type Store struct {
 
 type minioObjects struct{ c *minio.Client }
 
-func (m minioObjects) put(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+func (m minioObjects) put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) error {
 	_, err := m.c.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{
-		ContentType: "application/gzip",
+		ContentType: contentType,
 	})
 	if err != nil {
 		return fmt.Errorf("put %s/%s: %w", bucket, key, err)
@@ -95,9 +111,19 @@ func (m minioObjects) put(ctx context.Context, bucket, key string, r io.Reader, 
 func (m minioObjects) get(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
 	obj, err := m.c.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("get %s/%s: %w", bucket, key, err)
+		return nil, fmt.Errorf("get %s/%s: %w", bucket, key, asNotFound(err))
 	}
 	return obj, nil
+}
+
+// asNotFound maps the object store's own missing-key code onto the package
+// sentinel. GetObject is lazy — it does not reach the server until the first
+// read — so this has to be applied on the read path too.
+func asNotFound(err error) error {
+	if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		return fmt.Errorf("%w: %s", ErrObjectNotFound, err)
+	}
+	return err
 }
 
 // NewStore connects to the configured object store.
@@ -139,7 +165,7 @@ func (s *Store) Put(ctx context.Context, key string, a *Artifact) error {
 			return fmt.Errorf("compress pool artifact: %w", err)
 		}
 	}
-	return s.objects.put(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)))
+	return s.objects.put(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), contentTypeFor(key))
 }
 
 // PutJSON stores an arbitrary JSON document beside the artifact — the export
@@ -156,7 +182,7 @@ func (s *Store) PutJSON(ctx context.Context, key string, v any) error {
 			return fmt.Errorf("compress %s: %w", key, err)
 		}
 	}
-	return s.objects.put(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)))
+	return s.objects.put(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), contentTypeFor(key))
 }
 
 // Load fetches and validates an artifact, applying the same caps as the file
@@ -170,7 +196,7 @@ func (s *Store) Load(ctx context.Context, key, wantSiteID string) (*Artifact, er
 	defer r.Close() //nolint:errcheck // read-only handle
 	data, err := readCapped(r, isGzipPath(key))
 	if err != nil {
-		return nil, err
+		return nil, asNotFound(err)
 	}
 	return decodeAndValidate(data, wantSiteID)
 }
