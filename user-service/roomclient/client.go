@@ -3,6 +3,7 @@ package roomclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -105,9 +106,16 @@ func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account strin
 	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
 		return remoteErr
 	}
-	var resp model.RoomThreadReadAllResponse
+	// Decoded through a pointer, not a value: JSON null unmarshals into a
+	// struct as a no-op, so a value decode accepts `null` and reports a clear
+	// that never happened. A pointer leaves it nil, which is the difference
+	// between "the documented empty object" and "no acknowledgement at all".
+	var resp *model.RoomThreadReadAllResponse
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
 		return fmt.Errorf("decode clear-all-thread-unread reply: %w", err)
+	}
+	if resp == nil {
+		return errors.New("clear-all-thread-unread reply was null, not the documented empty object")
 	}
 	return nil
 }

@@ -294,6 +294,10 @@ func TestClearAllThreadUnread_Integration(t *testing.T) {
 			[]byte(`{"stat`),
 			[]byte(`not json at all`),
 			[]byte(`[]`),
+			// JSON null decodes into a struct as a no-op, so a value decode
+			// accepts it and the caller reports a clear that never happened.
+			// It is not the documented `{}` and carries no acknowledgement.
+			[]byte(`null`),
 			nil,
 		} {
 			nc := dial(t)
