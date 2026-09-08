@@ -19,13 +19,7 @@ import (
 )
 
 const (
-	soakFailureScenario                   = "message_soak"
 	soakFailureTrafficProfile             = "cassandra-soak-v1"
-	soakFailureLaneMessageSend            = "message_send"
-	soakFailureLaneMemberMutation         = "member_mutation"
-	soakFailureLaneRoomMutation           = "room_mutation"
-	soakFailureLaneRoomCreate             = "room_create"
-	soakFailureLaneReadReceipt            = "read_receipt"
 	soakFailureDefaultLedgerEpoch         = "v1"
 	soakFailureAttributeRoomID            = "room_id"
 	soakFailureAttributeAccount           = "account"
@@ -822,7 +816,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, bool, error) {
 		r.recordClaim(soakReconcileClaimIdle)
 		return false, false, nil
 	}
-	r.recordClaimLag(now, operation.nextVerifyAt)
+	r.recordClaimLag(now, operation.NextVerifyAt())
 	if _, historyObserved := operation.Observations[failureObserverHistory]; historyObserved {
 		if _, recipientObserved := operation.Observations[failureObserverRecipient]; !recipientObserved &&
 			slices.Contains(operation.Expected, failureObserverRecipient) {

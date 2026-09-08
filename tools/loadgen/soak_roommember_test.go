@@ -224,7 +224,7 @@ func TestSoakRoomLanes_ReconcileBacksOffRepeatedRoomStateProbes(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, reconciled)
 	operation := soakSingleActiveOperation(t, fixture.ledger)
-	assert.Equal(t, fixture.now.Add(2*time.Second), operation.nextVerifyAt)
+	assert.Equal(t, fixture.now.Add(2*time.Second), operation.NextVerifyAt())
 
 	fixture.advance(time.Second)
 	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
@@ -249,7 +249,7 @@ func TestSoakRoomLanes_ReconcileSchedulesProbeFromVerificationCompletion(t *test
 	wait := max(
 		fixture.now.Sub(operation.VerifyAfter), fixture.lanes.cfg.RetryInterval,
 	)
-	assert.Equal(t, fixture.now.Add(wait), operation.nextVerifyAt,
+	assert.Equal(t, fixture.now.Add(wait), operation.NextVerifyAt(),
 		"verification latency must not make the released probe immediately due")
 }
 
@@ -261,8 +261,8 @@ func TestSoakRoomLanes_RepeatedAbsentProbesStillReachTheDeadlineVerdict(t *testi
 	probes := 0
 	for probes < 16 && len(fixture.ledger.ActiveOperations()) > 0 {
 		operation := soakSingleActiveOperation(t, fixture.ledger)
-		if operation.nextVerifyAt.After(fixture.now) {
-			fixture.advance(operation.nextVerifyAt.Sub(fixture.now))
+		if operation.NextVerifyAt().After(fixture.now) {
+			fixture.advance(operation.NextVerifyAt().Sub(fixture.now))
 		}
 		reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
 		require.NoError(t, err)
@@ -1094,14 +1094,14 @@ func TestSoakRoomLanes_RoomCreateRetriesOwnershipFailuresAtTheFlatInterval(t *te
 	require.NoError(t, err)
 	assert.True(t, reconciled)
 	first := soakSingleActiveOperation(t, fixture.ledger)
-	assert.Equal(t, fixture.now.Add(fixture.lanes.cfg.RetryInterval), first.nextVerifyAt)
+	assert.Equal(t, fixture.now.Add(fixture.lanes.cfg.RetryInterval), first.NextVerifyAt())
 
 	fixture.advance(fixture.lanes.cfg.RetryInterval)
 	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
 	require.NoError(t, err)
 	assert.True(t, reconciled)
 	second := soakSingleActiveOperation(t, fixture.ledger)
-	assert.Equal(t, fixture.now.Add(fixture.lanes.cfg.RetryInterval), second.nextVerifyAt,
+	assert.Equal(t, fixture.now.Add(fixture.lanes.cfg.RetryInterval), second.NextVerifyAt(),
 		"a failed ownership call must not inherit pending-effect backoff")
 }
 
@@ -1143,7 +1143,7 @@ func TestSoakRoomLanes_RoomCreateCapsOwnershipRetryAtDeadline(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, reconciled)
 	retry := soakSingleActiveOperation(t, fixture.ledger)
-	assert.Equal(t, operation.Deadline, retry.nextVerifyAt,
+	assert.Equal(t, operation.Deadline, retry.NextVerifyAt(),
 		"the terminal ownership attempt must remain claimable at the deadline")
 }
 
@@ -1161,7 +1161,7 @@ func TestSoakRoomLanes_ExpiryLeavesTerminalOwnershipAttemptToTheLane(t *testing.
 	require.NoError(t, err)
 	require.True(t, reconciled)
 	retry := soakSingleActiveOperation(t, fixture.ledger)
-	require.Equal(t, operation.Deadline, retry.nextVerifyAt)
+	require.Equal(t, operation.Deadline, retry.NextVerifyAt())
 
 	fixture.advance(500 * time.Millisecond)
 	expiredIDs, err := fixture.ledger.Expire(fixture.now)

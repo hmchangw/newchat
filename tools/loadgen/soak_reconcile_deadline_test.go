@@ -139,7 +139,7 @@ func TestSoakFailureReconciler_AnUnansweredProbeRetriesFlatNotBackedOff(t *testi
 
 	operation := ledger.active[pending.MessageID]
 	require.NotNil(t, operation)
-	assert.Equal(t, now.Add(retry), operation.nextVerifyAt,
+	assert.Equal(t, now.Add(retry), operation.NextVerifyAt(),
 		"an unanswered probe retries the call, and a failed call keeps the flat interval")
 }
 

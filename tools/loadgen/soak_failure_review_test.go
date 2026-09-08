@@ -167,7 +167,7 @@ func TestSoakFailureReconciler_ReleasesMalformedClaim(t *testing.T) {
 	assert.True(t, processed)
 	assert.ErrorContains(t, err, "without an unresolved observer")
 	ledger.mu.Lock()
-	assert.False(t, ledger.active["malformed"].claimed)
+	assert.False(t, ledger.active["malformed"].Claimed())
 	ledger.mu.Unlock()
 }
 

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,227 +15,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
-
-type failureObserver string
-
-const (
-	failureObserverAdmission failureObserver = "admission"
-	failureObserverHistory   failureObserver = "cassandra_history"
-)
-
-// failureObserverContractSchemaVersion is 2 because the contract became
-// per-lane: version 1 declared one observer set for the whole scenario, which
-// no longer describes a run whose lanes require different observers.
-const failureObserverContractSchemaVersion = 2
-
-type failureObserverContract struct {
-	SchemaVersion            int                          `json:"schemaVersion"`
-	Scenario                 string                       `json:"scenario"`
-	Observers                []failureObserver            `json:"observers"`
-	Lanes                    map[string][]failureObserver `json:"lanes"`
-	RecipientObserverEnabled bool                         `json:"recipientObserverEnabled"`
-}
-
-// newFailureObserverContract builds the contract the WAL header stores. Both
-// optional observers are additive: with each disabled the contract is identical
-// to one built without them ever existing, so enabling search observation is
-// the only thing that requires a new ledger epoch.
-func newFailureObserverContract(recipientEnabled, searchEnabled bool) failureObserverContract {
-	messageObservers := []failureObserver{failureObserverAdmission, failureObserverHistory}
-	if recipientEnabled {
-		messageObservers = append(messageObservers, failureObserverRecipient)
-	}
-	if searchEnabled {
-		messageObservers = append(messageObservers, failureObserverSearchIndex)
-	}
-	roomObservers := []failureObserver{failureObserverAdmission, failureObserverRoomState}
-	observers := []failureObserver{
-		failureObserverAdmission, failureObserverHistory, failureObserverRoomState,
-	}
-	if recipientEnabled {
-		observers = append(observers, failureObserverRecipient)
-	}
-	if searchEnabled {
-		observers = append(observers, failureObserverSearchIndex)
-	}
-	slices.Sort(observers)
-	return failureObserverContract{
-		SchemaVersion: failureObserverContractSchemaVersion,
-		Scenario:      soakFailureScenario, Observers: observers,
-		Lanes: map[string][]failureObserver{
-			soakFailureLaneMessageSend:    messageObservers,
-			soakFailureLaneMemberMutation: slices.Clone(roomObservers),
-			soakFailureLaneRoomMutation:   slices.Clone(roomObservers),
-			soakFailureLaneRoomCreate:     slices.Clone(roomObservers),
-			soakFailureLaneReadReceipt:    slices.Clone(roomObservers),
-		},
-		RecipientObserverEnabled: recipientEnabled,
-	}
-}
-
-type failureOperationType string
-
-const (
-	failureOperationMessageCreate failureOperationType = "message_create"
-	failureOperationMemberAdd     failureOperationType = "member_add"
-	failureOperationMemberRemove  failureOperationType = "member_remove"
-	failureOperationRoomRename    failureOperationType = "room_rename"
-	failureOperationMuteToggle    failureOperationType = "mute_toggle"
-	failureOperationRoomCreate    failureOperationType = "room_create"
-	failureOperationMessageRead   failureOperationType = "message_read"
-)
-
-var failureOperationTypeRegistry = map[failureOperationType]struct{}{
-	failureOperationMessageCreate: {}, failureOperationMemberAdd: {},
-	failureOperationMemberRemove: {}, failureOperationRoomRename: {},
-	failureOperationMuteToggle: {}, failureOperationRoomCreate: {},
-	failureOperationMessageRead: {},
-}
-
-type failureOperationLifecycle string
-
-const (
-	failureOperationJournaled failureOperationLifecycle = "journaled"
-	failureOperationActive    failureOperationLifecycle = "active"
-)
-
-type failureEffect string
-
-const (
-	failureEffectAdmission        failureEffect = "admission"
-	failureEffectMessagePersisted failureEffect = "message_persisted"
-	failureEffectRecipientEvent   failureEffect = "recipient_event"
-	failureEffectMemberState      failureEffect = "member_state"
-	failureEffectRoomName         failureEffect = "room_name"
-	failureEffectSubscriptionMute failureEffect = "subscription_mute"
-	failureEffectRoomCreated      failureEffect = "room_created"
-	failureEffectSubscriptionRead failureEffect = "subscription_read"
-	failureEffectMessageIndexed   failureEffect = "message_indexed"
-)
-
-type failureCardinality struct {
-	Mode   string `json:"mode"`
-	Count  int    `json:"count"`
-	SHA256 string `json:"sha256"`
-}
-
-type failureExpectedEffect struct {
-	Effect      failureEffect       `json:"effect"`
-	Observer    failureObserver     `json:"observer"`
-	Required    bool                `json:"required"`
-	Cardinality *failureCardinality `json:"cardinality,omitempty"`
-}
-
-func messageCreateExpectedEffectsForObservers(
-	recipientEnabled bool,
-	searchEnabled bool,
-	recipientCount int,
-	recipientHash string,
-) []failureExpectedEffect {
-	effects := []failureExpectedEffect{
-		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
-		{Effect: failureEffectMessagePersisted, Observer: failureObserverHistory, Required: true},
-	}
-	if recipientEnabled {
-		effects = append(effects, failureExpectedEffect{
-			Effect: failureEffectRecipientEvent, Observer: failureObserverRecipient, Required: true,
-			Cardinality: &failureCardinality{Mode: "exact_set_hash", Count: recipientCount, SHA256: recipientHash},
-		})
-	}
-	if searchEnabled {
-		effects = append(effects, failureExpectedEffect{
-			Effect: failureEffectMessageIndexed, Observer: failureObserverSearchIndex,
-			Required: true,
-		})
-	}
-	return effects
-}
-
-func memberMutationExpectedEffects() []failureExpectedEffect {
-	return []failureExpectedEffect{
-		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
-		{Effect: failureEffectMemberState, Observer: failureObserverRoomState, Required: true},
-	}
-}
-
-func roomMutationExpectedEffects(operationType failureOperationType) []failureExpectedEffect {
-	effect := failureEffectRoomName
-	if operationType == failureOperationMuteToggle {
-		effect = failureEffectSubscriptionMute
-	}
-	return []failureExpectedEffect{
-		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
-		{Effect: effect, Observer: failureObserverRoomState, Required: true},
-	}
-}
-
-func readReceiptExpectedEffects() []failureExpectedEffect {
-	return []failureExpectedEffect{
-		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
-		{Effect: failureEffectSubscriptionRead, Observer: failureObserverRoomState, Required: true},
-	}
-}
-
-func roomCreateExpectedEffects() []failureExpectedEffect {
-	return []failureExpectedEffect{
-		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
-		{Effect: failureEffectRoomCreated, Observer: failureObserverRoomState, Required: true},
-	}
-}
-
-type failureObservation string
-
-const (
-	failureObservationGood failureObservation = "good"
-	failureObservationBad  failureObservation = "bad"
-	// failureObservationUnverified records that the observer itself could not
-	// answer. It is an availability signal, never evidence of data loss.
-	failureObservationUnverified           failureObservation = "unverified"
-	failureObservationMissingAfterDeadline failureObservation = "missing_after_deadline"
-)
-
-type failureReason string
-
-const (
-	failureReasonNone                      failureReason = ""
-	failureReasonAdmissionRejected         failureReason = "admission_rejected"
-	failureReasonHistoryContentMismatch    failureReason = "history_content_mismatch"
-	failureReasonHistoryMissing            failureReason = "history_missing"
-	failureReasonRecipientDuplicate        failureReason = "recipient_duplicate"
-	failureReasonRecipientUnexpected       failureReason = "recipient_unexpected"
-	failureReasonRecipientIdentityMismatch failureReason = "recipient_identity_mismatch"
-	failureReasonRecipientMissing          failureReason = "recipient_missing"
-	failureReasonPublishLocalError         failureReason = "publish_local_error"
-	failureReasonMemberStateMismatch       failureReason = "member_state_mismatch"
-	failureReasonRoomNameMismatch          failureReason = "room_name_mismatch"
-	failureReasonMuteStateMismatch         failureReason = "mute_state_mismatch"
-	failureReasonRoomStateMissing          failureReason = "room_state_missing"
-	failureReasonReadStateRegressed        failureReason = "read_state_regressed"
-)
-
-var failureReasonRegistry = map[failureReason]struct{}{
-	failureReasonNone: {}, failureReasonAdmissionRejected: {},
-	failureReasonHistoryContentMismatch: {}, failureReasonHistoryMissing: {},
-	failureReasonRecipientDuplicate: {}, failureReasonRecipientUnexpected: {},
-	failureReasonRecipientIdentityMismatch: {}, failureReasonRecipientMissing: {},
-	failureReasonPublishLocalError: {}, failureReasonMemberStateMismatch: {},
-	failureReasonRoomNameMismatch: {}, failureReasonMuteStateMismatch: {},
-	failureReasonRoomStateMissing: {}, failureReasonReadStateRegressed: {},
-}
-
-var errFailureObserverContractMismatch = errors.New("failure observer contract mismatch")
-
-type failureResult string
-
-const (
-	failureResultGood       failureResult = "good"
-	failureResultBad        failureResult = "bad"
-	failureResultUnverified failureResult = "unverified"
-	// failureResultNotSent terminates an operation whose intent was journaled
-	// but whose publish never left the process, so no side effect is expected.
-	failureResultNotSent              failureResult = "not_sent"
-	failureResultMissingAfterDeadline failureResult = "missing_after_deadline"
 )
 
 var (
@@ -276,47 +54,6 @@ var failureInvalidationReasonRegistry = map[string]struct{}{
 	"sidecar": {},
 }
 
-var failureOperationScenarioRegistry = map[string]struct{}{
-	soakFailureScenario: {},
-}
-
-var failureOperationLaneRegistry = map[string]struct{}{
-	soakFailureLaneMessageSend:    {},
-	soakFailureLaneMemberMutation: {},
-	soakFailureLaneRoomMutation:   {},
-	soakFailureLaneRoomCreate:     {},
-	soakFailureLaneReadReceipt:    {},
-}
-
-type failureOperation struct {
-	SchemaVersion      int                                    `json:"schemaVersion,omitempty"`
-	ID                 string                                 `json:"operationId"`
-	CorrelationID      string                                 `json:"correlationId,omitempty"`
-	RunID              string                                 `json:"runId,omitempty"`
-	Scenario           string                                 `json:"scenario"`
-	Lane               string                                 `json:"lane"`
-	OperationType      failureOperationType                   `json:"operationType,omitempty"`
-	StartedAt          time.Time                              `json:"startedAt"`
-	VerifyAfter        time.Time                              `json:"verifyAfter"`
-	Deadline           time.Time                              `json:"deadline"`
-	Targets            map[string]string                      `json:"targets,omitempty"`
-	Effects            []failureExpectedEffect                `json:"expectedEffects,omitempty"`
-	Expected           []failureObserver                      `json:"expected,omitempty"`
-	Attributes         map[string]string                      `json:"attributes,omitempty"`
-	Observations       map[failureObserver]failureObservation `json:"observations,omitempty"`
-	ObservationReasons map[failureObserver]failureReason      `json:"observationReasons,omitempty"`
-	FinalResult        failureResult                          `json:"finalResult,omitempty"`
-	FinalReason        failureReason                          `json:"finalReason,omitempty"`
-	EvidenceRefs       []string                               `json:"evidenceRefs,omitempty"`
-	LifecycleState     failureOperationLifecycle              `json:"lifecycleState,omitempty"`
-
-	nextVerifyAt time.Time
-	claimed      bool
-	// heapIndex is the operation's position in the ledger's verification queue,
-	// or -1 when it is not queued.
-	heapIndex int
-}
-
 type failureLedgerEvent struct {
 	SchemaVersion     int                                               `json:"schemaVersion,omitempty"`
 	Type              string                                            `json:"type"`
@@ -331,36 +68,6 @@ type failureLedgerEvent struct {
 	NotSent           []string                                          `json:"notSent,omitempty"`
 	InvalidReason     string                                            `json:"invalidReason,omitempty"`
 	At                time.Time                                         `json:"at"`
-}
-
-//nolint:gocritic // A value receiver preserves json.Marshaler behavior for operation values and pointers.
-func (o failureOperation) MarshalJSON() ([]byte, error) {
-	type operationAlias failureOperation
-	if o.SchemaVersion == 0 {
-		legacy := struct {
-			ID string `json:"id"`
-			operationAlias
-		}{ID: o.ID, operationAlias: operationAlias(o)}
-		legacy.operationAlias.ID = ""
-		return json.Marshal(legacy)
-	}
-	return json.Marshal(operationAlias(o))
-}
-
-func (o *failureOperation) UnmarshalJSON(data []byte) error {
-	type operationAlias failureOperation
-	var decoded struct {
-		LegacyID string `json:"id"`
-		operationAlias
-	}
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	*o = failureOperation(decoded.operationAlias)
-	if o.ID == "" {
-		o.ID = decoded.LegacyID
-	}
-	return nil
 }
 
 const (
@@ -483,13 +190,13 @@ type failureVerifyQueue []*failureOperation
 func (q failureVerifyQueue) Len() int { return len(q) }
 
 func (q failureVerifyQueue) Less(i, j int) bool {
-	return q[i].nextVerifyAt.Before(q[j].nextVerifyAt)
+	return q[i].NextVerifyAt().Before(q[j].NextVerifyAt())
 }
 
 func (q failureVerifyQueue) Swap(i, j int) {
 	q[i], q[j] = q[j], q[i]
-	q[i].heapIndex = i
-	q[j].heapIndex = j
+	q[i].SetHeapIndex(i)
+	q[j].SetHeapIndex(j)
 }
 
 func (q *failureVerifyQueue) Push(item any) {
@@ -497,7 +204,7 @@ func (q *failureVerifyQueue) Push(item any) {
 	if !ok {
 		return
 	}
-	operation.heapIndex = len(*q)
+	operation.SetHeapIndex(len(*q))
 	*q = append(*q, operation)
 }
 
@@ -506,7 +213,7 @@ func (q *failureVerifyQueue) Pop() any {
 	last := len(old) - 1
 	operation := old[last]
 	old[last] = nil
-	operation.heapIndex = -1
+	operation.SetHeapIndex(-1)
 	*q = old[:last]
 	return operation
 }
@@ -602,7 +309,7 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 	}
 	tracked.Observations = make(map[failureObserver]failureObservation)
 	tracked.ObservationReasons = make(map[failureObserver]failureReason)
-	tracked.nextVerifyAt = tracked.VerifyAfter
+	tracked.SetNextVerifyAt(tracked.VerifyAfter)
 
 	l.mu.Lock()
 	if err := l.ensureOpen(); err != nil {
@@ -728,7 +435,7 @@ func (l *failureLedger) AbandonWithReason(
 	if !validFailureResult(result) {
 		return fmt.Errorf("invalid failure result %q", result)
 	}
-	if _, known := failureReasonRegistry[reason]; !known {
+	if !validFailureReason(reason) {
 		return fmt.Errorf("unsupported failure final reason %q", reason)
 	}
 	if result == failureResultBad && reason == failureReasonNone {
@@ -792,7 +499,7 @@ func (l *failureLedger) ObserveWithReason(
 	reason failureReason,
 	at time.Time,
 ) (bool, error) {
-	if _, known := failureReasonRegistry[reason]; !known {
+	if !validFailureReason(reason) {
 		return false, fmt.Errorf("unsupported failure observation reason %q", reason)
 	}
 	if (observation == failureObservationBad ||
@@ -865,7 +572,7 @@ func (l *failureLedger) ObserveWithReason(
 	operation.Observations[observer] = observation
 	operation.ObservationReasons[observer] = reason
 	l.countObservationLocked(observer, observation)
-	operation.claimed = false
+	operation.SetClaimed(false)
 	l.dequeueLocked(operation)
 	if l.recorder != nil {
 		l.recorder.ObservationRecorded(
@@ -888,26 +595,6 @@ func (l *failureLedger) ObserveWithReason(
 		return false, err
 	}
 	return true, nil
-}
-
-func defaultFailureReason(
-	observer failureObserver,
-	observation failureObservation,
-) failureReason {
-	switch {
-	case observer == failureObserverAdmission && observation == failureObservationBad:
-		return failureReasonAdmissionRejected
-	case observer == failureObserverHistory && observation == failureObservationBad:
-		return failureReasonHistoryContentMismatch
-	case observer == failureObserverHistory && observation == failureObservationMissingAfterDeadline:
-		return failureReasonHistoryMissing
-	case observer == failureObserverRecipient && observation == failureObservationBad:
-		return failureReasonRecipientIdentityMismatch
-	case observer == failureObserverRecipient && observation == failureObservationMissingAfterDeadline:
-		return failureReasonRecipientMissing
-	default:
-		return failureReasonNone
-	}
 }
 
 // Expire finalizes every operation past its deadline and returns the IDs it
@@ -947,13 +634,13 @@ func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 		// window. One sweep interval of grace lets a healthy lane deliver the
 		// verdict; past that the lane really did not look, and unverified
 		// becomes the honest answer.
-		if now.Before(operation.nextVerifyAt.Add(failureExpiryGrace(operation))) {
+		if now.Before(operation.NextVerifyAt().Add(failureExpiryGrace(operation))) {
 			continue
 		}
 		// A claimed operation is mid-verification. Finalizing it here would
 		// discard a read-back that is about to succeed and report the message
 		// as missing; the next pass picks it up once the claim is released.
-		if operation.claimed {
+		if operation.Claimed() {
 			continue
 		}
 		for _, observer := range operation.Expected {
@@ -1030,10 +717,10 @@ func (l *failureLedger) claimDue(now time.Time, lanes []string) (failureOperatio
 	var earliest *failureVerifyQueue
 	for _, lane := range lanes {
 		queue := l.verifyQueues[lane]
-		if queue == nil || queue.Len() == 0 || now.Before((*queue)[0].nextVerifyAt) {
+		if queue == nil || queue.Len() == 0 || now.Before((*queue)[0].NextVerifyAt()) {
 			continue
 		}
-		if earliest == nil || (*queue)[0].nextVerifyAt.Before((*earliest)[0].nextVerifyAt) {
+		if earliest == nil || (*queue)[0].NextVerifyAt().Before((*earliest)[0].NextVerifyAt()) {
 			earliest = queue
 		}
 	}
@@ -1044,7 +731,7 @@ func (l *failureLedger) claimDue(now time.Time, lanes []string) (failureOperatio
 	if !ok {
 		return failureOperation{}, false
 	}
-	selected.claimed = true
+	selected.SetClaimed(true)
 	return *cloneFailureOperation(selected), true
 }
 
@@ -1057,14 +744,14 @@ func (l *failureLedger) ReleaseClaim(operationID string, next time.Time) error {
 			"release failure operation %q: %w", operationID, errFailureOperationNotActive,
 		)
 	}
-	operation.claimed = false
-	operation.nextVerifyAt = next.UTC()
+	operation.SetClaimed(false)
+	operation.SetNextVerifyAt(next.UTC())
 	l.enqueueLocked(operation)
 	return nil
 }
 
 func (l *failureLedger) enqueueLocked(operation *failureOperation) {
-	if operation.heapIndex >= 0 || operation.claimed {
+	if operation.HeapIndex() >= 0 || operation.Claimed() {
 		return
 	}
 	if !l.scheduleNextLocked(operation) {
@@ -1087,16 +774,17 @@ func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
 		if _, observed := operation.Observations[observer]; observed {
 			continue
 		}
-		if failureObserverRegistry[observer].Mode == failureObserverQuery {
-			if operation.nextVerifyAt.IsZero() {
-				operation.nextVerifyAt = operation.VerifyAfter
+		definition, _ := failureObserverDefinitionFor(observer)
+		if definition.Mode == failureObserverQuery {
+			if operation.NextVerifyAt().IsZero() {
+				operation.SetNextVerifyAt(operation.VerifyAfter)
 			}
 			return true
 		}
 	}
 	for _, observer := range operation.Expected {
 		if _, observed := operation.Observations[observer]; !observed {
-			operation.nextVerifyAt = operation.Deadline
+			operation.SetNextVerifyAt(operation.Deadline)
 			return true
 		}
 	}
@@ -1105,10 +793,10 @@ func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
 
 func (l *failureLedger) dequeueLocked(operation *failureOperation) {
 	queue := l.verifyQueues[operation.Lane]
-	if operation.heapIndex < 0 || queue == nil {
+	if operation.HeapIndex() < 0 || queue == nil {
 		return
 	}
-	heap.Remove(queue, operation.heapIndex)
+	heap.Remove(queue, operation.HeapIndex())
 }
 
 func (l *failureLedger) Snapshot() failureLedgerSnapshot {
@@ -1548,7 +1236,7 @@ func (l *failureLedger) replayEvent(
 				l.results[result] = count
 			}
 			for observer, counts := range event.ObservationCounts {
-				if _, known := failureObserverRegistry[observer]; !known {
+				if _, known := failureObserverDefinitionFor(observer); !known {
 					return fmt.Errorf("replay failure ledger event %d: invalid checkpoint observer %q", index, observer)
 				}
 				for observation, count := range counts {
@@ -1577,8 +1265,8 @@ func (l *failureLedger) replayEvent(
 				l.dropped++
 				return nil
 			}
-			operation.nextVerifyAt = operation.VerifyAfter
-			operation.claimed = false
+			operation.SetNextVerifyAt(operation.VerifyAfter)
+			operation.SetClaimed(false)
 			l.active[operation.ID] = operation
 		case failureLedgerEventActivated:
 			if _, skipped := dropped[event.OperationID]; skipped {
@@ -1615,7 +1303,7 @@ func (l *failureLedger) replayEvent(
 				return fmt.Errorf("replay failure ledger event %d: observer %q already recorded as %q", index, event.Observer, existing)
 			}
 			operation.Observations[event.Observer] = event.Observation
-			if _, known := failureReasonRegistry[event.Reason]; !known {
+			if !validFailureReason(event.Reason) {
 				return fmt.Errorf("replay failure ledger event %d: invalid observation reason %q", index, event.Reason)
 			}
 			if operation.ObservationReasons == nil {
@@ -1818,199 +1506,6 @@ func (l *failureLedger) journalInvalidationLocked(reason string) error {
 		l.recorder.JournalSize(l.journal.Size())
 	}
 	return nil
-}
-
-func validateFailureOperation(operation *failureOperation) error {
-	if operation == nil {
-		return fmt.Errorf("failure operation is required")
-	}
-	if operation.ID == "" || operation.Scenario == "" || operation.Lane == "" {
-		return fmt.Errorf("failure operation requires ID, scenario, and lane")
-	}
-	if _, known := failureOperationScenarioRegistry[operation.Scenario]; !known {
-		return fmt.Errorf("failure operation %q has unsupported scenario %q", operation.ID, operation.Scenario)
-	}
-	if _, known := failureOperationLaneRegistry[operation.Lane]; !known {
-		return fmt.Errorf("failure operation %q has unsupported lane %q", operation.ID, operation.Lane)
-	}
-	if operation.SchemaVersion != 0 && operation.SchemaVersion != 2 {
-		return fmt.Errorf("failure operation %q has unsupported schema version %d", operation.ID, operation.SchemaVersion)
-	}
-	if operation.SchemaVersion == 2 {
-		if operation.LifecycleState != failureOperationJournaled &&
-			operation.LifecycleState != failureOperationActive {
-			return fmt.Errorf("failure operation %q has invalid lifecycle state %q", operation.ID, operation.LifecycleState)
-		}
-		if _, known := failureOperationTypeRegistry[operation.OperationType]; !known {
-			return fmt.Errorf("version 2 failure operation %q has unsupported type %q", operation.ID, operation.OperationType)
-		}
-		if operation.RunID == "" || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
-			return fmt.Errorf("version 2 failure operation %q requires run, type, targets, and effects", operation.ID)
-		}
-		operation.Expected = make([]failureObserver, 0, len(operation.Effects))
-		seenEffects := make(map[string]struct{}, len(operation.Effects))
-		for _, effect := range operation.Effects {
-			definition, known := failureObserverRegistry[effect.Observer]
-			if !known || !slices.Contains(definition.Effects, effect.Effect) {
-				return fmt.Errorf("failure operation %q has unsupported effect %q for observer %q", operation.ID, effect.Effect, effect.Observer)
-			}
-			key := string(effect.Effect) + "\x00" + string(effect.Observer)
-			if _, duplicate := seenEffects[key]; duplicate {
-				return fmt.Errorf("failure operation %q repeats effect %q", operation.ID, effect.Effect)
-			}
-			seenEffects[key] = struct{}{}
-			if effect.Cardinality != nil && (effect.Cardinality.Mode != "exact_set_hash" || effect.Cardinality.Count <= 0 || effect.Cardinality.SHA256 == "") {
-				return fmt.Errorf("failure operation %q has invalid effect cardinality", operation.ID)
-			}
-			if effect.Required {
-				operation.Expected = append(operation.Expected, effect.Observer)
-			}
-		}
-	}
-	if operation.StartedAt.IsZero() || operation.VerifyAfter.IsZero() || operation.Deadline.IsZero() {
-		return fmt.Errorf("failure operation %q requires timestamps", operation.ID)
-	}
-	if operation.VerifyAfter.Before(operation.StartedAt) {
-		return fmt.Errorf("failure operation %q verify time precedes start", operation.ID)
-	}
-	if operation.Deadline.Before(operation.VerifyAfter) {
-		return fmt.Errorf("failure operation %q deadline precedes verification", operation.ID)
-	}
-	if len(operation.Expected) == 0 {
-		return fmt.Errorf("failure operation %q requires an observer", operation.ID)
-	}
-	seen := make(map[failureObserver]struct{}, len(operation.Expected))
-	for _, observer := range operation.Expected {
-		if observer == "" {
-			return fmt.Errorf("failure operation %q has an empty observer", operation.ID)
-		}
-		if _, duplicate := seen[observer]; duplicate {
-			return fmt.Errorf("failure operation %q repeats observer %q", operation.ID, observer)
-		}
-		seen[observer] = struct{}{}
-	}
-	if operation.Observations == nil {
-		operation.Observations = make(map[failureObserver]failureObservation)
-	}
-	operation.heapIndex = -1
-	return nil
-}
-
-func validFailureObservation(observation failureObservation) bool {
-	switch observation {
-	case failureObservationGood,
-		failureObservationBad,
-		failureObservationUnverified,
-		failureObservationMissingAfterDeadline:
-		return true
-	default:
-		return false
-	}
-}
-
-func validFailureResult(result failureResult) bool {
-	switch result {
-	case failureResultGood,
-		failureResultBad,
-		failureResultUnverified,
-		failureResultNotSent,
-		failureResultMissingAfterDeadline:
-		return true
-	default:
-		return false
-	}
-}
-
-// failureOperationResult collapses an operation's observations into one result.
-// Precedence runs from strongest evidence to weakest: a confirmed absence
-// outranks an ambiguous observation, which outranks "the observer could not
-// answer", which outranks success.
-func failureOperationResult(operation *failureOperation) failureResult {
-	result := failureResultGood
-	admissionAccepted := operation.Observations[failureObserverAdmission] == failureObservationGood
-	for observer, observation := range operation.Observations {
-		switch observation {
-		case failureObservationGood:
-		case failureObservationMissingAfterDeadline:
-			// Missing downstream evidence is a correctness failure only after
-			// admission authoritatively accepted an active publish. Otherwise the
-			// absence is ambiguous and must not hide stronger bad evidence.
-			if observer == failureObserverAdmission ||
-				operation.LifecycleState == failureOperationJournaled ||
-				!admissionAccepted {
-				if result == failureResultGood {
-					result = failureResultUnverified
-				}
-				continue
-			}
-			return failureResultMissingAfterDeadline
-		case failureObservationBad:
-			result = failureResultBad
-		case failureObservationUnverified:
-			if result == failureResultGood {
-				result = failureResultUnverified
-			}
-		}
-	}
-	return result
-}
-
-func failureOperationFinalReason(
-	operation *failureOperation,
-	result failureResult,
-) failureReason {
-	var terminalObservation failureObservation
-	switch result {
-	case failureResultBad:
-		terminalObservation = failureObservationBad
-	case failureResultMissingAfterDeadline:
-		terminalObservation = failureObservationMissingAfterDeadline
-	default:
-		return failureReasonNone
-	}
-	for _, observer := range operation.Expected {
-		if operation.Observations[observer] != terminalObservation {
-			continue
-		}
-		if reason := operation.ObservationReasons[observer]; reason != failureReasonNone {
-			return reason
-		}
-	}
-	return failureReasonNone
-}
-
-func cloneFailureOperation(operation *failureOperation) *failureOperation {
-	if operation == nil {
-		return nil
-	}
-	cloned := *operation
-	cloned.heapIndex = -1
-	cloned.Expected = append([]failureObserver(nil), operation.Expected...)
-	cloned.Effects = append([]failureExpectedEffect(nil), operation.Effects...)
-	for index := range cloned.Effects {
-		if operation.Effects[index].Cardinality != nil {
-			cardinality := *operation.Effects[index].Cardinality
-			cloned.Effects[index].Cardinality = &cardinality
-		}
-	}
-	cloned.Targets = make(map[string]string, len(operation.Targets))
-	for key, value := range operation.Targets {
-		cloned.Targets[key] = value
-	}
-	cloned.EvidenceRefs = append([]string(nil), operation.EvidenceRefs...)
-	cloned.Attributes = make(map[string]string, len(operation.Attributes))
-	for key, value := range operation.Attributes {
-		cloned.Attributes[key] = value
-	}
-	cloned.Observations = make(map[failureObserver]failureObservation, len(operation.Observations))
-	for observer, observation := range operation.Observations {
-		cloned.Observations[observer] = observation
-	}
-	cloned.ObservationReasons = make(map[failureObserver]failureReason, len(operation.ObservationReasons))
-	for observer, reason := range operation.ObservationReasons {
-		cloned.ObservationReasons[observer] = reason
-	}
-	return &cloned
 }
 
 type fileFailureWAL struct {
@@ -2221,80 +1716,6 @@ func (w *fileFailureWAL) ConfigureObserverContract(
 	}
 	w.legacy = true
 	return nil
-}
-
-func validateFailureObserverContract(contract failureObserverContract) error {
-	if contract.SchemaVersion != failureObserverContractSchemaVersion {
-		return fmt.Errorf("unsupported observer contract schema version %d", contract.SchemaVersion)
-	}
-	if contract.Scenario != soakFailureScenario {
-		return fmt.Errorf("observer contract scenario must be %q", soakFailureScenario)
-	}
-	if err := validateRegisteredObservers(contract.Observers); err != nil {
-		return err
-	}
-	if len(contract.Lanes) == 0 {
-		return fmt.Errorf("observer contract must declare at least one lane")
-	}
-	for lane, observers := range contract.Lanes {
-		if _, known := failureOperationLaneRegistry[lane]; !known {
-			return fmt.Errorf("observer contract declares unsupported lane %q", lane)
-		}
-		if len(observers) == 0 {
-			return fmt.Errorf("observer contract lane %q declares no observer", lane)
-		}
-		if err := validateRegisteredObservers(observers); err != nil {
-			return fmt.Errorf("observer contract lane %q: %w", lane, err)
-		}
-	}
-	// Recipient observation only applies to the message lane, so its enablement
-	// flag is checked there rather than against the scenario-wide union.
-	hasRecipient := slices.Contains(contract.Lanes[soakFailureLaneMessageSend], failureObserverRecipient)
-	if hasRecipient != contract.RecipientObserverEnabled {
-		return fmt.Errorf("recipient observer enablement does not match configured observers")
-	}
-	return nil
-}
-
-func equalFailureObserverContract(left, right failureObserverContract) bool {
-	return left.SchemaVersion == right.SchemaVersion &&
-		left.Scenario == right.Scenario &&
-		left.RecipientObserverEnabled == right.RecipientObserverEnabled &&
-		slices.Equal(left.Observers, right.Observers) &&
-		maps.EqualFunc(left.Lanes, right.Lanes, slices.Equal)
-}
-
-func cloneFailureObserverContract(contract *failureObserverContract) *failureObserverContract {
-	if contract == nil {
-		return nil
-	}
-	cloned := *contract
-	cloned.Observers = slices.Clone(contract.Observers)
-	if contract.Lanes != nil {
-		cloned.Lanes = make(map[string][]failureObserver, len(contract.Lanes))
-		for lane, observers := range contract.Lanes {
-			cloned.Lanes[lane] = slices.Clone(observers)
-		}
-	}
-	return &cloned
-}
-
-func failureOperationMatchesObserverContract(
-	operation *failureOperation,
-	contract failureObserverContract,
-) bool {
-	if operation == nil || operation.Scenario != contract.Scenario {
-		return false
-	}
-	configured, known := contract.Lanes[operation.Lane]
-	if !known {
-		return false
-	}
-	expected := slices.Clone(operation.Expected)
-	slices.Sort(expected)
-	laneObservers := slices.Clone(configured)
-	slices.Sort(laneObservers)
-	return slices.Equal(expected, laneObservers)
 }
 
 func (w *fileFailureWAL) writeHeaderLocked() error {
