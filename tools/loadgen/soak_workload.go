@@ -293,15 +293,3 @@ func waitSoakFailureInvalidation(
 		return false
 	}
 }
-
-// waitSoakDrain remains at the root because the failure NATS runtime shares it.
-func waitSoakDrain(done <-chan struct{}, budget time.Duration) bool {
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
-	select {
-	case <-done:
-		return true
-	case <-timer.C:
-		return false
-	}
-}

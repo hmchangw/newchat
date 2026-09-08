@@ -6,34 +6,60 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
-type lockedFailureClock struct {
+type lockedNATSClock struct {
 	mu  sync.Mutex
 	now time.Time
 }
 
-func newLockedFailureClock(now time.Time) *lockedFailureClock {
-	return &lockedFailureClock{now: now}
+func newLockedNATSClock(now time.Time) *lockedNATSClock {
+	return &lockedNATSClock{now: now}
 }
 
-func (c *lockedFailureClock) Now() time.Time {
+func (c *lockedNATSClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
 }
 
-func (c *lockedFailureClock) Advance(duration time.Duration) {
+func (c *lockedNATSClock) Advance(duration time.Duration) {
 	c.mu.Lock()
 	c.now = c.now.Add(duration)
 	c.mu.Unlock()
 }
 
+type recordingNATSObserver struct {
+	up      bool
+	reason  string
+	updates int
+}
+
+func (o *recordingNATSObserver) Set(up bool, _ time.Time, reason string) {
+	o.up = up
+	o.reason = reason
+	o.updates++
+}
+
+func TestLoadgenNATSHealth_UsesNarrowObserverContract(t *testing.T) {
+	health := newLoadgenNATSHealth("recipient_observer", nil, time.Now)
+	observer := &recordingNATSObserver{}
+	health.observer = observer
+
+	health.connected()
+	assert.True(t, observer.up)
+	assert.Equal(t, "connected", observer.reason)
+
+	health.disconnected(errors.New("connection reset"))
+	assert.False(t, observer.up)
+	assert.Equal(t, "disconnected", observer.reason)
+	assert.Equal(t, 2, observer.updates)
+}
+
 func TestLoadgenNATSHealth_TracksDisconnectAndRecovery(t *testing.T) {
-	clock := newLockedFailureClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
+	clock := newLockedNATSClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
 	metrics := NewMetrics()
 	t.Cleanup(metrics.stopNATSHealth)
 	health := newLoadgenNATSHealth("soak", metrics, clock.Now)
@@ -79,7 +105,7 @@ func TestLoadgenNATSHealth_ClosedInvalidatesConnectionState(t *testing.T) {
 }
 
 func TestLoadgenNATSHealth_AggregatesEveryConnectionInPool(t *testing.T) {
-	clock := newLockedFailureClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
+	clock := newLockedNATSClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
 	metrics := NewMetrics()
 	t.Cleanup(metrics.stopNATSHealth)
 	first := newLoadgenNATSHealth("recipient_observer", metrics, clock.Now)
@@ -167,7 +193,7 @@ func TestLoadgenNATSHealth_RejectsUnboundedPool(t *testing.T) {
 }
 
 func TestLoadgenNATSHealth_ObserverDisconnectOverflowAndReconnect(t *testing.T) {
-	clock := newLockedFailureClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
+	clock := newLockedNATSClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
 	metrics := NewMetrics()
 	t.Cleanup(metrics.stopNATSHealth)
 	observer := newFailureObserverHealth(failureObserverRecipient, clock.Now())
@@ -209,7 +235,7 @@ func TestLoadgenNATSHealth_StopTerminatesOutageTickers(t *testing.T) {
 	health.poolState.mu.Unlock()
 }
 
-func TestFailureNATSConnect_WrapsConnectionError(t *testing.T) {
+func TestLoadgenNATSHealth_ConnectWrapsConnectionError(t *testing.T) {
 	metrics := NewMetrics()
 	t.Cleanup(metrics.stopNATSHealth)
 
@@ -217,78 +243,4 @@ func TestFailureNATSConnect_WrapsConnectionError(t *testing.T) {
 
 	assert.Nil(t, connection)
 	assert.ErrorContains(t, err, "connect NATS pool daily")
-}
-
-type fakeSoakDrainConn struct {
-	drainErr        error
-	completeOnDrain bool
-	handler         nats.ConnHandler
-	drains          int
-	closes          int
-}
-
-func (c *fakeSoakDrainConn) ClosedHandler() nats.ConnHandler { return c.handler }
-
-func (c *fakeSoakDrainConn) SetClosedHandler(handler nats.ConnHandler) { c.handler = handler }
-
-func (c *fakeSoakDrainConn) Close() { c.closes++ }
-
-func (c *fakeSoakDrainConn) Drain() error {
-	c.drains++
-	if c.drainErr != nil {
-		return c.drainErr
-	}
-	if c.completeOnDrain && c.handler != nil {
-		c.handler(nil)
-	}
-	return nil
-}
-
-func TestDrainSoakNATS_UnderALeaseBudget(t *testing.T) {
-	t.Run("a completed drain leaves the evidence alone", func(t *testing.T) {
-		conn := &fakeSoakDrainConn{completeOnDrain: true}
-		reasons := []string{}
-
-		drainSoakNATS(conn, time.Minute, func(r string) { reasons = append(reasons, r) })
-
-		assert.Equal(t, 1, conn.drains)
-		assert.Zero(t, conn.closes)
-		assert.Empty(t, reasons)
-	})
-
-	t.Run("a drain past the budget is abandoned and invalidated", func(t *testing.T) {
-		conn := &fakeSoakDrainConn{}
-		reasons := []string{}
-
-		drainSoakNATS(conn, time.Millisecond, func(r string) { reasons = append(reasons, r) })
-
-		assert.Equal(t, 1, conn.closes)
-		assert.Equal(t, []string{invalidReasonLeaseAbort}, reasons)
-	})
-
-	t.Run("a drain that cannot start is treated the same way", func(t *testing.T) {
-		// Drain refuses on a closed or already-draining connection, so it never
-		// flushes: the pending publishes are in the same unknown state as a
-		// drain that ran out of budget, and the evidence has to say so.
-		conn := &fakeSoakDrainConn{drainErr: nats.ErrConnectionClosed}
-		reasons := []string{}
-
-		drainSoakNATS(conn, time.Minute, func(r string) { reasons = append(reasons, r) })
-
-		assert.Equal(t, 1, conn.closes)
-		assert.Equal(t, []string{invalidReasonLeaseAbort}, reasons)
-	})
-}
-
-func TestDrainSoakNATS_OrdinaryShutdownIsUnbounded(t *testing.T) {
-	conn := &fakeSoakDrainConn{drainErr: nats.ErrConnectionClosed}
-	reasons := []string{}
-
-	drainSoakNATS(conn, 0, func(r string) { reasons = append(reasons, r) })
-
-	// No lease to protect: the drain is started and the process moves on, and a
-	// refusal here is not evidence about the system under test.
-	assert.Equal(t, 1, conn.drains)
-	assert.Zero(t, conn.closes)
-	assert.Empty(t, reasons)
 }

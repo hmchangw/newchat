@@ -146,7 +146,7 @@ test-loadgen-failure-integration:
 FAILURE_COVERAGE_PROFILE ?= coverage-loadgen-failure.out
 coverage-loadgen-failure:
 	go test -race -run $(FAILURE_TEST_PATTERN) -coverprofile=$(FAILURE_COVERAGE_PROFILE) ./tools/loadgen/...
-	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_ -min 80
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_ -include tools/loadgen/nats_health.go -min 80
 	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_observer.go -min 90
 	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_metrics.go -min 90
 

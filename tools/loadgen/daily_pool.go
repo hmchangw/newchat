@@ -158,7 +158,7 @@ func connectWithCredsHealth(
 	credsFile,
 	pool string,
 	metrics *Metrics,
-	observers ...*failureObserverHealth,
+	observers ...loadgenNATSObserver,
 ) (*nats.Conn, error) {
 	health := newLoadgenNATSHealth(pool, metrics, nil)
 	if health == nil {
