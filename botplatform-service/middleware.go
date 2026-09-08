@@ -147,7 +147,7 @@ func botRateLimit(client incrExClient, perCaller, perGlobal int) gin.HandlerFunc
 		}
 
 		if perGlobal > 0 {
-			n, err := client.IncrEx(ctx, "botrl:global", window)
+			n, err := client.IncrEx(ctx, cachekeys.BotRateLimitGlobal(), window)
 			if err != nil {
 				errhttp.Write(ctx, c, errcode.Internal("bot rate limit global", errcode.WithCause(err)))
 				c.Abort()

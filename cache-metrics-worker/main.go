@@ -47,9 +47,24 @@ type config struct {
 	PProfEnabled bool   `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
+// maxScanCount caps the SCAN COUNT hint. COUNT is only a hint, but Valkey
+// still assembles a page of roughly that size and scanNode holds the whole
+// []string while it issues MEMORY USAGE for the sampled keys — so an
+// accidental extra digit costs memory on both the server and this worker at
+// once. 100k is far above any useful page size and far below a damaging one.
+const maxScanCount = 100_000
+
 // validate rejects config that would make the loop misbehave rather than fail
 // loudly: a non-positive interval panics time.NewTicker, and a non-positive
 // timeout cancels every scan before it starts.
+//
+// The three scan knobs are checked here because cachescan.Options.normalize
+// treats them permissively by design — it substitutes a default for a
+// non-positive count or rate and clamps a negative minimum to zero. That is
+// the right behaviour for a library with an optional Options, and the wrong
+// behaviour for an operator typo: CACHE_SCAN_MIN_SAMPLES=-1 would start
+// cleanly and silently disable the floor that keeps a cache holding fewer
+// keys than the sample rate from reporting zero bytes.
 func (c *config) validate() error {
 	if c.ScanInterval <= 0 {
 		return fmt.Errorf("CACHE_SCAN_INTERVAL must be positive, got %v", c.ScanInterval)
@@ -59,6 +74,15 @@ func (c *config) validate() error {
 	}
 	if len(c.ValkeyAddrs) == 0 {
 		return fmt.Errorf("VALKEY_ADDRS must list at least one address")
+	}
+	if c.ScanCount <= 0 || c.ScanCount > maxScanCount {
+		return fmt.Errorf("CACHE_SCAN_COUNT must be in 1..%d, got %d", maxScanCount, c.ScanCount)
+	}
+	if c.ScanSampleRate <= 0 {
+		return fmt.Errorf("CACHE_SCAN_SAMPLE_RATE must be positive, got %d", c.ScanSampleRate)
+	}
+	if c.ScanMinSamples < 0 {
+		return fmt.Errorf("CACHE_SCAN_MIN_SAMPLES must not be negative, got %d", c.ScanMinSamples)
 	}
 	return nil
 }

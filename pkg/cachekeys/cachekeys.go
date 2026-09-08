@@ -71,11 +71,20 @@ func (k Keyspace) build(id string) string {
 // The registry. Every Valkey keyspace in the system appears exactly once.
 // Builders below are the only supported way to construct these keys.
 var (
-	// roomMeta carries pkg/roommetacache's stored-shape version. roomMetaLegacy
-	// is the unversioned generation that predates it: only invalidation touches
-	// it, because a rolling deploy can still have a binary serving from it. Each
-	// reports under its own label — a legacy lane you cannot see on the
-	// breakdown is one you cannot confirm has drained before deleting it.
+	// roomMeta carries pkg/roommetacache's stored-shape version. Bump the "v3"
+	// segment whenever a binary built against the other shape would decode the
+	// value without error but with the wrong contents: the deployed legacy shape
+	// is a bare Meta, v3 the shared valkeyutil.Box envelope, and decoding either
+	// as the other yields an all-zero Meta with no JSON error — which would have
+	// broadcast-worker drop fan-out on an empty room type. Valkey has no schema
+	// check, so the version segment is what makes those entries miss instead.
+	// (v1 and v2 were intermediate shapes that never ran.)
+	//
+	// roomMetaLegacy is the unversioned generation that predates it: only
+	// invalidation touches it, because a rolling deploy can still have a binary
+	// serving from it. Each reports under its own label — a legacy lane you
+	// cannot see on the breakdown is one you cannot confirm has drained before
+	// deleting it.
 	roomMeta = Keyspace{
 		Name: "roommeta", Prefix: "room:{", Suffix: "}:meta:v3", Variable: true,
 		Sample: "room:{r1}:meta:v3",
@@ -88,7 +97,7 @@ var (
 	// therefore in different cluster slots for the same room. Preserved as-is:
 	// this package documents the keyspace, it does not migrate it.
 	//
-	// The "v3" segment is pkg/roomsubcache's Member-wire-shape schema version:
+	// The "v4" segment is pkg/roomsubcache's Member-wire-shape schema version:
 	// bump it whenever a Member field changes such that an old cached entry
 	// would silently decode with a zero-valued new field forever (Valkey has
 	// no schema check), so stale-shape entries miss and repopulate from Mongo.
@@ -130,6 +139,14 @@ var (
 	botRateLimitCaller = Keyspace{
 		Name: "botratelimit", Prefix: "botrl:caller:", Variable: true,
 		Sample: "botrl:caller:u1",
+	}
+	// botRateLimitGlobal shares the per-caller label: it is a single counter,
+	// so a series of its own would carry no decision the caller family does
+	// not already carry. It is registered separately only because it is a
+	// fixed key that the "botrl:caller:" pattern does not match — without an
+	// entry it would report as unclassified.
+	botRateLimitGlobal = Keyspace{
+		Name: "botratelimit", Prefix: "botrl:global", Sample: "botrl:global",
 	}
 	botIdempotency = Keyspace{
 		Name: "botidempotency", Prefix: "idem:", Variable: true,
@@ -195,6 +212,7 @@ var registry = []Keyspace{
 	presenceSweep,
 	presenceInCallIndex,
 	presenceIDMap,
+	botRateLimitGlobal,
 	roomMeta,
 	roomSubs,
 	presenceConns,
@@ -267,6 +285,10 @@ func PresenceIDMap() string { return presenceIDMap.Prefix }
 
 // BotRateLimitCaller is the per-caller fixed-window rate-limit counter key.
 func BotRateLimitCaller(userID string) string { return botRateLimitCaller.build(userID) }
+
+// BotRateLimitGlobal is the fixed key for the service-wide fixed-window
+// rate-limit counter, the ceiling applied across all callers.
+func BotRateLimitGlobal() string { return botRateLimitGlobal.Prefix }
 
 // BotIdempotency is the key for a bot operation's idempotency sentinel.
 func BotIdempotency(opID string) string { return botIdempotency.build(opID) }

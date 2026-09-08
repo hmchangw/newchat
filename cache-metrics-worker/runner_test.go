@@ -192,9 +192,12 @@ func TestScanOptions(t *testing.T) {
 
 func TestConfig_Validate(t *testing.T) {
 	valid := config{
-		ValkeyAddrs:  []string{"valkey:6379"},
-		ScanInterval: 5 * time.Minute,
-		ScanTimeout:  2 * time.Minute,
+		ValkeyAddrs:    []string{"valkey:6379"},
+		ScanInterval:   5 * time.Minute,
+		ScanTimeout:    2 * time.Minute,
+		ScanCount:      1000,
+		ScanSampleRate: 100,
+		ScanMinSamples: 50,
 	}
 
 	tests := []struct {
@@ -207,6 +210,21 @@ func TestConfig_Validate(t *testing.T) {
 		{"negative interval", func(c *config) { c.ScanInterval = -time.Second }, "CACHE_SCAN_INTERVAL"},
 		{"zero timeout", func(c *config) { c.ScanTimeout = 0 }, "CACHE_SCAN_TIMEOUT"},
 		{"no addresses", func(c *config) { c.ValkeyAddrs = nil }, "VALKEY_ADDRS"},
+
+		// The scan knobs reach cachescan.Options, whose normalize() silently
+		// substitutes a default for a non-positive count or rate and clamps a
+		// negative minimum to zero. Rejecting them here is what makes a typo
+		// fail loudly instead of quietly changing what the worker measures:
+		// CACHE_SCAN_MIN_SAMPLES=-1 would otherwise defeat the very floor that
+		// keeps a cache smaller than the sample rate from reporting zero bytes.
+		{"zero count", func(c *config) { c.ScanCount = 0 }, "CACHE_SCAN_COUNT"},
+		{"negative count", func(c *config) { c.ScanCount = -1 }, "CACHE_SCAN_COUNT"},
+		{"count above the cap", func(c *config) { c.ScanCount = maxScanCount + 1 }, "CACHE_SCAN_COUNT"},
+		{"count at the cap", func(c *config) { c.ScanCount = maxScanCount }, ""},
+		{"zero sample rate", func(c *config) { c.ScanSampleRate = 0 }, "CACHE_SCAN_SAMPLE_RATE"},
+		{"negative sample rate", func(c *config) { c.ScanSampleRate = -1 }, "CACHE_SCAN_SAMPLE_RATE"},
+		{"negative min samples", func(c *config) { c.ScanMinSamples = -1 }, "CACHE_SCAN_MIN_SAMPLES"},
+		{"zero min samples", func(c *config) { c.ScanMinSamples = 0 }, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

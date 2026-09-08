@@ -1,6 +1,7 @@
 package cachekeys
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,7 +27,8 @@ func TestBuilders_ExactStrings(t *testing.T) {
 		{"presence sweep", PresenceSweep(), "presence:sweep"},
 		{"presence in-call index", PresenceInCallIndex(), "presence:status:index:azure"},
 		{"presence id map", PresenceIDMap(), "presence:idmap:azure"},
-		{"bot rate limit", BotRateLimitCaller("u1"), "botrl:caller:u1"},
+		{"bot rate limit caller", BotRateLimitCaller("u1"), "botrl:caller:u1"},
+		{"bot rate limit global", BotRateLimitGlobal(), "botrl:global"},
 		{"bot idempotency", BotIdempotency("op1"), "idem:op1"},
 		{"search restricted rooms", SearchRestrictedRooms("alice"), "searchservice:restrictedrooms:alice"},
 		{"badge set", BadgeSet("alice"), "badge:{alice}"},
@@ -240,5 +242,114 @@ func TestKeyspace_Matches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.ks.Matches(tc.key))
 		})
+	}
+}
+
+// overlaps reports whether two keyspaces can both match some key, and returns
+// a witness when they can. It decides the property directly rather than
+// sampling it: for two variable keyspaces, a common key exists exactly when
+// one prefix is a prefix of the other and one suffix is a suffix of the
+// other, in which case longerPrefix+longerSuffix is always such a key.
+func overlaps(a, b Keyspace) (string, bool) {
+	switch {
+	case !a.Variable && !b.Variable:
+		return a.Prefix, a.Prefix == b.Prefix
+	case !a.Variable:
+		return a.Prefix, b.Matches(a.Prefix)
+	case !b.Variable:
+		return b.Prefix, a.Matches(b.Prefix)
+	}
+
+	prefix, ok := longerIfNested(a.Prefix, b.Prefix, strings.HasPrefix)
+	if !ok {
+		return "", false
+	}
+	suffix, ok := longerIfNested(a.Suffix, b.Suffix, strings.HasSuffix)
+	if !ok {
+		return "", false
+	}
+	return prefix + suffix, true
+}
+
+// longerIfNested returns the longer of x and y when one contains the other at
+// the tested end. Two affixes that diverge cannot appear in one key.
+func longerIfNested(x, y string, nested func(string, string) bool) (string, bool) {
+	if len(x) < len(y) {
+		x, y = y, x
+	}
+	return x, nested(x, y)
+}
+
+// TestOverlaps_DetectsIntersectingPatterns proves the checker below can fail.
+// Two patterns can intersect while both samples avoid the intersection, which
+// is why TestKeyspaces_SampleMatchesExactlyOne is not sufficient on its own:
+// each sample here matches only its own keyspace, yet the patterns share keys.
+func TestOverlaps_DetectsIntersectingPatterns(t *testing.T) {
+	a := Keyspace{Name: "a", Prefix: "a", Suffix: "yz", Variable: true, Sample: "a1yz"}
+	b := Keyspace{Name: "b", Prefix: "ab", Suffix: "z", Variable: true, Sample: "ab1z"}
+
+	// Neither sample lands in the intersection, so sample-only checking passes.
+	require.False(t, b.Matches(a.Sample))
+	require.False(t, a.Matches(b.Sample))
+
+	witness, ok := overlaps(a, b)
+	require.True(t, ok, "patterns a*yz and ab*z share keys")
+	assert.True(t, a.Matches(witness))
+	assert.True(t, b.Matches(witness))
+}
+
+// TestOverlaps_SeparatesDisjointPatterns pins the negative direction, so a
+// checker that simply reported "overlap" for everything could not pass.
+func TestOverlaps_SeparatesDisjointPatterns(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b Keyspace
+	}{
+		{
+			"divergent prefixes",
+			Keyspace{Prefix: "user:id:", Variable: true},
+			Keyspace{Prefix: "user:acct:", Variable: true},
+		},
+		{
+			"nested prefix, divergent suffixes",
+			Keyspace{Prefix: "room:{", Suffix: "}:meta:v3", Variable: true},
+			Keyspace{Prefix: "room:{", Suffix: "}:meta", Variable: true},
+		},
+		{
+			"fixed key outside a variable pattern",
+			Keyspace{Prefix: "botrl:global"},
+			Keyspace{Prefix: "botrl:caller:", Variable: true},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ok := overlaps(tc.a, tc.b)
+			assert.False(t, ok)
+		})
+	}
+}
+
+// TestKeyspaces_PatternsDoNotOverlap is the real invariant behind Classify
+// being unambiguous. TestKeyspaces_SampleMatchesExactlyOne checks only that
+// each hand-picked sample matches one keyspace, which two intersecting
+// patterns can satisfy while still sharing keys; this decides the patterns
+// themselves, pairwise. When it fails, Classify would silently attribute the
+// witness key to whichever keyspace the registry happens to list first.
+func TestKeyspaces_PatternsDoNotOverlap(t *testing.T) {
+	spaces := Keyspaces()
+	require.NotEmpty(t, spaces)
+
+	for i, a := range spaces {
+		for _, b := range spaces[i+1:] {
+			// Keyspaces sharing a Name report as one cache by design, so an
+			// overlap between them could not misattribute anything.
+			if a.Name == b.Name {
+				continue
+			}
+			witness, ok := overlaps(a, b)
+			assert.False(t, ok,
+				"keyspaces %q (%s) and %q (%s) both match %q; Classify would attribute it to whichever is listed first",
+				a.Name, a.Glob(), b.Name, b.Glob(), witness)
+		}
 	}
 }
