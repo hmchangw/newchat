@@ -6,11 +6,13 @@ package poolartifact
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // SchemaVersion is the artifact schema this package reads and writes.
@@ -81,6 +83,11 @@ func Write(path string, a *Artifact) error {
 	if err != nil {
 		return fmt.Errorf("marshal pool artifact: %w", err)
 	}
+	if isGzipPath(path) {
+		if data, err = gzipBytes(data); err != nil {
+			return fmt.Errorf("compress pool artifact: %w", err)
+		}
+	}
 	tmp := path + ".tmp"
 	// #nosec G306 -- the artifact is a non-secret account list deliberately
 	// world-readable: it is mounted into clientsim/issuer containers that run
@@ -107,6 +114,58 @@ const maxArtifactBytes = 64 << 20
 // catch a mistake.
 const maxAccounts = 1_000_000
 
+// isGzipPath decides compression from the name alone, so the two ends of the
+// contract cannot disagree: whatever Write compressed, Load decompresses.
+func isGzipPath(path string) bool { return strings.HasSuffix(path, ".gz") }
+
+// gzipBytes compresses at the best ratio available. The artifact is written
+// once per run and read once per pod, so the CPU is irrelevant beside the
+// bytes: a 30k-account pool of real account names goes from ~1.1 MiB to a few
+// hundred KiB, which is the difference between fitting a transport hop and not.
+func gzipBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, fmt.Errorf("init gzip writer: %w", err)
+	}
+	if _, err := zw.Write(data); err != nil {
+		return nil, fmt.Errorf("gzip pool artifact: %w", err)
+	}
+	// Closed explicitly, not deferred: Close flushes the trailer, and a
+	// deferred one would run after buf was already read.
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("finish gzip pool artifact: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// readCapped reads the artifact, decompressing first when it is gzipped.
+//
+// Cap the read itself rather than a prior Stat: a Stat-then-read lets a file
+// that grows in between — or a fifo, which has no meaningful size — past the
+// limit entirely. And the cap binds the DECOMPRESSED stream, because bounding
+// the compressed bytes would let a few KiB of gzip expand into gigabytes of
+// heap before any count check could run — the hazard the streaming decoder
+// closed for plain JSON, reopened by compression.
+func readCapped(r io.Reader, gzipped bool) ([]byte, error) {
+	if gzipped {
+		zr, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, fmt.Errorf("open gzip pool artifact: %w", err)
+		}
+		defer zr.Close() //nolint:errcheck // read-only handle
+		r = zr
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxArtifactBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read pool artifact: %w", err)
+	}
+	if int64(len(data)) > maxArtifactBytes {
+		return nil, fmt.Errorf("pool artifact exceeds the %d-byte cap", maxArtifactBytes)
+	}
+	return data, nil
+}
+
 // Load reads and validates an artifact. Unknown schema, wrong site, or an
 // empty pool are startup errors for the consumer — fail fast, never limp.
 func Load(path, wantSiteID string) (*Artifact, error) {
@@ -118,15 +177,9 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 		return nil, fmt.Errorf("open pool artifact: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only handle
-	// Cap the read itself rather than a prior Stat: a Stat-then-read lets a
-	// file that grows in between — or a fifo, which has no meaningful size —
-	// past the limit entirely.
-	data, err := io.ReadAll(io.LimitReader(f, maxArtifactBytes+1))
+	data, err := readCapped(f, isGzipPath(path))
 	if err != nil {
-		return nil, fmt.Errorf("read pool artifact: %w", err)
-	}
-	if int64(len(data)) > maxArtifactBytes {
-		return nil, fmt.Errorf("pool artifact exceeds the %d-byte cap", maxArtifactBytes)
+		return nil, err
 	}
 	a, err := decodeArtifact(data)
 	if err != nil {
