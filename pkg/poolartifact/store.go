@@ -3,6 +3,7 @@ package poolartifact
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -136,6 +137,23 @@ func (s *Store) Put(ctx context.Context, key string, a *Artifact) error {
 	if isGzipPath(key) {
 		if data, err = gzipBytes(data); err != nil {
 			return fmt.Errorf("compress pool artifact: %w", err)
+		}
+	}
+	return s.objects.put(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)))
+}
+
+// PutJSON stores an arbitrary JSON document beside the artifact — the export
+// manifest, which records HOW a pool was produced. It carries no artifact
+// validation because it is not an artifact: nothing reads it back to connect
+// with, it exists so a run can be explained months later.
+func (s *Store) PutJSON(ctx context.Context, key string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", key, err)
+	}
+	if isGzipPath(key) {
+		if data, err = gzipBytes(data); err != nil {
+			return fmt.Errorf("compress %s: %w", key, err)
 		}
 	}
 	return s.objects.put(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)))

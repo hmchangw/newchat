@@ -31,6 +31,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/poolartifact"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -87,6 +88,12 @@ type config struct {
 	// when it is empty.
 	AuthURL string `env:"AUTH_URL" envDefault:""`
 
+	// Pool is the object store the clientsim pool artifact is published to.
+	// Declared in poolartifact because clientsim reads the same knobs: two
+	// copies of the tags is how the two ends end up on different buckets.
+	// Unset is valid — only pool-export requires it.
+	Pool poolartifact.StoreConfig
+
 	Bottleneck bottleneckConfig `envPrefix:"BOTTLENECK_"`
 	Soak       soakConfig       `envPrefix:"SOAK_"`
 }
@@ -94,7 +101,7 @@ type config struct {
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown|soak|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|pool-export|run|teardown|soak|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
 		os.Exit(2)
 	}
 	cfg, err := env.ParseAs[config]()
@@ -127,6 +134,8 @@ func dispatch(ctx context.Context, cfg *config) int {
 		return runTeardown(ctx, cfg, os.Args[2:])
 	case "soak":
 		return runSoak(ctx, cfg, os.Args[2:])
+	case "pool-export":
+		return runPoolExport(ctx, cfg, os.Args[2:])
 	case "members-sustained":
 		return runMembersSustained(ctx, cfg, os.Args[2:])
 	case "members-capacity":
