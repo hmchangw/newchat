@@ -180,6 +180,7 @@ func TestValidateConfig_ReadyRatioBounds(t *testing.T) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &config{NATSWSURL: "wss://x", JWTMode: jwtModeProactive,
+				PoolFile:       "p",
 				MinReadyRatio:  tt.ratio,
 				SubPendingMsgs: 1, SubPendingBytes: 1, ShardCount: 1,
 				RampRate: 1, ReconnectBufBytes: 1, PingInterval: time.Minute}
@@ -197,6 +198,7 @@ func TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn(t *testing.T) {
 	base := func() *config {
 		return &config{
 			NATSWSURL: "wss://nats.example:443", JWTMode: jwtModeProactive,
+			PoolFile:      "p",
 			MinReadyRatio: 0.95, SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
 			RampRate: 50, ChurnRate: 0, ReconnectBufBytes: 1 << 16,
 			PingInterval: 2 * time.Minute,
@@ -276,7 +278,7 @@ func TestServeMetrics_ShutdownIsNotAFailure(t *testing.T) {
 func TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn(t *testing.T) {
 	base := func() *config {
 		return &config{
-			JWTMode: jwtModeProactive, MinReadyRatio: 0.95,
+			JWTMode: jwtModeProactive, MinReadyRatio: 0.95, PoolFile: "p",
 			SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
 			RampRate: 50, ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
 		}
@@ -312,4 +314,82 @@ func TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn(t *testing.T)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+// The pool reaches a k8s fleet through an object store, because the two
+// alternatives are out: a shared PVC needs ReadWriteMany, and a ConfigMap
+// caps below a real 30k-account pool. Exactly one source must be set — a
+// fleet that silently preferred one over the other could measure the wrong
+// population with nothing in the logs saying so.
+func TestValidateConfig_PoolSourceIsExactlyOne(t *testing.T) {
+	store := poolartifact.StoreConfig{
+		Endpoint: "e", AccessKey: "a", SecretKey: "s", Bucket: "b",
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*config)
+		wantErr string
+	}{
+		{"file only", func(*config) {}, ""},
+		{"url only", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "s3://b/k.json.gz"
+			c.Pool = store
+		}, ""},
+		{"neither", func(c *config) { c.PoolFile = "" }, "CLIENTSIM_POOL_FILE"},
+		{"both", func(c *config) {
+			c.PoolURL = "s3://b/k.json.gz"
+			c.Pool = store
+		}, "not both"},
+		{"url without store config", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "s3://b/k.json.gz"
+		}, "POOL_S3_ENDPOINT"},
+		{"url that is not s3", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "https://example.com/pool.json"
+			c.Pool = store
+		}, "s3://"},
+		{"partially configured store with a file source", func(c *config) {
+			c.Pool = poolartifact.StoreConfig{Bucket: "b"}
+		}, "POOL_S3_ENDPOINT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tc.mutate(&cfg)
+			err := validateConfig(&cfg)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// The file branch is the local and docker-compose path; the object-store
+// branch is covered by pkg/poolartifact's own tests. What is worth pinning
+// here is that the two do not cross: a file source must never reach for the
+// network, and a malformed URL must fail before any connection is attempted.
+func TestLoadPool_ReadsTheConfiguredSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.json")
+	require.NoError(t, poolartifact.Write(path, &poolartifact.Artifact{
+		RunID: "r", SiteID: "site-a", ConfigDigest: "d",
+		Accounts: []string{"anna", "bob"},
+	}))
+
+	cfg := validTestConfig()
+	cfg.PoolFile = path
+	cfg.SiteID = "site-a"
+	got, err := loadPool(context.Background(), &cfg)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna", "bob"}, got.Accounts)
+
+	cfg.PoolFile = ""
+	cfg.PoolURL = "s3://bucket"
+	_, err = loadPool(context.Background(), &cfg)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "object key")
 }
