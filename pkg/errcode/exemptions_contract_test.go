@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -24,10 +25,18 @@ import (
 // bar, which is why every one of them was written the same wrong way.
 //
 // The message says something true now, but prose is what failed last time. So
-// the set of exempt files is pinned here: adding one turns this test red from a
-// package the author did not touch, and going green requires editing the list
-// in the same commit — putting the justification in front of a reviewer instead
-// of letting it pass CI unread.
+// the set of files that reference errcode.Parse is pinned here: adding one
+// turns this test red from a package the author did not touch, and going green
+// requires editing the list in the same commit — putting the justification in
+// front of a reviewer instead of letting it pass CI unread.
+//
+// It scans for the REFERENCE, not for the suppression. The first version of
+// this test matched the literal `nosemgrep: remote-envelope-must-use-fromreply`
+// and was bypassed two ways, both verified against semgrep before this rewrite:
+// a bare `// nosemgrep` suppresses every rule, and a comma-separated list
+// (`// nosemgrep: other-rule, remote-envelope-must-use-fromreply`) suppresses
+// this one without the marker text ever appearing. A suppression has many
+// spellings; the call it hides has one. Reported by coderabbitai on #477.
 //
 // This checks the SET, not the reasons. A wrong justification still merges if
 // someone updates the list; what it removes is doing so silently.
@@ -35,15 +44,28 @@ var allowedParseExemptions = map[string]string{
 	"admin-service/client_update.go": "decides nothing: the caller already classified by HTTP status, and this only lifts display text, so no refusal can reach a success path",
 }
 
-const exemptionMarker = "nosemgrep: remote-envelope-must-use-fromreply"
+var (
+	// parseReference matches errcode.Parse in any shape — call, assignment,
+	// return, argument, or a function value — because the rule is about the
+	// name being used at all.
+	parseReference = regexp.MustCompile(`\berrcode\.Parse\b`)
+	// dotImport would let a file call a bare `Parse(...)` that parseReference
+	// cannot see. There are none today and this keeps it that way, so the scan
+	// above stays sufficient rather than merely sufficient-for-now.
+	dotImport = regexp.MustCompile(`(?m)^\s*(?:import\s+)?\.\s+"github\.com/hmchangw/chat/pkg/errcode"`)
+)
 
 func TestParseExemptions_MatchThePinnedSet(t *testing.T) {
 	root := repoRootFromErrcode(t)
-	found := scanForExemptions(t, root)
+	found, dotImporters := scanForParseReferences(t, root)
+
+	assert.Empty(t, dotImporters,
+		"a dot-import of pkg/errcode lets a file call a bare Parse(...) that this scan cannot see; "+
+			"import it normally so the reference stays greppable")
 
 	for _, path := range found {
 		if _, ok := allowedParseExemptions[path]; !ok {
-			t.Errorf(`%s has a new errcode.Parse exemption.
+			t.Errorf(`%s references errcode.Parse and is not a pinned exemption.
 
 An exemption is only valid for a site that decides NOTHING from the reply. If it
 decides success or failure it must use errcode.FromReply, because Parse answers
@@ -60,7 +82,7 @@ the reason. That edit is the point: it puts the reason in the diff.`, path)
 
 	for path, reason := range allowedParseExemptions {
 		assert.Contains(t, found, path,
-			"%s is listed as an exempt site (%s) but no longer carries the marker — "+
+			"%s is listed as an exempt site (%s) but no longer references errcode.Parse — "+
 				"delete the entry so the list keeps describing the code", path, reason)
 	}
 }
@@ -74,9 +96,10 @@ func repoRootFromErrcode(t *testing.T) string {
 	return root
 }
 
-// scanForExemptions returns the repo-relative path of every non-test .go file
-// carrying the nosemgrep marker, sorted.
-func scanForExemptions(t *testing.T, root string) []string {
+// scanForParseReferences returns the repo-relative path of every non-test .go
+// file outside pkg/errcode that names errcode.Parse, plus any that dot-import
+// the package. Both sorted.
+func scanForParseReferences(t *testing.T, root string) (refs, dotImporters []string) {
 	t.Helper()
 	skipDirs := map[string]bool{
 		".git": true, "node_modules": true, "chat-frontend": true,
@@ -91,7 +114,6 @@ func scanForExemptions(t *testing.T, root string) []string {
 	t.Cleanup(func() { _ = osRoot.Close() })
 	rootFS := osRoot.FS()
 
-	var found []string
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walk %q while scanning for exemptions: %w", path, err)
@@ -107,20 +129,27 @@ func scanForExemptions(t *testing.T, root string) []string {
 		}
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
-			return fmt.Errorf("relativise %q while scanning for exemptions: %w", path, relErr)
+			return fmt.Errorf("relativise %q while scanning for Parse references: %w", path, relErr)
 		}
 		rel = filepath.ToSlash(rel)
-		body, readErr := fs.ReadFile(rootFS, rel)
-		if readErr != nil {
-			return fmt.Errorf("read %q while scanning for exemptions: %w", rel, readErr)
-		}
-		if !strings.Contains(string(body), exemptionMarker) {
+		// pkg/errcode owns Parse; the rule has never applied inside it.
+		if strings.HasPrefix(rel, "pkg/errcode/") {
 			return nil
 		}
-		found = append(found, rel)
+		body, readErr := fs.ReadFile(rootFS, rel)
+		if readErr != nil {
+			return fmt.Errorf("read %q while scanning for Parse references: %w", rel, readErr)
+		}
+		if parseReference.Match(body) {
+			refs = append(refs, rel)
+		}
+		if dotImport.Match(body) {
+			dotImporters = append(dotImporters, rel)
+		}
 		return nil
 	})
 	require.NoError(t, err)
-	sort.Strings(found)
-	return found
+	sort.Strings(refs)
+	sort.Strings(dotImporters)
+	return refs, dotImporters
 }
