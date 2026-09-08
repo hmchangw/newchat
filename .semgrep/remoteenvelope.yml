@@ -24,13 +24,23 @@ rules:
       one. Branch on a specific code with errors.As, which correctly finds
       nothing for an unrecognised one.
 
-      Six sites are exempt and each says why in a comment beside the call; the
-      two that most need the raw envelope:
-      room-service/memberlist_client.go remaps a remote Reason and degrades a
-      legacy envelope to Internal-with-a-warn; admin-service/room_onduty.go
-      writes an HTTP response directly. Both already handle an unrecognised
-      code. If a new site genuinely needs the raw envelope, handle
-      !Code.Valid() explicitly and nosemgrep with that reason.
+      One site is exempt (admin-service/client_update.go) and says why beside
+      the call. The bar is not "handles !Code.Valid()" — treating that as the
+      bar is how five sites kept a fail-open. Parse answers whether the payload
+      fits this build's Error struct, so a peer that adds or retypes one field
+      makes it report "not an envelope", and the reply falls past the guard
+      entirely into whatever comes next.
+
+      Nor is a positive success check downstream enough on its own: `status ==
+      "ok"`, `ack.OK` and a non-nil collection each only hold for a reply that
+      omits that field, and a payload carrying both a refusal and a valid
+      success discriminator satisfies both sides.
+
+      So: any site that decides success or failure from a reply must use
+      FromReply. An exemption is for a site that decides nothing — one that has
+      already classified by other means and only reads a field out of the
+      envelope. Show that in the nosemgrep reason.
+
     paths:
       exclude:
         - "**/*_test.go"

@@ -154,12 +154,13 @@ func NewAssertionError(message string) error {
 }
 
 func ParseErrorEnvelope(data []byte) error {
-	// nosemgrep: remote-envelope-must-use-fromreply -- loadgen classifies envelopes itself; it is not a service call path and relays nothing to a closed-set API
-	parsed, ok := errcode.Parse(data)
-	if !ok {
-		return nil
-	}
-	return parsed
+	// FromReply, not Parse: the harness measures rejections, and Parse answers
+	// whether the payload fits this build's Error struct rather than whether the
+	// peer refused. One retyped field made a refusal read as a successful
+	// response — a silent hole in the numbers a soak run exists to produce.
+	// ClassifyError already falls through to ErrorInternal for the untyped error
+	// FromReply returns for a code or shape it cannot model.
+	return errcode.FromReply(data)
 }
 
 // ReasonResponseTooLarge aliases the platform reason carried by the

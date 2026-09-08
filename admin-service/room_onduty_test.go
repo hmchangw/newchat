@@ -210,6 +210,30 @@ func TestSetRoomOnDuty_InvalidBody(t *testing.T) {
 }
 
 // room-service's typed errors keep their status through the HTTP boundary.
+// A refusal this build cannot fully decode must not become a 200. Recognising
+// the envelope only by whether it decodes made the guard below depend on the
+// peer *omitting* a success discriminator: a reply carrying both a refusal and
+// `"status":"ok"` walked past it and the caller was told the change applied.
+func TestSetRoomOnDuty_UndecodableEnvelopeIsNotSuccess(t *testing.T) {
+	for _, reply := range []string{
+		`{"code":"unavailable","error":"upstream down","metadata":{"retryAfter":5}}`,
+		`{"error":"failure","metadata":1,"status":"ok"}`,
+	} {
+		t.Run(reply, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			m := NewMockAdminStore(ctrl)
+
+			rpc := &fakeRoomRPC{reply: &nats.Msg{Data: []byte(reply)}}
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
+
+			w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
+
+			assert.NotEqual(t, http.StatusOK, w.Code,
+				"a remote refusal this build cannot decode must not read as success")
+		})
+	}
+}
+
 func TestSetRoomOnDuty_DownstreamErrorsPassThrough(t *testing.T) {
 	tests := []struct {
 		name       string

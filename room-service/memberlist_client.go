@@ -100,37 +100,37 @@ func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string
 		return nil, fmt.Errorf("member.list request to %s: %w", ch.SiteID, err)
 	}
 
-	// Deliberately not errcode.FromReply: this site remaps a remote reason onto a
-	// local sentinel and needs the parsed envelope's Reason before deciding, and
-	// it degrades a non-canonical envelope to Internal-with-a-warn rather than to
-	// an untyped error so a legacy peer is still classifiable. It already handles
-	// the unrecognised-code case, which is what FromReply exists to stop people
-	// forgetting; any new outbound client should use FromReply instead.
-	// nosemgrep: remote-envelope-must-use-fromreply -- remaps a remote Reason onto a local sentinel and needs the parsed envelope before deciding; already handles !Code.Valid() by degrading to Internal with a warn
-	if ee, ok := errcode.Parse(reply.Data); ok {
+	// FromReply recognises the envelope by its "error" key rather than by
+	// whether it decodes into this build's Error, so a peer that adds a field or
+	// retypes one cannot slip past into the members decode below — which ignores
+	// unknown fields and would hand the caller an empty list with a nil error.
+	// This site still wants the parsed envelope rather than FromReply's return
+	// value alone: it remaps a remote reason onto a local sentinel, and degrades
+	// anything it cannot trust to Internal-with-a-warn instead of relaying it
+	// untyped, so a legacy or newer peer stays classifiable at the boundary above.
+	if remoteErr := errcode.FromReply(reply.Data); remoteErr != nil {
+		var ee *errcode.Error
+		if !errors.As(remoteErr, &ee) {
+			// Untyped means one of two things FromReply deliberately refuses to
+			// dress up: a code outside this build's closed set, or an envelope it
+			// cannot decode. Neither is safe to reconstruct — errcode.New panics
+			// on a non-canonical Code — and both are worth a single warn so SREs
+			// can spot a peer running a different vocabulary.
+			slog.WarnContext(ctx, "peer emitted an errcode this build cannot use",
+				"site", ch.SiteID, "detail", remoteErr.Error())
+			return nil, errcode.Internal("remote site returned an error")
+		}
 		// Map the remote not-member reason back onto the local sentinel so callers
 		// can use errors.Is(err, errNotRoomMember) uniformly regardless of which
 		// site the source channel lives on. Other remote errors are reconstructed
 		// as a typed *errcode.Error preserving the remote code/message/reason.
 		//
 		// Mixed-version rollout: a legacy remote that replies without a "code"
-		// still parses (only "error" is required) but yields Code=="" and no
-		// reason, so the not-member remap simply does not fire until both sides
-		// are upgraded — an acceptable degradation, not a bug. Tasks 20.5/20.16:
-		// errcode.New now panics on a non-canonical Code OR empty Message, so a
-		// legacy/non-canonical envelope falls back to errcode.Internal here and
-		// emits a single warn so SREs can spot legacy peers.
+		// still carries an "error", so FromReply sees the envelope, but Code==""
+		// is not Valid and it arrives untyped — handled by the branch above, with
+		// the not-member remap simply not firing until both sides are upgraded.
 		if ee.Reason == errcode.RoomNotMember {
 			return nil, errNotRoomMember
-		}
-		if !ee.Code.Valid() || ee.Message == "" {
-			slog.WarnContext(ctx, "legacy peer emitted non-canonical errcode",
-				"code", string(ee.Code), "message", ee.Message, "site", ch.SiteID)
-			msg := ee.Message
-			if msg == "" {
-				msg = "remote site returned an error"
-			}
-			return nil, errcode.Internal(msg)
 		}
 		opts := []errcode.Option{errcode.WithReason(ee.Reason)}
 		if len(ee.Metadata) > 0 {

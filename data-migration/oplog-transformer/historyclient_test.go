@@ -44,6 +44,23 @@ func TestClassifyHistoryReply(t *testing.T) {
 			wantNil: true,
 		},
 		{
+			// A peer that retypes a field still rejected the op. Recognising the
+			// envelope only by whether it decodes sent this into the ack decode,
+			// where "ok" is absent and the message blames a malformed ack — the
+			// disposition happens to stay Nak, but the reason logged is wrong.
+			name:       "an envelope this build cannot decode is a retryable rejection",
+			data:       []byte(`{"code":"unavailable","error":"upstream down","metadata":{"retryAfter":5}}`),
+			wantPoison: false,
+		},
+		{
+			// The shape that actually flips the disposition: an undecodable
+			// envelope carrying a valid success discriminator would ack a
+			// rejected migration op outright.
+			name:       "an undecodable envelope carrying ok:true is still a rejection",
+			data:       []byte(`{"error":"failure","metadata":1,"ok":true}`),
+			wantPoison: false,
+		},
+		{
 			name:       "not-found is retryable (Nak) — the not-yet-persisted convergence case",
 			data:       envelope(t, errcode.NotFound("message not yet persisted, retry")),
 			wantPoison: false,

@@ -283,6 +283,31 @@ func TestClearAllThreadUnread_Integration(t *testing.T) {
 		assert.Equal(t, errcode.CodeInternal, e.Code)
 	})
 
+	t.Run("a reply that is not the documented success payload is not success", func(t *testing.T) {
+		// This RPC returns only an error, so nothing downstream decodes the
+		// reply — the usual backstop that turns a garbled payload into a decode
+		// failure is absent here. Without an explicit check, truncated or
+		// non-JSON bytes reach FromReply, which correctly says "not an error
+		// envelope", and the caller then reports that unread state was cleared
+		// on the strength of a reply it never validated.
+		for _, reply := range [][]byte{
+			[]byte(`{"stat`),
+			[]byte(`not json at all`),
+			[]byte(`[]`),
+			nil,
+		} {
+			nc := dial(t)
+			sub, err := nc.Subscribe(context.Background(), subject.RoomThreadReadAll("site-a"), func(_ context.Context, m *nats.Msg) {
+				_ = m.Respond(reply)
+			})
+			require.NoError(t, err)
+
+			err = New(nc, "site-a").ClearAllThreadUnread(context.Background(), "site-a", "alice")
+			assert.Error(t, err, "reply %q must not read as a successful clear", string(reply))
+			_ = sub.Unsubscribe()
+		}
+	})
+
 	t.Run("cross-site siteID routing — uses siteID param not c.siteID", func(t *testing.T) {
 		nc := dial(t)
 		sub, err := nc.Subscribe(context.Background(), subject.RoomThreadReadAll("site-b"), func(_ context.Context, m *nats.Msg) {

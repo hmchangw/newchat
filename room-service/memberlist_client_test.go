@@ -159,6 +159,58 @@ func TestNATSMemberListClient_RemoteNotMember_MapsToSentinel(t *testing.T) {
 	assert.True(t, errors.Is(err, errNotRoomMember))
 }
 
+func TestNATSMemberListClient_UndecodableEnvelope_IsNotAnEmptyMemberList(t *testing.T) {
+	nc := startInProcessNATS(t)
+	client := NewNATSMemberListClient(nc, 2*time.Second)
+
+	ch := model.ChannelRef{RoomID: "room-eng", SiteID: "site-us"}
+	requester := "alice"
+
+	// A peer that adds or retypes one envelope field — here numeric metadata,
+	// where this build declares map[string]string — is still rejecting the
+	// request. Recognising the envelope only by whether it decodes let this
+	// reply fall into the members decode below, which ignores unknown fields
+	// and yields an empty list with a nil error: a remote refusal reading as
+	// "this room has no members".
+	sub, err := nc.Subscribe(subject.MemberList(requester, ch.RoomID, ch.SiteID), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"code":"unavailable","error":"upstream down","metadata":{"retryAfter":5}}`))
+	})
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	members, err := client.ListMembers(context.Background(), requester, ch, 0)
+	require.Error(t, err, "an envelope this build cannot decode must fail the call")
+	assert.Nil(t, members)
+	var ee *errcode.Error
+	require.ErrorAs(t, err, &ee, "the caller still needs a classifiable error")
+	assert.Equal(t, errcode.CodeInternal, ee.Code,
+		"an envelope whose contents this build cannot trust degrades to internal")
+	assert.False(t, errors.Is(err, errNotRoomMember))
+}
+
+func TestNATSMemberListClient_UnknownCode_DegradesToInternal(t *testing.T) {
+	nc := startInProcessNATS(t)
+	client := NewNATSMemberListClient(nc, 2*time.Second)
+
+	ch := model.ChannelRef{RoomID: "room-eng", SiteID: "site-us"}
+	requester := "alice"
+
+	sub, err := nc.Subscribe(subject.MemberList(requester, ch.RoomID, ch.SiteID), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
+	})
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	members, err := client.ListMembers(context.Background(), requester, ch, 0)
+	require.Error(t, err)
+	assert.Nil(t, members)
+	// This site deliberately degrades rather than relaying untyped: a legacy or
+	// newer peer stays classifiable for the HTTP/NATS boundary above.
+	var ee *errcode.Error
+	require.ErrorAs(t, err, &ee)
+	assert.Equal(t, errcode.CodeInternal, ee.Code)
+}
+
 func TestNATSMemberListClient_InvalidJSONReply(t *testing.T) {
 	nc := startInProcessNATS(t)
 	client := NewNATSMemberListClient(nc, 2*time.Second)

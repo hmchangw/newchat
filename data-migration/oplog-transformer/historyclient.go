@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -83,8 +84,17 @@ func permanentHistoryRejection(code errcode.Code) bool {
 // (permanent rejection) → Term; plain error (retryable/unknown/not-ok ack/undecodable) → Nak.
 // termCode is the rejecting category only for a permanent rejection (Term metric), else "".
 func classifyHistoryReply(subj string, data []byte) (termCode errcode.Code, err error) {
-	// nosemgrep: remote-envelope-must-use-fromreply -- returns an error on every envelope; Code only selects poison vs retryable, and an unrecognised one correctly takes the retryable path
-	if ec, ok := errcode.Parse(data); ok {
+	// FromReply recognises the envelope by its "error" key, not by whether it
+	// decodes into this build's Error: a peer that retypes a field still rejected
+	// the op, and a reply carrying both a rejection and `ok:true` would otherwise
+	// reach the ack decode below and Ack a migration that never applied.
+	if remoteErr := errcode.FromReply(data); remoteErr != nil {
+		var ec *errcode.Error
+		if !errors.As(remoteErr, &ec) {
+			// A code or shape this build cannot model. Never poison: only a
+			// category we recognise as permanent may Term a message.
+			return "", fmt.Errorf("history rejected %q (unclassifiable envelope): %w", subj, remoteErr)
+		}
 		if permanentHistoryRejection(ec.Code) {
 			return ec.Code, fmt.Errorf("%w: history permanently rejected %q (%s): %s", migration.ErrPoison, subj, ec.Code, ec.Message)
 		}

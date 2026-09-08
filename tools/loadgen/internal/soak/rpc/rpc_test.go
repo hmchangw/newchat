@@ -117,3 +117,23 @@ func TestSoakRPCPublicSurface_DelegatesWithoutChangingSemantics(t *testing.T) {
 	cancel()
 	assert.ErrorIs(t, (TimerSleeper{}).Sleep(canceled, time.Hour), context.Canceled)
 }
+
+func TestParseErrorEnvelope_UndecodableEnvelopeIsNotSuccess(t *testing.T) {
+	// A soak run measures rejections. An envelope this build cannot decode —
+	// here numeric metadata against a map[string]string field — is still a
+	// rejection, and reporting nil made the harness count it as a successful
+	// response, corrupting the very numbers it exists to produce.
+	err := ParseErrorEnvelope([]byte(
+		`{"code":"unavailable","error":"upstream down","metadata":{"retryAfter":5}}`,
+	))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upstream down")
+	assert.Equal(t, ErrorInternal, ClassifyError(err),
+		"an envelope the harness cannot classify counts as internal, never as success")
+}
+
+func TestParseErrorEnvelope_SuccessPayloadStaysNil(t *testing.T) {
+	for _, payload := range []string{`{"messages":[]}`, `{}`, `{"error":null}`, `not json`} {
+		assert.NoError(t, ParseErrorEnvelope([]byte(payload)), "payload %q", payload)
+	}
+}

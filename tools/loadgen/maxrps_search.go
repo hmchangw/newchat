@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sync"
@@ -113,8 +114,15 @@ func classifySearchReply(e searchEndpoint, body []byte, reqErr error) sloOutcome
 	if reqErr != nil {
 		return outcomeFailed
 	}
-	// nosemgrep: remote-envelope-must-use-fromreply -- loadgen passes Code to its own classifier, which has an explicit default arm
-	if ec, ok := errcode.Parse(body); ok {
+	if remoteErr := errcode.FromReply(body); remoteErr != nil {
+		var ec *errcode.Error
+		if !errors.As(remoteErr, &ec) {
+			// A code this build does not model, or an envelope it cannot decode.
+			// Either way the peer refused, and the refusal must not reach the
+			// success decoder below — a reply can carry both a refusal and a
+			// well-formed collection, and JSON ignores the fields it does not know.
+			return outcomeFailed
+		}
 		return classifyErrcode(ec.Code)
 	}
 	if !decodesAsSearchResponse(e, body) {

@@ -139,6 +139,20 @@ func TestClassifySearchReply_TimeoutIsFailure(t *testing.T) {
 	assert.Equal(t, outcomeFailed, classifySearchReply(searchMessages, nil, assert.AnError))
 }
 
+// An envelope this build cannot decode is still a refusal. Recognising it only
+// by whether it decodes let a reply carrying both a refusal and a well-formed
+// collection through decodesAsSearchResponse and into the SLO-7/SLO-8 success
+// counts — the harness inflating the very numbers it exists to measure.
+func TestClassifySearchReply_UndecodableEnvelopeIsFailure(t *testing.T) {
+	for _, body := range []string{
+		`{"code":"unavailable","error":"upstream down","metadata":{"retryAfter":5}}`,
+		`{"error":"failure","metadata":1,"messages":[]}`,
+	} {
+		assert.Equal(t, outcomeFailed, classifySearchReply(searchMessages, []byte(body), nil),
+			"body %s", body)
+	}
+}
+
 func TestClassifySearchReply_ErrorEnvelope(t *testing.T) {
 	tests := []struct {
 		code errcode.Code

@@ -103,18 +103,25 @@ func (h *Handler) setRoomOnDuty(c *gin.Context) {
 		return
 	}
 
-	// nosemgrep: remote-envelope-must-use-fromreply -- writes an HTTP response directly rather than returning an error; already guards !remote.Code.Valid() on the line below
-	if remote, ok := errcode.Parse(reply.Data); ok {
-		// Parse does not validate Code, so a foreign envelope collapses to internal.
-		if !remote.Code.Valid() {
-			errhttp.Write(ctx, c, fmt.Errorf("room restricted rpc returned unknown code %q", remote.Code))
+	// FromReply recognises the envelope by its "error" key, not by whether it
+	// decodes into this build's Error. Guarding !Code.Valid() alone left the
+	// success check below carrying the whole load, and that check only holds for
+	// a reply that omits "status": one carrying both a refusal and "status":"ok"
+	// walked past both and returned 200.
+	if remoteErr := errcode.FromReply(reply.Data); remoteErr != nil {
+		var remote *errcode.Error
+		if !errors.As(remoteErr, &remote) {
+			// A code outside this build's closed set, or an envelope it cannot
+			// decode. Neither is safe to relay typed, so it collapses to internal.
+			errhttp.Write(ctx, c, fmt.Errorf("room restricted rpc returned an unusable error envelope: %w", remoteErr))
 			return
 		}
 		errhttp.Write(ctx, c, remote)
 		return
 	}
 
-	// Parse also returns false for an empty or truncated body, which is not success.
+	// A reply that is not an envelope still has to be the documented success
+	// shape — an empty or truncated body is not success.
 	var status model.StatusWithRequestReply
 	if err := json.Unmarshal(reply.Data, &status); err != nil || status.Status != "ok" {
 		errhttp.Write(ctx, c, fmt.Errorf("room restricted rpc returned an unrecognized reply"))

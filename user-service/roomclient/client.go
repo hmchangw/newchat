@@ -85,9 +85,11 @@ func (c *Client) GetThreadRoomInfoBatch(ctx context.Context, siteID string, thre
 }
 
 // ClearAllThreadUnread issues the bulk clear-all-thread-unread RPC to room-service
-// on the given site; a non-OK reply envelope fails the call via
-// errcode.FromReply. The
-// reply carries no payload — success is a nil error.
+// on the given site; a non-OK reply envelope fails the call via errcode.FromReply.
+// Success carries an empty RoomThreadReadAllResponse object, which is decoded
+// rather than assumed: this is the one RPC here that returns no value, so no
+// later decode would catch a garbled reply, and "not an error envelope" alone
+// would let truncated bytes report that unread state was cleared.
 func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account string) error {
 	req, err := json.Marshal(model.RoomThreadReadAllRequest{Account: account})
 	if err != nil {
@@ -102,6 +104,10 @@ func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account strin
 	// doc comment for the two ways hand-rolling this goes wrong.
 	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
 		return remoteErr
+	}
+	var resp model.RoomThreadReadAllResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return fmt.Errorf("decode clear-all-thread-unread reply: %w", err)
 	}
 	return nil
 }
