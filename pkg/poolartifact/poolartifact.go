@@ -60,34 +60,50 @@ func validateAccounts(accounts []string) error {
 // rename), so a concurrent Load from another process never sees a
 // truncated file.
 func Write(path string, a *Artifact) error {
-	switch {
-	case len(a.Accounts) == 0:
-		return errors.New("write pool artifact: empty accounts")
-	// Symmetric with Load: a seeder that can emit an artifact the consumer
-	// refuses at startup turns a bad --users value into a failure hours later,
-	// in the wrong tool.
-	case len(a.Accounts) > maxAccounts:
-		return fmt.Errorf("write pool artifact: %d accounts, above the %d cap", len(a.Accounts), maxAccounts)
-	case a.SiteID == "":
-		return errors.New("write pool artifact: empty siteID")
-	case a.RunID == "":
-		return errors.New("write pool artifact: empty runID")
-	case a.ConfigDigest == "":
-		return errors.New("write pool artifact: empty configDigest — the artifact would be unmatchable to its run")
-	}
-	if err := validateAccounts(a.Accounts); err != nil {
-		return fmt.Errorf("write pool artifact: %w", err)
-	}
-	a.SchemaVersion = SchemaVersion
-	data, err := json.MarshalIndent(a, "", "  ")
+	data, err := marshalArtifact(a)
 	if err != nil {
-		return fmt.Errorf("marshal pool artifact: %w", err)
+		return err
 	}
 	if isGzipPath(path) {
 		if data, err = gzipBytes(data); err != nil {
 			return fmt.Errorf("compress pool artifact: %w", err)
 		}
 	}
+	return writeAtomic(path, data)
+}
+
+// marshalArtifact is the producer-side contract, shared by the file and
+// object-store writers: whatever one refuses, the other refuses too.
+func marshalArtifact(a *Artifact) ([]byte, error) {
+	switch {
+	case len(a.Accounts) == 0:
+		return nil, errors.New("write pool artifact: empty accounts")
+	// Symmetric with Load: a seeder that can emit an artifact the consumer
+	// refuses at startup turns a bad --users value into a failure hours later,
+	// in the wrong tool.
+	case len(a.Accounts) > maxAccounts:
+		return nil, fmt.Errorf("write pool artifact: %d accounts, above the %d cap", len(a.Accounts), maxAccounts)
+	case a.SiteID == "":
+		return nil, errors.New("write pool artifact: empty siteID")
+	case a.RunID == "":
+		return nil, errors.New("write pool artifact: empty runID")
+	case a.ConfigDigest == "":
+		return nil, errors.New("write pool artifact: empty configDigest — the artifact would be unmatchable to its run")
+	}
+	if err := validateAccounts(a.Accounts); err != nil {
+		return nil, fmt.Errorf("write pool artifact: %w", err)
+	}
+	a.SchemaVersion = SchemaVersion
+	data, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal pool artifact: %w", err)
+	}
+	return data, nil
+}
+
+// writeAtomic persists through tmp + rename, so a concurrent Load from
+// another process never sees a truncated file.
+func writeAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	// #nosec G306 -- the artifact is a non-secret account list deliberately
 	// world-readable: it is mounted into clientsim/issuer containers that run
@@ -181,6 +197,13 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeAndValidate(data, wantSiteID)
+}
+
+// decodeAndValidate is the consumer-side contract, shared by the file and
+// object-store readers. Unknown schema, wrong site, or an empty pool are
+// startup errors for the consumer — fail fast, never limp.
+func decodeAndValidate(data []byte, wantSiteID string) (*Artifact, error) {
 	a, err := decodeArtifact(data)
 	if err != nil {
 		return nil, err
