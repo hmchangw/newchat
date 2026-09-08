@@ -73,7 +73,10 @@ the local YAML in this repo.
 |---|---|---|
 | `CLIENTSIM_NATS_WS_URL` | required | `ws(s)://` endpoint clients dial |
 | `CLIENTSIM_AUTH_URL` | required | side issuer base URL |
-| `CLIENTSIM_POOL_FILE` | required | pool artifact path (`pkg/poolartifact`) |
+| `CLIENTSIM_POOL_FILE` | — | pool artifact path (`pkg/poolartifact`); `.gz` is decompressed. **Exactly one** of this and `_POOL_URL` |
+| `CLIENTSIM_POOL_URL` | — | `s3://bucket/key` the artifact is fetched from at startup — the k8s path, no initContainer needed |
+| `POOL_S3_ENDPOINT` / `_ACCESS_KEY` / `_SECRET_KEY` / `_BUCKET` | — | object store, required when `_POOL_URL` is set. Declared in `pkg/poolartifact` because `loadgen pool-export` writes with the same knobs |
+| `POOL_S3_PREFIX` / `_USE_SSL` | `clientsim` / `true` | key prefix and TLS |
 | `CLIENTSIM_SITE_ID` | required | site for `subscription.list` + subjects; must match the artifact |
 | `CLIENTSIM_TARGET_CONNS` | pool size | `T = min(target, pool)`; floor-partitioned across shards |
 | `CLIENTSIM_SHARD_INDEX` / `_SHARD_COUNT` | `0` / `1` | replica slice |
@@ -252,17 +255,41 @@ fleet never reached its target, so the window measured nothing. Use
 
 ## Kubernetes (test / staging)
 
-Manifests live with the clusters' existing service manifests (ops-owned),
-not in this repo. The load-bearing points:
+The chart is ops-owned and lives outside this repo. What this repo owns is
+the contract it has to satisfy — written out in
+[`deploy/k8s-contract.md`](deploy/k8s-contract.md), including the full env
+list and the shape of each object.
 
+The chain, and why it is shaped this way:
+
+```text
+Job:         loadgen pool-export   MongoDB ──► pool.json.gz + pool-manifest.json ──► object store
+StatefulSet: clientsim             object store ──► every pod reads the SAME object
+```
+
+- **One querier, one snapshot, one object.** Each pod could query MongoDB for
+  itself, and that would be wrong: `shardSlice` hands every pod the same array
+  and slices it by ordinal, so two pods whose queries returned slightly
+  different sets (staging churns while the run is live) would claim
+  overlapping or disjoint ranges — accounts connected twice or not at all,
+  with every pod still reporting green.
+- **Why an object store and not the obvious alternatives.** A shared PVC needs
+  `ReadWriteMany`, which SAN-backed block storage cannot give a multi-replica
+  StatefulSet. A ConfigMap caps at 1 MiB and 30k real account names are
+  1.14 MiB before compression — and in a GitOps repo it would also commit a
+  list of real identities to git history permanently.
 - **clientsim is a StatefulSet**: pod ordinal → `CLIENTSIM_SHARD_INDEX` via
   the downward API; replicas = `CLIENTSIM_SHARD_COUNT`. No coordination
   service needed.
+  > ⚠️ **Never change `CLIENTSIM_SHARD_COUNT` under a running fleet.**
+  > Ownership is `index mod count` with no fencing, so a rolling rescale runs
+  > the old and new partitionings at once and double-connects the overlap.
+  > Scale to zero, then back up.
 - **Side issuer**: a second auth-service Deployment with `DEV_MODE=true`,
   reachable only in-cluster — **ClusterIP, no ingress and no VirtualService**
   — with a NetworkPolicy admitting only the clientsim and loadgen pods.
   clientsim reaches it by service DNS and nothing else changes in the code:
-  `CLIENTSIM_AUTH_URL=http://dev-auth-service.<ns>.svc.cluster.local:8080`.
+  `CLIENTSIM_AUTH_URL=http://dev-auth-service.NAMESPACE.svc.cluster.local:8080`.
   > ⚠️ **Test and staging only.** Dev mode mints a NATS JWT for *any*
   > account the caller names, so anything that can reach this Deployment can
   > impersonate any user of that site. That is acceptable against synthetic
@@ -271,6 +298,10 @@ not in this repo. The load-bearing points:
   > network boundary by default — the NetworkPolicy is what makes the
   > isolation real, and `kubectl port-forward` bypasses it for anyone who
   > holds that permission.
+- **The pool bucket holds real account names.** Give it its own bucket (or at
+  least its own prefix and credentials) rather than sharing one with
+  application uploads, and set a lifecycle rule — soak runs are frequent and
+  nothing prunes old artifacts on its own.
 - **OS limits**: raise `ulimit -n` well above conns × (2 + rooms); one
   (srcIP → dstIP:port) tuple caps at ~60k ephemeral ports — beyond that add
   replicas (each pod has its own IP) or NATS endpoint IPs.
