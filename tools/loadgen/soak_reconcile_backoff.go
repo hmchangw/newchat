@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	soakreconcile "github.com/hmchangw/chat/tools/loadgen/internal/soak/reconcile"
+)
 
 // nextReconcileProbe schedules the next query probe for an operation whose
 // effect is not visible yet or whose authoritative store is unavailable.
@@ -21,14 +25,5 @@ import "time"
 // and records unverified — so scheduling past the deadline hands the answer to
 // the one participant that cannot produce it.
 func nextReconcileProbe(now, verifyAfter, deadline time.Time, retryInterval time.Duration) time.Time {
-	wait := max(now.Sub(verifyAfter), retryInterval)
-	next := now.Add(wait)
-	if next.Before(deadline) {
-		return next
-	}
-	final := deadline.Add(-retryInterval)
-	if final.After(now) {
-		return final
-	}
-	return deadline
+	return soakreconcile.NextProbe(now, verifyAfter, deadline, retryInterval)
 }

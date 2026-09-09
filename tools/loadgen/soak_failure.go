@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 	failuremodel "github.com/hmchangw/chat/tools/loadgen/internal/failure"
+	soakreconcile "github.com/hmchangw/chat/tools/loadgen/internal/soak/reconcile"
 )
 
 const (
@@ -633,30 +633,23 @@ type soakFailureReconciler struct {
 // with how many messages are slow to persist, which no configuration knows, and
 // idle claims are the only evidence that the lane still has slack.
 const (
-	soakReconcileClaimAdvanced    = "advanced"
-	soakReconcileClaimRetried     = "retried"
-	soakReconcileClaimIdle        = "idle"
-	soakReconcileClaimFailed      = "failed"
-	soakReconcileClaimUnavailable = "unavailable"
+	soakReconcileClaimAdvanced    = soakreconcile.ClaimAdvanced
+	soakReconcileClaimRetried     = soakreconcile.ClaimRetried
+	soakReconcileClaimIdle        = soakreconcile.ClaimIdle
+	soakReconcileClaimFailed      = soakreconcile.ClaimFailed
+	soakReconcileClaimUnavailable = soakreconcile.ClaimUnavailable
 	// deferred is a claim that issued no query on purpose: the settle window
 	// has not elapsed, so there was nothing to ask yet. It is separate from
 	// retried because retried is the poll cost of an effect that has not
 	// landed, and counting a scheduled wait there manufactures a retry
 	// baseline in a healthy run.
-	soakReconcileClaimDeferred = "deferred"
+	soakReconcileClaimDeferred = soakreconcile.ClaimDeferred
 )
 
 // soakReconcileClaimOutcomes is the closed label set, listed so the metric can
 // publish every outcome at zero rather than only the ones that have happened.
 func soakReconcileClaimOutcomes() []string {
-	return []string{
-		soakReconcileClaimAdvanced,
-		soakReconcileClaimRetried,
-		soakReconcileClaimIdle,
-		soakReconcileClaimFailed,
-		soakReconcileClaimUnavailable,
-		soakReconcileClaimDeferred,
-	}
+	return soakreconcile.ClaimOutcomes()
 }
 
 // reconcileProbeOutcome names a claim that reached a probe but not a verdict.
@@ -664,10 +657,7 @@ func soakReconcileClaimOutcomes() []string {
 // must not share a label with one that answered and found nothing — that is how
 // a dependency outage reads as a persistence backlog.
 func reconcileProbeOutcome(probeErr error) string {
-	if probeErr != nil {
-		return soakReconcileClaimUnavailable
-	}
-	return soakReconcileClaimRetried
+	return soakreconcile.ProbeOutcome(probeErr)
 }
 
 // searchProbeOutcome separates a probe that answered from one that never ran.
@@ -684,16 +674,7 @@ func searchProbeOutcome(
 	probed bool,
 	probeErr error,
 ) string {
-	if probeErr != nil {
-		return soakReconcileClaimUnavailable
-	}
-	if result == soakSearchIndexTooEarly {
-		return soakReconcileClaimDeferred
-	}
-	if !probed {
-		return soakReconcileClaimUnavailable
-	}
-	return soakReconcileClaimRetried
+	return soakreconcile.SearchProbeOutcome(result, probed, probeErr)
 }
 
 func withSoakFailureReconcileMetrics(metrics *Metrics) soakFailureReconcilerOption {
@@ -1127,45 +1108,8 @@ func reconcileReadAction(
 // soakShareGate admits a fixed fraction of calls. Reconciliation runs inside the
 // read lane, so without a cap a large unresolved backlog would consume every
 // read slot and stop the production-like read mix during the fault window.
-type soakShareGate struct {
-	mu     sync.Mutex
-	share  float64
-	credit float64
-}
+type soakShareGate = soakreconcile.ShareGate
 
 func newSoakShareGate(share float64) *soakShareGate {
-	return &soakShareGate{share: min(max(share, 0), 1)}
-}
-
-// Refund returns an allowance taken by a claim that issued no request to the
-// system under test. The gate exists to protect the production-like read mix,
-// so a claim that read nothing must not be charged against it.
-//
-// The credit is capped at one whole allowance. Allow bounds its own credit
-// below one, so an uncapped refund would be the only way the gate could bank
-// it — and a lane that sat idle would then admit a long run of consecutive
-// reconciliation reads the moment a backlog arrived, which is the fault window
-// the cap exists to protect. One allowance is what the refunded claim was
-// entitled to and no more.
-func (g *soakShareGate) Refund() {
-	if g == nil {
-		return
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.credit = min(g.credit+1, 1)
-}
-
-func (g *soakShareGate) Allow() bool {
-	if g == nil {
-		return true
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.credit += g.share
-	if g.credit < 1 {
-		return false
-	}
-	g.credit--
-	return true
+	return soakreconcile.NewShareGate(share)
 }
