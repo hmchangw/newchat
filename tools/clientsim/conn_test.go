@@ -275,3 +275,28 @@ func TestUserCB_AFailedForcedRefreshKeepsTheBrokerVerdict(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), mint.calls.Load(), "and not re-armed afterwards")
 }
+
+// The signing-key template grants no `_INBOX` subject
+// (docs/superpowers/specs/2026-08-25-per-user-inbox-prefix-design.md §9):
+// replies ride the client's own user namespace. On nats.go's default prefix
+// the response mux subscribes `_INBOX.<nuid>.*`, which the server denies — the
+// broker answers every request with a permissions violation and then closes
+// the connection, so a fleet never gets past its first subscription.list page.
+func TestRealDial_SubscribesItsReplyInboxUnderTheAccountsOwnPrefix(t *testing.T) {
+	s := newTestSimClient(t, "user-inbox", jwtModeExpiry, &countingMinter{
+		jwt: func() string { return mintTestJWT(t, time.Now().Add(2*time.Hour)) },
+	})
+	// nats.go smoke-tests the user JWT callback while applying options.
+	require.NoError(t, s.primeJWT(context.Background()))
+
+	var opts nats.Options
+	for _, opt := range s.dialOptions(context.Background()) {
+		require.NoError(t, opt(&opts))
+	}
+
+	assert.Equal(t, "chat.user.user-inbox", opts.InboxPrefix,
+		"the reply inbox must sit in the account namespace the JWT grants")
+	// nats.go appends its own token, so what actually reaches the server is
+	// covered by the granted `chat.user.<account>.>` at any depth.
+	assert.True(t, strings.HasPrefix(opts.InboxPrefix+".nuid.*", "chat.user.user-inbox."))
+}
