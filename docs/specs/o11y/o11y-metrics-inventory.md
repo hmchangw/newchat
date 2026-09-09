@@ -197,7 +197,7 @@ labels. `nats_slow_consumer_events_total` is scoped the same way.
 All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
 `not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
-`rpc_method` on the two RPC families is a closed 91-constant vocabulary,
+`rpc_method` on the two RPC families is a closed 92-constant vocabulary,
 declared at route registration — one method per route, verb-first snake_case per
 AIP-131/132/190. A route that declares none does not compile, and a value outside
 the vocabulary records as semconv's `_OTHER` rather than minting a label. It was

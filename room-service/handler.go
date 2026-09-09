@@ -147,7 +147,7 @@ func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.RoomRestricted(h.siteID), natsmetrics.MethodSetRoomRestricted, h.roomRestricted)
 	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), natsmetrics.MethodBatchGetRoomsInfo, h.roomsInfoBatch)
 	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), natsmetrics.MethodBatchGetThreadRoomsInfo, h.threadRoomInfoBatch)
-	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), natsmetrics.MethodMarkAllThreadsRead, h.clearAllThreadRead)
+	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), natsmetrics.MethodMarkRoomThreadsRead, h.clearAllThreadRead)
 	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), natsmetrics.MethodEnsureRoomKey, h.ensureRoomKey)
 	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), natsmetrics.MethodCreateRoom, h.createRoom)
 	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), natsmetrics.MethodStartTeamsRoomCall, h.teamsRoomCall)

@@ -735,7 +735,7 @@ media-service 2 each, translation-service its 1. Only ten distinct values were
 reachable, and `unknown` was over half the fleet.
 
 `natsrouter.Register`, `RegisterNoBody` and `RegisterOptionalBody` now take a
-`natsmetrics.RPCMethod` from a closed 91-constant vocabulary, so a route that
+`natsmetrics.RPCMethod` from a closed 92-constant vocabulary, so a route that
 declares none does not compile, and the label is resolved once at registration
 instead of parsed from `m.Subject` on every dispatch — a parse that ran even with
 metrics disabled. `RequestOperationFromSubject` and its four helpers are deleted;

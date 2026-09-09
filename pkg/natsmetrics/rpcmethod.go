@@ -82,6 +82,7 @@ const (
 	MethodListUserThreads              RPCMethod = "list_user_threads"
 	MethodMarkAllThreadsRead           RPCMethod = "mark_all_threads_read"
 	MethodMarkRoomRead                 RPCMethod = "mark_room_read"
+	MethodMarkRoomThreadsRead          RPCMethod = "mark_room_threads_read"
 	MethodMarkThreadRead               RPCMethod = "mark_thread_read"
 	MethodMigrateDeleteMessage         RPCMethod = "migrate_delete_message"
 	MethodMigrateEditMessage           RPCMethod = "migrate_edit_message"
@@ -196,6 +197,7 @@ var rpcMethodVocabulary = map[RPCMethod]struct{}{
 	MethodListUserThreads:              {},
 	MethodMarkAllThreadsRead:           {},
 	MethodMarkRoomRead:                 {},
+	MethodMarkRoomThreadsRead:          {},
 	MethodMarkThreadRead:               {},
 	MethodMigrateDeleteMessage:         {},
 	MethodMigrateEditMessage:           {},

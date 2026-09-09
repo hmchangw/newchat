@@ -87,7 +87,7 @@ Publisher / request-reply (label `site`):
 | `rpc_server_call_duration_seconds` | histogram | `rpc_method`, `error_type` | Inbound handler latency at the `natsrouter` boundary, same shape. SLO-4/5 read this; see [`docs/load-testing/common/sli-slo.md`](../../docs/load-testing/common/sli-slo.md) §3 for the good/valid expressions — the denominator is **not** the bare `_count`, because the 4xx classes are excluded from valid events. |
 
 Both RPC families carry `rpc_system_name="nats"`. `rpc_method` is bounded, never the subject. On
-the **server** family it is declared at route registration from a closed 91-constant vocabulary —
+the **server** family it is declared at route registration from a closed 92-constant vocabulary —
 one method per route, so `unknown` no longer appears; a value outside the vocabulary records as
 semconv's `_OTHER`. `RegisterVoid` routes declare no method and record no sample at all: with no
 reply there is no round trip to time. The **client** family is still keyed by the coarser
