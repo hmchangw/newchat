@@ -166,22 +166,6 @@ func TestFailureLedger_CompactionRestoresTerminalCounters(t *testing.T) {
 	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultGood])
 }
 
-func TestFailureWAL_CompactionSyncsContainingDirectory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "run.wal")
-	wal, err := openFailureWAL(path)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, wal.Close()) })
-	var synced []string
-	wal.syncDirectory = func(directory string) error {
-		synced = append(synced, directory)
-		return nil
-	}
-
-	require.NoError(t, wal.Compact(nil))
-
-	assert.Equal(t, []string{filepath.Dir(path), filepath.Dir(path)}, synced)
-}
-
 func TestFailureLedger_ReplayRejectsDuplicateStartedOperation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	operation := testFailureOperation("duplicate", now)

@@ -147,7 +147,10 @@ FAILURE_COVERAGE_PROFILE ?= coverage-loadgen-failure.out
 coverage-loadgen-failure:
 	go test -race -run $(FAILURE_TEST_PATTERN) -coverprofile=$(FAILURE_COVERAGE_PROFILE) ./tools/loadgen/...
 	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_ -include tools/loadgen/internal/failure/ -include tools/loadgen/nats_health.go -min 80
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/ -min 80
 	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/health.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/group.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/wal.go -min 80
 	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_metrics.go -min 90
 
 # Run only Cassandra Run A tests (unit + integration), then enforce the scoped

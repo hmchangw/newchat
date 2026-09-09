@@ -138,6 +138,33 @@ func failureObserverDefinitionFor(observer failureObserver) (failureObserverDefi
 
 type failureOperation = failuremodel.Operation
 
+type failureLedgerEvent = failuremodel.Event
+
+const (
+	failureLedgerEventStarted     = failuremodel.EventStarted
+	failureLedgerEventActivated   = failuremodel.EventActivated
+	failureLedgerEventObserved    = failuremodel.EventObserved
+	failureLedgerEventFinalized   = failuremodel.EventFinalized
+	failureLedgerEventCheckpoint  = failuremodel.EventCheckpoint
+	failureLedgerEventInvariant   = failuremodel.EventInvariant
+	failureLedgerEventInvalidated = failuremodel.EventInvalidated
+)
+
+type failureJournal = failuremodel.Journal
+type streamingFailureJournal = failuremodel.StreamingJournal
+type bufferedFailureJournal = failuremodel.BufferedJournal
+type fileFailureWAL = failuremodel.WAL
+
+const failureWALSchemaVersion = failuremodel.WALSchemaVersion
+
+func openFailureWAL(path string) (*fileFailureWAL, error) {
+	return failuremodel.OpenWAL(path)
+}
+
+func syncFailureWALDirectory(directory string) error {
+	return failuremodel.SyncWALDirectory(directory)
+}
+
 func validateFailureOperation(operation *failureOperation) error {
 	return failuremodel.ValidateOperation(operation)
 }
@@ -172,14 +199,6 @@ func defaultFailureReason(observer failureObserver, observation failureObservati
 
 func validateFailureObserverContract(contract failureObserverContract) error {
 	return failuremodel.ValidateObserverContract(contract)
-}
-
-func equalFailureObserverContract(left, right failureObserverContract) bool {
-	return failuremodel.EqualObserverContract(left, right)
-}
-
-func cloneFailureObserverContract(contract *failureObserverContract) *failureObserverContract {
-	return failuremodel.CloneObserverContract(contract)
 }
 
 func failureOperationMatchesObserverContract(
