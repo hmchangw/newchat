@@ -26,9 +26,13 @@ type poolAccountSource interface {
 	channelSubscriberAccounts(ctx context.Context, siteID string, limit int) ([]string, error)
 }
 
-// cursorLimit converts --limit into the server-side bound. An unbounded export
-// still gets one: maxAccounts+1, so a population over the artifact cap is
-// still DETECTED (the extra row) rather than silently truncated to it.
+// cursorLimit converts --limit into the server-side bound. The pipeline
+// filters bots before this bound applies, so the bound counts only accounts
+// that will survive to the artifact — no headroom needed.
+//
+// An unbounded export still gets a bound: maxAccounts+1, so a population over
+// the artifact cap is still DETECTED (by the extra row) rather than silently
+// truncated to it.
 func cursorLimit(limit int) int {
 	if limit > 0 && limit <= poolartifact.MaxAccounts {
 		return limit
@@ -258,6 +262,14 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 		// $max over the group returns true if ANY row carries the flag.
 		{{Key: "$group", Value: bson.M{"_id": "$u.account", "isBot": bson.M{"$max": "$u.isBot"}}}},
 		{{Key: "$match", Value: bson.M{"isBot": bson.M{"$ne": true}}}},
+		// The ".bot" suffix is excluded HERE too, not only in dropBots. The
+		// $limit below bounds whatever reaches it, so a legacy account the
+		// flag never marked would otherwise be counted against --limit and
+		// then dropped in Go — the caller asks for N, the site holds more than
+		// N eligible accounts, and the run still gets fewer. Filtering before
+		// the bound makes the bound mean what it says. dropBots stays as the
+		// belt for any other source.
+		{{Key: "$match", Value: bson.M{"_id": bson.M{"$not": bson.Regex{Pattern: `\.bot$`}}}}},
 		{{Key: "$sort", Value: bson.M{"_id": 1}}},
 		// Bound the cursor server-side. cur.All materialises whatever comes
 		// back, so applying --limit only afterwards holds the WHOLE site

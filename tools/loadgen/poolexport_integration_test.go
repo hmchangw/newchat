@@ -78,11 +78,15 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 	// and this is only the first: the query keys on the stored u.isBot flag,
 	// so it drops x7 and x8 but cannot see x9, whose flag was never written.
 	// Asserting it away here would hide which layer is carrying the rule.
-	assert.Equal(t, []string{"anna", "bob", "carol", "legacy.site-a.bot"}, got)
+	// legacy.site-a.bot is gone from the source now: the pipeline excludes the
+	// ".bot" suffix too, because the server-side $limit bounds whatever
+	// reaches it and a bot counted against --limit under-delivers the run.
+	assert.Equal(t, []string{"anna", "bob", "carol"}, got)
 
-	// The second layer, composed with the first exactly as exportPool applies
-	// them. This is the population a fleet actually connects as.
-	assert.Equal(t, []string{"anna", "bob", "carol"}, dropBots(got))
+	// dropBots is now a belt with nothing to remove on this path — which is
+	// the point: it stays for any other source, and composing it must not
+	// change what the Mongo source already returned.
+	assert.Equal(t, got, dropBots(got))
 }
 
 // An account with BOTH a Teams room and an ordinary channel is still a valid

@@ -84,8 +84,8 @@ subscriptions: {siteId, roomType: "channel", open: {$ne: false},
                 origin: {$ne: "teams"}}
              → group by u.account, isBot = $max(u.isBot)
              → match isBot != true          ← AFTER the group, see below
-             → sort ascending, limit
-             → ".bot" accounts dropped
+             → match _id not matching /\.bot$/
+             → sort ascending, then limit
 ```
 
 Mirrors user-service's own `subscription.list` match, narrowed to `channel`:

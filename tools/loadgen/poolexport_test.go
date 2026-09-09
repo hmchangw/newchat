@@ -13,17 +13,26 @@ import (
 )
 
 type fakeAccountSource struct {
+	gotLimit int
 	accounts []string
 	err      error
 	gotSite  string
 }
 
-func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID string, _ int) ([]string, error) {
+// channelSubscriberAccounts mirrors the pipeline: bots are excluded BEFORE the
+// bound, so the bound counts only accounts that survive to the artifact. A fake
+// that ignored the bound would make every test about it vacuous.
+func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID string, limit int) ([]string, error) {
 	f.gotSite = siteID
+	f.gotLimit = limit
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.accounts, nil
+	out := dropBots(f.accounts)
+	if n := cursorLimit(limit); len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
 }
 
 type fakePublisher struct {
@@ -275,4 +284,23 @@ func TestExportPool_RetryVerifiesTheStoredAccountsNotItsSelfReportedDigest(t *te
 
 	_, err = exportPool(context.Background(), src, pub, opts)
 	require.Error(t, err, "a stored artifact whose accounts contradict its digest must not be accepted")
+}
+
+// The server-side bound must apply to the population that SURVIVES bot
+// removal, not before it. Bounding first and filtering after silently
+// under-delivers --limit whenever a legacy ".bot" account sits in the sorted
+// head: the caller asks for N, the site holds more than N eligible accounts,
+// and the run still gets fewer.
+func TestExportPool_LimitIsHonouredWhenABotSitsInTheHead(t *testing.T) {
+	src := &fakeAccountSource{accounts: []string{
+		"aaa", "bbb.bot", "ccc", "ddd", "eee", "fff",
+	}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a", Limit: 3,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.Accounts, "--limit 3 must deliver 3 eligible accounts, not 3-minus-the-bots")
+	assert.Equal(t, []string{"aaa", "ccc", "ddd"}, pub.artifacts[res.ArtifactKey].Accounts)
 }
