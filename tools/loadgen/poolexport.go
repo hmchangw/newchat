@@ -82,7 +82,10 @@ const (
 // channel: clientsim opens room lanes only for channels, because DM traffic
 // arrives on the user lane instead. An account with no channel subscription
 // would connect cleanly and then measure nothing.
-const poolExportQuery = `subscriptions: {siteId, roomType: "channel", open: {$ne: false}, origin: {$ne: "teams"}, u.isBot: {$ne: true}} -> distinct u.account, sorted, then ".bot" accounts dropped`
+const poolExportQuery = `subscriptions: match {siteId, roomType: "channel", open: {$ne: false}, origin: {$ne: "teams"}} ` +
+	`-> group by u.account with isBot = $max(u.isBot) ` +
+	`-> match {isBot: {$ne: true}, _id: not empty and not /\.bot$/} ` +
+	`-> sort _id asc -> limit`
 
 type poolExportOptions struct {
 	RunID  string
@@ -130,7 +133,7 @@ func poolDigest(accounts []string) string {
 
 // exportPool reads the population, publishes the artifact the fleet consumes
 // and the manifest that explains it.
-// dropBots removes bot accounts from a population. A bot that owns a room
+// dropUnusable removes accounts a clientsim run cannot connect as. A bot that owns a room
 // holds a genuine channel subscription (bot-room-service/handler.go:213-216
 // writes IsBot:true with RoomTypeChannel, and its $setOnInsert never sets
 // `open`, so the open filter passes it too), so every condition the query
@@ -145,10 +148,12 @@ func poolDigest(accounts []string) string {
 // stored u.isBot flag, this keys on the account shape, and a row written
 // without the flag is caught only here. Cheap — the population is already in
 // memory and sorted.
-func dropBots(accounts []string) []string {
+func dropUnusable(accounts []string) []string {
 	kept := accounts[:0:0]
 	for _, a := range accounts {
-		if model.IsBot(a) {
+		// An empty account builds subjects like chat.user..event.room, which
+		// subscribe cleanly and receive nothing; poolartifact refuses it too.
+		if a == "" || model.IsBot(a) {
 			continue
 		}
 		kept = append(kept, a)
@@ -161,7 +166,7 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 	if err != nil {
 		return poolExportResult{}, fmt.Errorf("list channel subscribers for %s: %w", opts.SiteID, err)
 	}
-	accounts = dropBots(accounts)
+	accounts = dropUnusable(accounts)
 	// The failure this export exists to prevent: a fleet that starts against
 	// nobody reports a healthy zero. Fail here, in the tool that can say why.
 	if len(accounts) == 0 {
@@ -253,7 +258,7 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 			// so it fails safe in the same direction as roomGlobal.
 			"origin": bson.M{"$ne": model.OriginTeams},
 		}}},
-		// Bots hold channel subscriptions like anyone else; see dropBots for
+		// Bots hold channel subscriptions like anyone else; see dropUnusable for
 		// why they cannot be in a clientsim pool. The exclusion runs AFTER the
 		// group, on the account, not before it on the row: an account with one
 		// flagged row and one row whose flag was never written would otherwise
@@ -262,14 +267,21 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 		// $max over the group returns true if ANY row carries the flag.
 		{{Key: "$group", Value: bson.M{"_id": "$u.account", "isBot": bson.M{"$max": "$u.isBot"}}}},
 		{{Key: "$match", Value: bson.M{"isBot": bson.M{"$ne": true}}}},
-		// The ".bot" suffix is excluded HERE too, not only in dropBots. The
+		// The ".bot" suffix is excluded HERE too, not only in dropUnusable. The
 		// $limit below bounds whatever reaches it, so a legacy account the
 		// flag never marked would otherwise be counted against --limit and
 		// then dropped in Go — the caller asks for N, the site holds more than
 		// N eligible accounts, and the run still gets fewer. Filtering before
-		// the bound makes the bound mean what it says. dropBots stays as the
+		// the bound makes the bound mean what it says. dropUnusable stays as the
 		// belt for any other source.
-		{{Key: "$match", Value: bson.M{"_id": bson.M{"$not": bson.Regex{Pattern: `\.bot$`}}}}},
+		// Both exclusions sit before the bound, for one reason: $limit counts
+		// whatever reaches it. An empty account sorts FIRST, so leaving it to
+		// the Go pass lets it consume a --limit slot and then vanish — a site
+		// with eligible accounts reports none. Same for a ".bot" suffix the
+		// flag never marked.
+		{{Key: "$match", Value: bson.M{
+			"_id": bson.M{"$nin": bson.A{"", nil}, "$not": bson.Regex{Pattern: `\.bot$`}},
+		}}},
 		{{Key: "$sort", Value: bson.M{"_id": 1}}},
 		// Bound the cursor server-side. cur.All materialises whatever comes
 		// back, so applying --limit only afterwards holds the WHOLE site

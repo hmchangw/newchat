@@ -28,7 +28,7 @@ func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID 
 	if f.err != nil {
 		return nil, f.err
 	}
-	out := dropBots(f.accounts)
+	out := dropUnusable(f.accounts)
 	if n := cursorLimit(limit); len(out) > n {
 		out = out[:n]
 	}
@@ -303,4 +303,29 @@ func TestExportPool_LimitIsHonouredWhenABotSitsInTheHead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, res.Accounts, "--limit 3 must deliver 3 eligible accounts, not 3-minus-the-bots")
 	assert.Equal(t, []string{"aaa", "ccc", "ddd"}, pub.artifacts[res.ArtifactKey].Accounts)
+}
+
+// The empty account is the other half of the same ordering defect. It sorts
+// FIRST (""), so it consumes a --limit slot before the Go pass drops it: a
+// site whose rows include one empty account reports "no accounts" for
+// --limit=1 while holding plenty of eligible ones.
+func TestExportPool_AnEmptyAccountDoesNotConsumeALimitSlot(t *testing.T) {
+	src := &fakeAccountSource{accounts: []string{"", "aaa", "bbb"}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a", Limit: 1,
+	})
+	require.NoError(t, err, "a leading empty account must not empty the population")
+	assert.Equal(t, 1, res.Accounts)
+	assert.Equal(t, []string{"aaa"}, pub.artifacts[res.ArtifactKey].Accounts)
+}
+
+// The manifest is what makes a run reproducible months later. A recorded query
+// that describes a different selection than the pipeline runs is worse than no
+// record: it looks authoritative and is wrong.
+func TestPoolExportQuery_DescribesThePipelineItRuns(t *testing.T) {
+	assert.Contains(t, poolExportQuery, "group", "the exclusion runs after the group; the record must say so")
+	assert.NotContains(t, poolExportQuery, `u.isBot: {$ne: true}} ->`,
+		"that shape claims the flag is filtered on rows before dedup, which is the bug this pipeline fixed")
 }

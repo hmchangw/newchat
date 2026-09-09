@@ -83,10 +83,10 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 	// reaches it and a bot counted against --limit under-delivers the run.
 	assert.Equal(t, []string{"anna", "bob", "carol"}, got)
 
-	// dropBots is now a belt with nothing to remove on this path — which is
+	// dropUnusable is now a belt with nothing to remove on this path — which is
 	// the point: it stays for any other source, and composing it must not
 	// change what the Mongo source already returned.
-	assert.Equal(t, got, dropBots(got))
+	assert.Equal(t, got, dropUnusable(got))
 }
 
 // An account with BOTH a Teams room and an ordinary channel is still a valid
@@ -115,4 +115,29 @@ func TestIntegration_MongoPoolSource_EmptySite(t *testing.T) {
 	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(context.Background(), "site-none", 0)
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+// The $limit bounds whatever reaches it, so anything the Go pass would remove
+// has to be excluded in the pipeline first. The empty account sorts before
+// every real one, so with limit=1 a pipeline that leaves it in returns the
+// empty string, the Go pass drops it, and a site full of eligible accounts
+// reports none.
+func TestIntegration_MongoPoolSource_LimitSkipsUnusableAccounts(t *testing.T) {
+	db := testutil.MongoDB(t, "poolexportlimit")
+	ctx := context.Background()
+
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		// Sorts first, and is unusable.
+		bson.M{"_id": "e1", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": ""}},
+		// Sorts second, and is unusable for the other reason.
+		bson.M{"_id": "e2", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": ".bot"}},
+		bson.M{"_id": "e3", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "zoe"}},
+	})
+	require.NoError(t, err)
+
+	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"zoe"}, got,
+		"limit=1 must return the first USABLE account, not the first row")
 }

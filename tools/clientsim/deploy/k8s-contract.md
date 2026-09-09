@@ -84,7 +84,7 @@ subscriptions: {siteId, roomType: "channel", open: {$ne: false},
                 origin: {$ne: "teams"}}
              → group by u.account, isBot = $max(u.isBot)
              → match isBot != true          ← AFTER the group, see below
-             → match _id not matching /\.bot$/
+             → match _id not empty and not matching /\.bot$/
              → sort ascending, then limit
 ```
 
