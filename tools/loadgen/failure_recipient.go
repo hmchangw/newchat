@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	failuremodel "github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
 type failureRecipientSubscription interface {
@@ -304,7 +305,7 @@ func startFailureRecipientSubscriptions(
 	now := observer.now().UTC()
 	observer.health.Set(true, now, "subscribed")
 	if observer.metrics != nil {
-		observer.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(1)
+		observer.metrics.SetObserverUp(failureObserverRecipient, true)
 	}
 	return result, nil
 }
@@ -317,7 +318,7 @@ type recipientDelivery struct {
 
 type failureRecipientObserver struct {
 	ledger        *failureLedger
-	metrics       *Metrics
+	metrics       failuremodel.RecipientMetrics
 	evidence      *recipientEvidence
 	health        *failureObserverHealth
 	queue         chan recipientDelivery
@@ -404,7 +405,7 @@ func newFailureRecipientObserver(
 	}
 	startedAt := now().UTC()
 	observer := &failureRecipientObserver{
-		ledger: ledger, metrics: metrics, evidence: newRecipientEvidence(false),
+		ledger: ledger, metrics: newFailureMetricsAdapter(metrics), evidence: newRecipientEvidence(false),
 		health: newFailureObserverHealth(failureObserverRecipient, startedAt),
 		queue:  make(chan recipientDelivery, capacity), now: now,
 		syncDirectory: syncFailureWALDirectory,
@@ -417,10 +418,8 @@ func newFailureRecipientObserver(
 			directory: observer.evidenceDir, syncDirectory: observer.syncDirectory,
 		}
 	}
-	if metrics != nil {
-		metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
-		metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(0)
-	}
+	observer.metrics.SetObserverUp(failureObserverRecipient, false)
+	observer.metrics.SetObserverQueueDepth(failureObserverRecipient, 0)
 	return observer
 }
 
@@ -542,15 +541,15 @@ func (o *failureRecipientObserver) EnqueueRoute(
 	select {
 	case o.queue <- delivery:
 		if o.metrics != nil {
-			o.metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(float64(len(o.queue)))
+			o.metrics.SetObserverQueueDepth(failureObserverRecipient, len(o.queue))
 		}
 		return true
 	default:
 		now := o.now().UTC()
 		o.health.Set(false, now, "queue_overflow")
 		if o.metrics != nil {
-			o.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
-			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationUnverified)).Inc()
+			o.metrics.SetObserverUp(failureObserverRecipient, false)
+			o.metrics.RecordObserverEvent(failureObserverRecipient, failureObservationUnverified)
 		}
 		o.ledger.Invalidate("observer_queue")
 		return false
@@ -571,7 +570,7 @@ func (o *failureRecipientObserver) Run(ctx context.Context) {
 			case delivery := <-o.queue:
 				o.process(delivery)
 				if o.metrics != nil {
-					o.metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(float64(len(o.queue)))
+					o.metrics.SetObserverQueueDepth(failureObserverRecipient, len(o.queue))
 				}
 			}
 		}
@@ -594,7 +593,7 @@ func (o *failureRecipientObserver) Drain() {
 			o.process(delivery)
 		default:
 			if o.metrics != nil {
-				o.metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(0)
+				o.metrics.SetObserverQueueDepth(failureObserverRecipient, 0)
 			}
 			return
 		}
@@ -605,7 +604,7 @@ func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 	var event model.RoomEvent
 	if err := json.Unmarshal(delivery.payload, &event); err != nil {
 		if o.metrics != nil {
-			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationBad)).Inc()
+			o.metrics.RecordObserverEvent(failureObserverRecipient, failureObservationBad)
 		}
 		if o.ledger != nil {
 			o.ledger.Invalidate("observer_malformed")
@@ -617,7 +616,7 @@ func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 	}
 	if event.LastMsgID == "" || event.RoomID == "" {
 		if o.metrics != nil {
-			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationBad)).Inc()
+			o.metrics.RecordObserverEvent(failureObserverRecipient, failureObservationBad)
 		}
 		if o.ledger != nil {
 			o.ledger.Invalidate("observer_malformed")
@@ -644,7 +643,7 @@ func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 	}
 	if disposition == recipientEvidenceUntracked {
 		if o.metrics != nil {
-			o.metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonObserve).Inc()
+			o.metrics.RecordUntracked(failureUntrackedReasonObserve)
 		}
 		return
 	}
@@ -660,7 +659,7 @@ func (o *failureRecipientObserver) Finalize(operationID string, startedAt, deadl
 		}
 	}
 	if o.metrics != nil {
-		o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(result.Observation)).Inc()
+		o.metrics.RecordObserverEvent(failureObserverRecipient, result.Observation)
 	}
 	return result
 }
@@ -669,7 +668,7 @@ func (o *failureRecipientObserver) markSidecarFailure() {
 	now := o.now().UTC()
 	o.health.Set(false, now, "sidecar_failure")
 	if o.metrics != nil {
-		o.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
+		o.metrics.SetObserverUp(failureObserverRecipient, false)
 	}
 	if o.ledger != nil {
 		o.ledger.Invalidate("sidecar")
@@ -728,15 +727,17 @@ func (o *failureRecipientObserver) persistEvidenceRecords(
 	}
 	startedAt := time.Now()
 	err := o.journal.AppendBatch(records)
+	flushResult := "success"
+	if err != nil {
+		flushResult = "error"
+	}
 	if o.metrics != nil {
-		flushResult := "success"
-		if err != nil {
-			flushResult = "error"
-		}
-		o.metrics.FailureEvidenceFlushDuration.WithLabelValues(claim, flushResult).Observe(time.Since(startedAt).Seconds())
-		if err == nil {
-			for _, record := range records {
-				o.metrics.FailureEvidenceRecords.WithLabelValues(record.Kind).Inc()
+		o.metrics.ObserveEvidenceFlush(claim, flushResult, time.Since(startedAt))
+	}
+	if err == nil {
+		for _, record := range records {
+			if o.metrics != nil {
+				o.metrics.RecordEvidence(record.Kind)
 			}
 		}
 	}

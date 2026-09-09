@@ -4,10 +4,20 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
 	sendmodel "github.com/hmchangw/chat/tools/loadgen/internal/soak/send"
 )
+
+type RecipientMetrics interface {
+	SetObserverUp(Observer, bool)
+	SetObserverQueueDepth(Observer, int)
+	RecordObserverEvent(Observer, Observation)
+	RecordUntracked(string)
+	ObserveEvidenceFlush(string, string, time.Duration)
+	RecordEvidence(string)
+}
 
 type RecipientExpectedRoute = sendmodel.RecipientExpectedRoute
 
