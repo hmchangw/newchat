@@ -127,6 +127,18 @@ tooling that splits on the first dash keeps working. The `clientsim-` prefix
 is the whole contract — filter on it — and it is deliberately **not**
 configurable: a knob there would let a fleet disguise itself.
 
+### Reply inbox prefix
+
+clientsim dials with `inboxPrefix = chat.user.{account}`, the same prefix the
+browser client uses. The scoped signing-key template grants no `_INBOX`
+subject at all, so a client left on nats.go's default prefix has its
+request/reply response mux (`_INBOX.<nuid>.*`) denied: the broker answers with
+a permissions violation, nats.go rebuilds the mux, is denied again, and the
+connection is closed under a client that never finishes its first
+`subscription.list` page. If you see that pattern in a run, the prefix is the
+first thing to check. See `docs/client-api.md` §2.1 and
+`docs/superpowers/specs/2026-08-25-per-user-inbox-prefix-design.md` §9.
+
 ## Readiness and asynchronous faults
 
 A subscription permission violation arrives *after* `Subscribe()` already

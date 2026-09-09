@@ -282,6 +282,35 @@ func Notification(account string) string {
 	return fmt.Sprintf("chat.user.%s.notification", account)
 }
 
+// UserInboxPrefix is the request/reply inbox prefix a NATS client must dial
+// with: its own user namespace, `chat.user.{account}`. Replies land on
+// `chat.user.{account}.{nuid}.{token}`.
+//
+// Unrelated to the INBOX JetStream stream below, and deliberately NOT under
+// `_INBOX`: the scoped signing-key template grants no `_INBOX` subject at all
+// (`docker-local/setup.sh`, design
+// `docs/superpowers/specs/2026-08-25-per-user-inbox-prefix-design.md` §9), so a
+// client left on nats.go's default `_INBOX` prefix has its response-mux
+// subscription (`_INBOX.<nuid>.*`) denied, logs a permissions violation per
+// request, and has the connection closed under it. Riding the user namespace
+// instead means the reply subjects are covered by the `chat.user.{{tag(account)}}.>`
+// grant that already exists — no client can read or forge another account's
+// replies, because neither grant reaches a different namespace.
+//
+// Pass the result to `nats.CustomInboxPrefix`; nats.go appends its own
+// `.<nuid>` token and subscribes the mux at `<prefix>.<nuid>.*`.
+//
+// Panics on a token carrying a NATS wildcard: a `*` or `>` account would put
+// the mux subscription across every user's namespace, which is exactly what
+// the per-user prefix exists to prevent — and it is a programming error, never
+// user input, since the account comes from the client's own credentials.
+func UserInboxPrefix(account string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return "chat.user." + account
+}
+
 // InboxExternal is the subject a service uses to publish a cross-site
 // (remote-origin) federation event directly into the destination site's INBOX
 // stream: `chat.inbox.{siteID}.external.{eventType}`. The JetStream publish is

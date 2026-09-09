@@ -126,7 +126,18 @@ func reconnectDelay(attempt int) time.Duration {
 
 // realDial opens the production WebSocket connection.
 func (s *simClient) realDial(ctx context.Context) (simConn, error) {
-	nc, err := nats.Connect(s.cfg.NATSWSURL,
+	nc, err := nats.Connect(s.cfg.NATSWSURL, s.dialOptions(ctx)...)
+	if err != nil {
+		return nil, err
+	}
+	return &realConn{nc: nc, pendingMsgs: s.cfg.SubPendingMsgs, pendingBytes: s.cfg.SubPendingBytes}, nil
+}
+
+// dialOptions is realDial's option set, split out so tests can assert on the
+// connection contract (which the broker enforces but a fake conn cannot)
+// without standing up a server.
+func (s *simClient) dialOptions(ctx context.Context) []nats.Option {
+	return []nats.Option{
 		nats.UserJWT(s.userCB, s.sigCB),
 		nats.Name(connName(s.account, s.runID, s.cfg.ShardIndex)),
 		nats.MaxReconnects(-1),
@@ -160,11 +171,15 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
 			s.handleAsyncError(ctx, sub, err)
 		}),
-	)
-	if err != nil {
-		return nil, err
+		// The signing-key template grants no `_INBOX` subject at all — replies
+		// ride the client's own `chat.user.{account}` namespace instead. On
+		// nats.go's default prefix the response mux (`_INBOX.<nuid>.*`) is
+		// therefore denied: the broker answers with a permissions violation,
+		// nats.go retries the mux, and the connection is closed under a fleet
+		// that never gets past its first subscription.list page. The browser
+		// client passes the same prefix on connect.
+		nats.CustomInboxPrefix(subject.UserInboxPrefix(s.account)),
 	}
-	return &realConn{nc: nc, pendingMsgs: s.cfg.SubPendingMsgs, pendingBytes: s.cfg.SubPendingBytes}, nil
 }
 
 // nextReconnectDelay is nats.go's CustomReconnectDelay callback. Its own

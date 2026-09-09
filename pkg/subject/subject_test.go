@@ -1352,3 +1352,26 @@ func TestRoomThreadEventTargets_TransitionGrace(t *testing.T) {
 	after := flip.Add(subject.DefaultRoomLocalityGrace + time.Minute)
 	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, after))
 }
+
+// The reply inbox rides the client's own user namespace (design 2026-08-25
+// §9): the signing-key template grants no `_INBOX` subject at all, so a client
+// on nats.go's default prefix has its response-mux subscription denied and
+// every request/reply RPC fails. Any Go client dialling with a minted user JWT
+// needs the same prefix the frontend uses.
+func TestUserInboxPrefix(t *testing.T) {
+	assert.Equal(t, "chat.user.alice", subject.UserInboxPrefix("alice"))
+
+	// Never `_INBOX`: that namespace is granted to nobody.
+	assert.False(t, strings.HasPrefix(subject.UserInboxPrefix("alice"), "_INBOX"))
+
+	// nats.go appends ".<nuid>" and subscribes the mux at "<inbox>.*", so the
+	// generated subjects sit inside the account's own branch and are covered by
+	// the `chat.user.{{tag(account)}}.>` grant at any depth.
+	assert.True(t, strings.HasPrefix(subject.UserInboxPrefix("alice")+".nuid.token", "chat.user.alice."))
+
+	// A wildcard would subscribe the mux across every account's namespace —
+	// exactly what the per-user prefix exists to stop.
+	assert.Panics(t, func() { subject.UserInboxPrefix("*") })
+	assert.Panics(t, func() { subject.UserInboxPrefix(">") })
+	assert.Panics(t, func() { subject.UserInboxPrefix("") })
+}
