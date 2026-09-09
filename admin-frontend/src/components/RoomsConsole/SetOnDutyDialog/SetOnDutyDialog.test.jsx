@@ -36,8 +36,10 @@ function renderDialog({ onClose = vi.fn(), onDone = vi.fn() } = {}) {
   render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={onClose} onDone={onDone} />)
 }
 
+// Exact accessible name, so this only reaches members with no trailing badge —
+// the bot row carries one and is matched by its own regex below.
 async function ownerRadio(account) {
-  return screen.findByRole('radio', { name: new RegExp(account) })
+  return screen.findByRole('radio', { name: account })
 }
 
 describe('SetOnDutyDialog', () => {
