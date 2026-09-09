@@ -65,7 +65,16 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 	// Sorted and de-duplicated. The order is the contract shardSlice relies
 	// on: every pod slices the same array, so an unstable one would overlap
 	// or skip accounts across pods.
-	assert.Equal(t, []string{"anna", "bob", "carol"}, got)
+	//
+	// legacy.site-a.bot is here on purpose. Bots are excluded at two layers
+	// and this is only the first: the query keys on the stored u.isBot flag,
+	// so it drops x7 and x8 but cannot see x9, whose flag was never written.
+	// Asserting it away here would hide which layer is carrying the rule.
+	assert.Equal(t, []string{"anna", "bob", "carol", "legacy.site-a.bot"}, got)
+
+	// The second layer, composed with the first exactly as exportPool applies
+	// them. This is the population a fleet actually connects as.
+	assert.Equal(t, []string{"anna", "bob", "carol"}, dropBots(got))
 }
 
 // An account with BOTH a Teams room and an ordinary channel is still a valid
