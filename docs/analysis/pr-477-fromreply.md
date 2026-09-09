@@ -62,20 +62,45 @@ reason this build has never seen relaying correctly through the existing code,
 code and reason intact. **Version skew in the field means new reasons, and the
 current idiom handles them.**
 
-## 4. The "three unmarshals" cost is not on the hot path
+## 4. The cost is on the error path, and it is allocations, not latency
+
+Microbenchmark, `pkg/errcode/remote_bench_test.go`:
 
 | | ns/op | B/op | allocs/op |
 |---|---|---|---|
 | `Parse` success (hot path) | 3562 | 280 | 5 |
 | `FromReply` success (hot path) | **3522** | **224** | 5 |
 | `Parse` error | 1755 | 360 | 8 |
-| `FromReply` error | 3317 | 808 | 17 |
+| `FromReply` error | **3317** | **808** | **17** |
 
 On a success reply `FromReply` decodes one `json.RawMessage` field where `Parse`
-decodes the whole `Error` struct, so it is marginally *faster* and allocates
-less. The extra passes only run on an error reply, which has already spent a
-failed network round trip. **Perf is not an argument against the PR.**
+decodes the whole `Error` struct, so it is marginally faster and allocates less.
+On an error reply it is ~1.9x the CPU and 2.2x the allocations, because it makes
+three passes over the payload where `Parse` makes one. That cost is real.
 
+`broadcast-worker/parent_fetcher_envelope_bench_test.go` puts it in context by
+benchmarking the whole `FetchParent` error path over a real NATS round trip,
+against a bare round trip as the floor (`-count=5`):
+
+| | ns/op (range over 5) | B/op | allocs/op |
+|---|---|---|---|
+| round trip only | 210638 – 249428 | 6243 | 58 |
+| `FetchParent` error, `Parse` | 214258 – 265128 | ~6900–7060 | 68 |
+| `FetchParent` error, `FromReply` | 248734 – 271776 | ~7330–7575 | 77 |
+
+**Latency is not separable.** The 1.6 µs microbenchmark delta is ~0.7% of a
+~230 µs round trip and sits well inside the ~40 µs of jitter between repeats of
+the *same* benchmark. Wall clock cannot distinguish the two here.
+
+**Allocations are separable and deterministic.** `FromReply` costs a fixed
+**+9 allocations and ~+400 B per failed RPC** — 77 vs 68, or +13% on the error
+path, against 58 for the round trip alone. That is the honest cost: GC pressure
+on failures, not latency.
+
+Whether it matters is an error-rate question. In steady state these paths fail
+rarely (a deleted thread parent). Under an outage every call takes it — but an
+outage is already dominated by round trips and JetStream redelivery, not by nine
+allocations.
 ## 5. What FromReply does not do
 
 `TestFromReply_IgnoresNonJSON`: a non-JSON reply returns `nil`. Every caller
