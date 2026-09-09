@@ -220,7 +220,7 @@ func loadPool(ctx context.Context, cfg *config) (*poolartifact.Artifact, error) 
 	if err != nil {
 		return nil, err
 	}
-	if plaintextObjectStore(store.Endpoint, store.UseSSL) {
+	if store.PlaintextEndpoint() {
 		// Not fatal: the documented docker-compose loop runs MinIO over HTTP,
 		// and this tool has to stay runnable there. But the artifact is a list
 		// of real employee accounts and the request carries the store's access
@@ -234,26 +234,6 @@ func loadPool(ctx context.Context, cfg *config) (*poolartifact.Artifact, error) 
 		return nil, err
 	}
 	return s.Load(ctx, key, cfg.SiteID)
-}
-
-// plaintextObjectStore reports a pool fetch that crosses a network unencrypted.
-// A loopback endpoint is the local development loop, not an exposure, so it is
-// excluded — warning there would train the operator to ignore the warning.
-func plaintextObjectStore(endpoint string, useSSL bool) bool {
-	if useSSL {
-		return false
-	}
-	host := endpoint
-	if h, _, err := net.SplitHostPort(endpoint); err == nil {
-		host = h
-	}
-	if host == "localhost" || host == "::1" {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return false
-	}
-	return true
 }
 
 // poolStoreFor resolves the object-store config the URL implies. One function

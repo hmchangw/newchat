@@ -347,3 +347,49 @@ func TestStore_PutIfAbsentValidatesBeforeClaiming(t *testing.T) {
 	require.NoError(t, s.PutIfAbsent(context.Background(), key, testArtifact()),
 		"the rejected write must not have claimed the key")
 }
+
+// The exposure is identical at both ends — pool-export uploads the account
+// list, clientsim downloads it, and both carry the access key ID — so the rule
+// lives here rather than being written twice and drifting.
+func TestStoreConfig_PlaintextEndpoint(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint string
+		useSSL   bool
+		want     bool
+	}{
+		{"tls anywhere is fine", "minio.svc.cluster.local:9000", true, false},
+		{"plaintext to a remote host warns", "minio.svc.cluster.local:9000", false, true},
+		{"plaintext to localhost is the dev loop", "localhost:9000", false, false},
+		{"plaintext to 127.0.0.1 is the dev loop", "127.0.0.1:9000", false, false},
+		{"plaintext to ::1 is the dev loop", "[::1]:9000", false, false},
+		{"a bare remote host with no port still warns", "minio.example.com", false, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			c := StoreConfig{Endpoint: tt.endpoint, UseSSL: tt.useSSL}
+			assert.Equal(t, tt.want, c.PlaintextEndpoint())
+		})
+	}
+}
+
+// asAlreadyExists is the other half of the conditional write: without it a
+// lost claim reads as an opaque transport failure and exportPool aborts
+// instead of reconciling.
+func TestAsAlreadyExists(t *testing.T) {
+	assert.ErrorIs(t, asAlreadyExists(fmt.Errorf("put: %w",
+		minio.ErrorResponse{Code: "PreconditionFailed"})), ErrObjectExists)
+	assert.ErrorIs(t, asAlreadyExists(fmt.Errorf("put: %w",
+		minio.ErrorResponse{StatusCode: 412})), ErrObjectExists)
+
+	other := errors.New("connection reset")
+	assert.NotErrorIs(t, asAlreadyExists(other), ErrObjectExists)
+	assert.ErrorIs(t, asAlreadyExists(other), other, "an unrelated error must pass through unchanged")
+}
+
+// asNotFound must not claim every minio error is a missing object.
+func TestAsNotFound_OnlyClassifiesNoSuchKey(t *testing.T) {
+	denied := fmt.Errorf("get: %w", minio.ErrorResponse{Code: "AccessDenied"})
+	assert.NotErrorIs(t, asNotFound(denied), ErrObjectNotFound)
+	assert.ErrorIs(t, asNotFound(denied), denied)
+}

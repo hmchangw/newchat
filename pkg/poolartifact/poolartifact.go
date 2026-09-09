@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // SchemaVersion is the artifact schema this package reads and writes.
@@ -46,6 +48,14 @@ func validateAccounts(accounts []string) error {
 		// subscribe cleanly and receive nothing.
 		if account == "" {
 			return fmt.Errorf("pool artifact account %d is empty", i)
+		}
+		// The account becomes a NATS subject token. subject.UserSubscriptionList
+		// PANICS on one carrying a dot, wildcard, whitespace or control rune, so
+		// letting it through here does not degrade a clientsim pod — it kills it
+		// at startup. Same validator the subject builders use, so the artifact
+		// contract and the subject contract cannot drift.
+		if !subject.IsValidAccountToken(account) {
+			return fmt.Errorf("pool artifact account %d (%q) is not a valid NATS subject token", i, account)
 		}
 		if first, dup := seen[account]; dup {
 			return fmt.Errorf("pool artifact has duplicate account %q at positions %d and %d", account, first, i)
@@ -98,6 +108,13 @@ func marshalArtifact(a *Artifact) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal pool artifact: %w", err)
 	}
+	// Symmetric with readCapped, for the same reason the account cap is
+	// symmetric with Load: a producer that can publish what every consumer
+	// refuses turns one bad export into a failure at every pod's startup,
+	// hours later and in the wrong tool.
+	if int64(len(data)) > maxArtifactBytes {
+		return nil, fmt.Errorf("write pool artifact: %d bytes, above the %d-byte cap", len(data), maxArtifactBytes)
+	}
 	return data, nil
 }
 
@@ -128,7 +145,11 @@ const maxArtifactBytes = 64 << 20
 // thing would then take a site down instead of testing it. One million is
 // ten times the largest pool the tooling is designed for, so it can only ever
 // catch a mistake.
-const maxAccounts = 1_000_000
+const maxAccounts = MaxAccounts
+
+// MaxAccounts is the decoded-pool cap, exported so a producer can bound its
+// own query by the same number instead of discovering it after the fact.
+const MaxAccounts = 1_000_000
 
 // isGzipPath decides compression from the name alone, so the two ends of the
 // contract cannot disagree: whatever Write compressed, Load decompresses.
@@ -165,7 +186,12 @@ func gzipBytes(data []byte) ([]byte, error) {
 // closed for plain JSON, reopened by compression.
 func readCapped(r io.Reader, gzipped bool) ([]byte, error) {
 	if gzipped {
-		zr, err := gzip.NewReader(r)
+		// Bound the COMPRESSED stream too. The decompressed cap alone lets a
+		// stream that never expands past it be read forever — a stall rather
+		// than a heap blow-up, but a pod that hangs at startup instead of
+		// failing is worse to diagnose. The artifact compresses well, so a
+		// compressed body at the decompressed cap is already absurd.
+		zr, err := gzip.NewReader(io.LimitReader(r, maxArtifactBytes+1))
 		if err != nil {
 			return nil, fmt.Errorf("open gzip pool artifact: %w", err)
 		}

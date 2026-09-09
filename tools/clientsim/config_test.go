@@ -421,7 +421,8 @@ func TestWarnPlaintextObjectStore(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, plaintextObjectStore(tt.endpoint, tt.useSSL))
+			cfg := poolartifact.StoreConfig{Endpoint: tt.endpoint, UseSSL: tt.useSSL}
+			assert.Equal(t, tt.want, cfg.PlaintextEndpoint())
 		})
 	}
 }

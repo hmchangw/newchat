@@ -3,6 +3,7 @@ package poolartifact
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -382,4 +383,40 @@ func TestLoad_GzipRejectionCostTracksTheCapNotTheExpansion(t *testing.T) {
 
 	assert.Less(t, farOver, justOver*2,
 		"rejecting a bomb that expands to three times the cap must not cost three times as much")
+}
+
+// The pool's accounts become NATS subject tokens. subject.UserSubscriptionList
+// PANICS on one carrying a dot, wildcard, whitespace or control rune, so an
+// artifact holding one takes the clientsim pod down at startup rather than
+// failing it cleanly. Reject at both ends, using the same validator the
+// subject builders use, so the two cannot drift.
+func TestValidateAccounts_RejectsUnsafeSubjectTokens(t *testing.T) {
+	for _, bad := range []string{"weather.site-a.bot", "*", ">", "has space", "ctl\x01"} {
+		err := Write(filepath.Join(t.TempDir(), "p.json"), &Artifact{
+			RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: []string{"ok", bad},
+		})
+		require.Error(t, err, "account %q must be refused by the producer", bad)
+		assert.Contains(t, err.Error(), "subject token")
+	}
+}
+
+// The account cap is symmetric between Write and Load for a stated reason —
+// a producer that can emit what the consumer refuses turns a bad input into a
+// failure hours later, in the wrong tool. That rule was applied to the count
+// and not to the byte size, leaving one window open: a population inside the
+// account cap whose names are long enough to blow the byte cap. Narrow, but
+// the consequence is every pod refusing an artifact that published cleanly.
+func TestWrite_RefusesAnArtifactAboveTheReadCap(t *testing.T) {
+	// Few accounts, each enormous: the account cap cannot fire here, so this
+	// isolates the byte cap rather than passing through the other guard.
+	long := strings.Repeat("a", 100_000)
+	accounts := make([]string, 0, 700)
+	for i := range 700 {
+		accounts = append(accounts, fmt.Sprintf("%s%06d", long, i))
+	}
+	err := Write(filepath.Join(t.TempDir(), "p.json"), &Artifact{
+		RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: accounts,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cap")
 }

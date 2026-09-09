@@ -18,7 +18,7 @@ type fakeAccountSource struct {
 	gotSite  string
 }
 
-func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID string) ([]string, error) {
+func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID string, _ int) ([]string, error) {
 	f.gotSite = siteID
 	if f.err != nil {
 		return nil, f.err
@@ -255,4 +255,24 @@ func TestExportPool_SamePopulationIsAnIdempotentRetry(t *testing.T) {
 	require.NoError(t, err, "re-exporting the same population must be a safe retry")
 	assert.Equal(t, first.ConfigDigest, second.ConfigDigest)
 	assert.Equal(t, []string{"anna", "bob"}, pub.artifacts[first.ArtifactKey].Accounts)
+}
+
+// The retry path compared existing.ConfigDigest — a field the stored artifact
+// reports about ITSELF. An artifact whose digest disagrees with its accounts
+// (a truncated write, a hand-edited object) would be accepted as "the same
+// population" and the fleet would connect to something nobody exported.
+func TestExportPool_RetryVerifiesTheStoredAccountsNotItsSelfReportedDigest(t *testing.T) {
+	src := &fakeAccountSource{accounts: []string{"anna", "bob"}}
+	pub := newFakePublisher()
+	opts := poolExportOptions{RunID: "run-1", SiteID: "site-a"}
+
+	first, err := exportPool(context.Background(), src, pub, opts)
+	require.NoError(t, err)
+
+	// The stored digest still claims the original population; the accounts no
+	// longer match it.
+	pub.artifacts[first.ArtifactKey].Accounts = []string{"mallory"}
+
+	_, err = exportPool(context.Background(), src, pub, opts)
+	require.Error(t, err, "a stored artifact whose accounts contradict its digest must not be accepted")
 }

@@ -20,8 +20,20 @@ import (
 )
 
 // poolAccountSource yields the accounts a clientsim run should connect as.
+// limit is the caller's --limit (0 = unbounded); a source is free to push it
+// down rather than materialise the whole population first.
 type poolAccountSource interface {
-	channelSubscriberAccounts(ctx context.Context, siteID string) ([]string, error)
+	channelSubscriberAccounts(ctx context.Context, siteID string, limit int) ([]string, error)
+}
+
+// cursorLimit converts --limit into the server-side bound. An unbounded export
+// still gets one: maxAccounts+1, so a population over the artifact cap is
+// still DETECTED (the extra row) rather than silently truncated to it.
+func cursorLimit(limit int) int {
+	if limit > 0 && limit <= poolartifact.MaxAccounts {
+		return limit
+	}
+	return poolartifact.MaxAccounts + 1
 }
 
 // poolPublisher is the object-store slice the export needs.
@@ -141,7 +153,7 @@ func dropBots(accounts []string) []string {
 }
 
 func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, opts poolExportOptions) (poolExportResult, error) {
-	accounts, err := src.channelSubscriberAccounts(ctx, opts.SiteID)
+	accounts, err := src.channelSubscriberAccounts(ctx, opts.SiteID, opts.Limit)
 	if err != nil {
 		return poolExportResult{}, fmt.Errorf("list channel subscribers for %s: %w", opts.SiteID, err)
 	}
@@ -177,7 +189,10 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 		if loadErr != nil {
 			return poolExportResult{}, fmt.Errorf("read the pool that already holds run %q: %w", opts.RunID, loadErr)
 		}
-		if existing.ConfigDigest != digest {
+		// Recompute rather than trust: ConfigDigest is what the stored object
+		// says about ITSELF, so an artifact whose accounts no longer match it
+		// would be waved through as "the same population".
+		if poolDigest(existing.Accounts) != digest || existing.ConfigDigest != digest {
 			return poolExportResult{}, fmt.Errorf(
 				"run %q already holds a pool of %d accounts (digest %s); this export is a different population of %d (digest %s) — use a new --run-id rather than overwrite a pool a fleet may already be reading",
 				opts.RunID, len(existing.Accounts), existing.ConfigDigest, len(accounts), digest)
@@ -211,7 +226,7 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 // collection.
 type mongoPoolSource struct{ db *mongo.Database }
 
-func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID string) ([]string, error) {
+func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID string, limit int) ([]string, error) {
 	// $group, not $lookup — no join, and it projects to the single field the
 	// export needs. $sort after the group makes the order stable, which is
 	// what shardSlice depends on: every clientsim pod slices the same array,
@@ -233,14 +248,23 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 			// connections and over-selecting costs silent measurement loss,
 			// so it fails safe in the same direction as roomGlobal.
 			"origin": bson.M{"$ne": model.OriginTeams},
-			// Bots hold channel subscriptions like anyone else; see dropBots
-			// for why they cannot be in a clientsim pool. Dropped here so the
-			// bulk never leaves the server, and again in Go on the account
-			// shape, for a row whose flag was never stored.
-			"u.isBot": bson.M{"$ne": true},
 		}}},
-		{{Key: "$group", Value: bson.M{"_id": "$u.account"}}},
+		// Bots hold channel subscriptions like anyone else; see dropBots for
+		// why they cannot be in a clientsim pool. The exclusion runs AFTER the
+		// group, on the account, not before it on the row: an account with one
+		// flagged row and one row whose flag was never written would otherwise
+		// have the flagged row filtered out and survive on the other — the
+		// exact hole the two layers exist to close, reopened by filter order.
+		// $max over the group returns true if ANY row carries the flag.
+		{{Key: "$group", Value: bson.M{"_id": "$u.account", "isBot": bson.M{"$max": "$u.isBot"}}}},
+		{{Key: "$match", Value: bson.M{"isBot": bson.M{"$ne": true}}}},
 		{{Key: "$sort", Value: bson.M{"_id": 1}}},
+		// Bound the cursor server-side. cur.All materialises whatever comes
+		// back, so applying --limit only afterwards holds the WHOLE site
+		// population in the Job's heap first — and an unbounded export has no
+		// ceiling at all until the artifact's own account cap rejects it, long
+		// after the memory was spent. maxAccounts+1 keeps that cap detectable.
+		{{Key: "$limit", Value: int64(cursorLimit(limit))}},
 	}
 	// $group and $sort are blocking stages with a per-stage memory limit; a
 	// site large enough to be worth load-testing is exactly the one that
@@ -295,6 +319,12 @@ func runPoolExport(ctx context.Context, cfg *config, args []string) int {
 	if err := cfg.Pool.Validate(); err != nil {
 		slog.Error("pool export configuration", "error", err)
 		return 2
+	}
+	if cfg.Pool.PlaintextEndpoint() {
+		// Same exposure as clientsim's fetch, in the other direction: this
+		// UPLOADS the account list, and the request carries the access key ID.
+		slog.Warn("publishing the pool over plaintext HTTP — the account list and the store access key ID cross the network in the clear; set POOL_S3_USE_SSL=true outside local development",
+			"endpoint", cfg.Pool.Endpoint)
 	}
 	store, err := poolartifact.NewStore(&cfg.Pool)
 	if err != nil {

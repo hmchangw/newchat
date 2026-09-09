@@ -73,3 +73,23 @@ func TestIntegration_Store_LargePoolRoundTrip(t *testing.T) {
 	assert.Equal(t, accounts[0], got.Accounts[0])
 	assert.Equal(t, accounts[len(accounts)-1], got.Accounts[len(accounts)-1])
 }
+
+// The conditional write is the whole overwrite guard, and MinIO's If-None-Match
+// is a server-side extension — the fake cannot prove the server honours it.
+func TestIntegration_Store_PutIfAbsentClaimsOnce(t *testing.T) {
+	client, bucket := testutil.MinIO(t, "poolartifact")
+	s := newStore(minioObjects{c: client}, bucket, "p")
+	key := s.Key("site-a", "run-1", "pool.json.gz")
+	ctx := context.Background()
+
+	first := &Artifact{RunID: "run-1", SiteID: "site-a", ConfigDigest: "d1", Accounts: []string{"anna", "bob"}}
+	require.NoError(t, s.PutIfAbsent(ctx, key, first))
+
+	second := &Artifact{RunID: "run-1", SiteID: "site-a", ConfigDigest: "d2", Accounts: []string{"mallory"}}
+	err := s.PutIfAbsent(ctx, key, second)
+	require.ErrorIs(t, err, ErrObjectExists, "the server must reject the second claim")
+
+	got, err := s.Load(ctx, key, "site-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna", "bob"}, got.Accounts, "the first writer's population must survive")
+}

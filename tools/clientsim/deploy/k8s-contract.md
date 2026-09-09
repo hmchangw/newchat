@@ -81,8 +81,10 @@ Env — all of these already exist in the loadgen half of the chart except the
 
 ```text
 subscriptions: {siteId, roomType: "channel", open: {$ne: false},
-                origin: {$ne: "teams"}, u.isBot: {$ne: true}}
-             → distinct u.account, sorted ascending
+                origin: {$ne: "teams"}}
+             → group by u.account, isBot = $max(u.isBot)
+             → match isBot != true          ← AFTER the group, see below
+             → sort ascending, limit
              → ".bot" accounts dropped
 ```
 
@@ -99,6 +101,12 @@ and reports ready while subscribing to nothing. It is applied unconditionally
 rather than mirroring the per-account allowlist: for a load pool,
 under-selecting costs a few connections and over-selecting costs silent
 measurement loss.
+
+**The bot exclusion runs after the group, not before it.** Filtering rows
+first looks equivalent and is not: an account with one flagged row and one row
+whose flag was never written has the flagged row removed and survives on the
+other. Grouping first and taking `$max` of the flag means any flagged row
+disqualifies the whole account.
 
 **Bots are excluded twice, on purpose.** A bot that owns a room holds a
 genuine channel subscription — `bot-room-service` writes `u.isBot: true` with
@@ -124,7 +132,9 @@ the document fetches, not the scan.
 A covering index has to carry **every** predicate, or MongoDB fetches the
 documents anyway and the one benefit is gone. With the `origin` and `u.isBot`
 exclusions that is
-`{siteId: 1, roomType: 1, open: 1, origin: 1, "u.isBot": 1, "u.account": 1}`.
+`{siteId: 1, roomType: 1, open: 1, origin: 1, "u.account": 1, "u.isBot": 1}` —
+`u.isBot` is no longer a match predicate but is still read per row by the
+group, so it has to be in the index for the query to stay covered.
 It is **not** created by this tool — a load tool must not mutate the schema of
 the database under test, and the write amplification on a hot collection is
 the subscriptions owner's call. Until it exists, expect the Job to do a

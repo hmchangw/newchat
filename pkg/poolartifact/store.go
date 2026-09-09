@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -185,6 +186,31 @@ func newStore(o objects, bucket, prefix string) *Store {
 // about what is safe.
 var keySegmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// PlaintextEndpoint reports a store access that crosses a network
+// unencrypted. Loopback is excluded: that is the documented local MinIO
+// workflow, and a warning that fires on every local run is one operators learn
+// to skip — which would cost the deployed case the visibility it exists for.
+//
+// It lives here rather than in either tool because the exposure is the same at
+// both ends: pool-export uploads the account list, clientsim downloads it, and
+// both carry the store's access key ID.
+func (c *StoreConfig) PlaintextEndpoint() bool {
+	if c.UseSSL {
+		return false
+	}
+	host := c.Endpoint
+	if h, _, err := net.SplitHostPort(c.Endpoint); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
+}
+
 // ValidateKeySegment rejects anything that would not survive path.Join as one
 // literal segment. Key joins prefix/siteID/runID/name, and path.Join
 // NORMALISES "..", so an unchecked segment can write the artifact into another
@@ -193,8 +219,10 @@ var keySegmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 // this catches a typo or a copied env rather than an attacker; the damage is
 // the same either way.
 func ValidateKeySegment(s string) error {
-	if s == "." || s == ".." || !keySegmentPattern.MatchString(s) {
-		return fmt.Errorf("%q is not a valid object-key segment: it must match %s and not be \".\" or \"..\"",
+	// No explicit "."/".." case: the pattern requires an alphanumeric first
+	// rune, so neither can match.
+	if !keySegmentPattern.MatchString(s) {
+		return fmt.Errorf("%q is not a valid object-key segment: it must match %s ",
 			s, keySegmentPattern.String())
 	}
 	return nil

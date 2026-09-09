@@ -55,11 +55,19 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 			"u": bson.M{"account": "p_admin", "isBot": true}},
 		bson.M{"_id": "x9", "siteId": "site-a", "roomType": "channel",
 			"u": bson.M{"account": "legacy.site-a.bot"}},
+		// The case a pre-group filter cannot see: ONE account, two rows, only
+		// one carrying the flag. Filtering rows before the group drops the
+		// flagged row and lets the account through on the other — and this
+		// name has no ".bot" suffix, so the Go pass cannot catch it either.
+		bson.M{"_id": "x10", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "mixedbot", "isBot": true}},
+		bson.M{"_id": "x11", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "mixedbot"}},
 	}
 	_, err := db.Collection("subscriptions").InsertMany(ctx, docs)
 	require.NoError(t, err)
 
-	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a")
+	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 0)
 	require.NoError(t, err)
 
 	// Sorted and de-duplicated. The order is the contract shardSlice relies
@@ -90,7 +98,7 @@ func TestIntegration_MongoPoolSource_KeepsAccountsWithANonTeamsChannel(t *testin
 	})
 	require.NoError(t, err)
 
-	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a")
+	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 0)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"mixed"}, got)
 }
@@ -100,7 +108,7 @@ func TestIntegration_MongoPoolSource_KeepsAccountsWithANonTeamsChannel(t *testin
 // loud failure.
 func TestIntegration_MongoPoolSource_EmptySite(t *testing.T) {
 	db := testutil.MongoDB(t, "poolexport-empty")
-	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(context.Background(), "site-none")
+	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(context.Background(), "site-none", 0)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
