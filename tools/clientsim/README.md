@@ -75,7 +75,8 @@ the local YAML in this repo.
 | `CLIENTSIM_AUTH_URL` | required | side issuer base URL |
 | `CLIENTSIM_POOL_FILE` | — | pool artifact path (`pkg/poolartifact`); `.gz` is decompressed. **Exactly one** of this and `_POOL_URL` |
 | `CLIENTSIM_POOL_URL` | — | `s3://bucket/key` the artifact is fetched from at startup — the k8s path, no initContainer needed |
-| `POOL_S3_ENDPOINT` / `_ACCESS_KEY` / `_SECRET_KEY` / `_BUCKET` | — | object store, required when `_POOL_URL` is set. Declared in `pkg/poolartifact` because `loadgen pool-export` writes with the same knobs |
+| `POOL_S3_ENDPOINT` / `_ACCESS_KEY` / `_SECRET_KEY` | — | object store, required when `_POOL_URL` is set. Declared in `pkg/poolartifact` because `loadgen pool-export` writes with the same knobs |
+| `POOL_S3_BUCKET` | — | required only for `loadgen pool-export`; clientsim ignores it, because `CLIENTSIM_POOL_URL` must name its bucket and that one wins |
 | `POOL_S3_PREFIX` / `_USE_SSL` | `clientsim` / `true` | key prefix and TLS |
 | `CLIENTSIM_SITE_ID` | required | site for `subscription.list` + subjects; must match the artifact |
 | `CLIENTSIM_TARGET_CONNS` | pool size | `T = min(target, pool)`; floor-partitioned across shards |

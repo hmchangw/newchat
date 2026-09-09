@@ -121,7 +121,10 @@ collection carries no index for that shape (`u.account + roomType` and
 legitimately needs most of the channel subscriptions, so the win is skipping
 the document fetches, not the scan.
 
-A covering index would be `{siteId: 1, roomType: 1, open: 1, "u.account": 1}`.
+A covering index has to carry **every** predicate, or MongoDB fetches the
+documents anyway and the one benefit is gone. With the `origin` and `u.isBot`
+exclusions that is
+`{siteId: 1, roomType: 1, open: 1, origin: 1, "u.isBot": 1, "u.account": 1}`.
 It is **not** created by this tool — a load tool must not mutate the schema of
 the database under test, and the write amplification on a hot collection is
 the subscriptions owner's call. Until it exists, expect the Job to do a
@@ -150,7 +153,7 @@ Image: **clientsim**. Replicas = `CLIENTSIM_SHARD_COUNT`.
 |---|---|---|
 | `CLIENTSIM_POOL_URL` | ✅ | `s3://<bucket>/<prefix>/<siteId>/<runId>/pool.json.gz` |
 | `POOL_S3_ENDPOINT` / `_ACCESS_KEY` / `_SECRET_KEY` | ✅ | same store the Job wrote to. Read-only credentials are enough |
-| `POOL_S3_BUCKET` | | the URL's bucket wins; set it only if the URL omits one |
+| `POOL_S3_BUCKET` | | ignored on this path — `CLIENTSIM_POOL_URL` must name its bucket, and that one wins |
 | `CLIENTSIM_NATS_WS_URL` | ✅ | `wss://…` |
 | `CLIENTSIM_AUTH_URL` | ✅ | `http://dev-auth-service.<ns>.svc.cluster.local:8080` |
 | `CLIENTSIM_SITE_ID` | ✅ | must match the artifact, or startup fails |

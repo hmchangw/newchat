@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
+
+	"github.com/minio/minio-go/v7"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,9 +26,14 @@ func newFakeObjects() *fakeObjects {
 	return &fakeObjects{data: map[string][]byte{}, contentTypes: map[string]string{}}
 }
 
-func (f *fakeObjects) put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string) error {
+func (f *fakeObjects) put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string, ifAbsent bool) error {
 	if f.putErr != nil {
 		return f.putErr
+	}
+	if ifAbsent {
+		if _, exists := f.data[bucket+"/"+key]; exists {
+			return fmt.Errorf("%w: %s/%s", ErrObjectExists, bucket, key)
+		}
 	}
 	b, err := io.ReadAll(r)
 	if err != nil {
@@ -36,16 +44,29 @@ func (f *fakeObjects) put(_ context.Context, bucket, key string, r io.Reader, _ 
 	return nil
 }
 
+// get models minio's real shape for a missing object, which is the whole
+// point of the fake: GetObject does NOT fail eagerly, it hands back a reader
+// whose first Read returns the NoSuchKey ErrorResponse. A fake that returned
+// ErrObjectNotFound from get itself would exercise a path minio never takes —
+// and would let a classifier that cannot see through the read path's %w
+// wrapping pass.
 func (f *fakeObjects) get(_ context.Context, bucket, key string) (io.ReadCloser, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
 	b, ok := f.data[bucket+"/"+key]
 	if !ok {
-		return nil, ErrObjectNotFound
+		return io.NopCloser(errReader{minio.ErrorResponse{
+			Code: "NoSuchKey", Message: "The specified key does not exist.",
+		}}), nil
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
+
+// errReader fails on the first Read, the way minio's lazy object does.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
 func testArtifact() *Artifact {
 	return &Artifact{
@@ -271,4 +292,58 @@ func TestStore_LoadReportsAMissingObject(t *testing.T) {
 	_, err := s.Load(context.Background(), "never-written.json.gz", "site-a")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrObjectNotFound)
+}
+
+// Key composes prefix/siteID/runID/name with path.Join, which NORMALISES
+// "..": a segment that escapes writes the artifact into another site's scope,
+// or out of the prefix entirely. Both segments come from deployment config,
+// so this is a guard against a typo or a copied env, not an attacker — but a
+// pool silently published over another site's is exactly the failure the run
+// digest exists to prevent, arriving by a different door.
+func TestValidateKeySegment(t *testing.T) {
+	for _, ok := range []string{"site-a", "run-1", "a.b_c-1", "S1"} {
+		assert.NoError(t, ValidateKeySegment(ok), "%q is a legal segment", ok)
+	}
+	for _, bad := range []string{"", ".", "..", "../other", "a/b", "-lead", "a b", "sit/e"} {
+		assert.Error(t, ValidateKeySegment(bad), "%q must be rejected", bad)
+	}
+}
+
+// The escape has to be impossible at the composer, not merely unlikely at the
+// callers: Key is exported and a future caller will not re-derive the rule.
+func TestStore_KeyStaysUnderThePrefix(t *testing.T) {
+	s := newStore(newFakeObjects(), "b", "clientsim")
+	assert.Equal(t, "clientsim/site-a/run-1/pool.json.gz", s.Key("site-a", "run-1", "pool.json.gz"))
+}
+
+// The overwrite guard was Load-then-Put: two exporters can both see the run
+// unpublished and both write, and the loser's population is what a fleet
+// reads. The claim has to be the write itself.
+func TestStore_PutIfAbsentClaimsTheKeyExactlyOnce(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	key := s.Key("site-a", "run-1", "pool.json.gz")
+
+	require.NoError(t, s.PutIfAbsent(context.Background(), key, testArtifact()))
+
+	second := testArtifact()
+	second.Accounts = []string{"carol"}
+	err := s.PutIfAbsent(context.Background(), key, second)
+	require.ErrorIs(t, err, ErrObjectExists, "the second claim must lose, not overwrite")
+
+	got, err := s.Load(context.Background(), key, "site-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice", "bob"}, got.Accounts, "the first writer's population must survive")
+}
+
+// A producer-side rejection must happen before the key is claimed, or a bad
+// artifact burns a run ID nothing can reuse.
+func TestStore_PutIfAbsentValidatesBeforeClaiming(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	key := s.Key("site-a", "run-1", "pool.json.gz")
+
+	require.Error(t, s.PutIfAbsent(context.Background(), key, &Artifact{RunID: "r", SiteID: "s"}))
+	require.NoError(t, s.PutIfAbsent(context.Background(), key, testArtifact()),
+		"the rejected write must not have claimed the key")
 }

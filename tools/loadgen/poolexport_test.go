@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,9 +40,14 @@ func (f *fakePublisher) Key(siteID, runID, name string) string {
 	return siteID + "/" + runID + "/" + name
 }
 
-func (f *fakePublisher) Put(_ context.Context, key string, a *poolartifact.Artifact) error {
+// PutIfAbsent models the store's conditional write: the claim is the write,
+// so a second writer loses rather than overwriting.
+func (f *fakePublisher) PutIfAbsent(_ context.Context, key string, a *poolartifact.Artifact) error {
 	if f.putErr != nil {
 		return f.putErr
+	}
+	if _, exists := f.artifacts[key]; exists {
+		return fmt.Errorf("%w: %s", poolartifact.ErrObjectExists, key)
 	}
 	f.artifacts[key] = a
 	return nil
@@ -219,4 +225,34 @@ func TestExportPool_RejectsAPopulationOfOnlyBots(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no accounts")
+}
+
+// --run-id was validated as a single path segment; siteId, its immediate
+// neighbour in the same path.Join, was not. One guarded segment beside an
+// unguarded one is not a guard: SITE_ID=../other escapes the same way.
+func TestValidatePoolSegments_GuardsBothPathSegments(t *testing.T) {
+	assert.NoError(t, validatePoolRunID("run-1"))
+	assert.NoError(t, validatePoolSiteID("site-a"))
+
+	for _, bad := range []string{"..", "../other", "a/b", ""} {
+		assert.Error(t, validatePoolRunID(bad), "--run-id %q must be rejected", bad)
+		assert.Error(t, validatePoolSiteID(bad), "SITE_ID %q must be rejected", bad)
+	}
+}
+
+// The claim is now the write, so the retry path has to be proven rather than
+// assumed: a Job that reruns on the same population must succeed, not trip
+// its own guard.
+func TestExportPool_SamePopulationIsAnIdempotentRetry(t *testing.T) {
+	src := &fakeAccountSource{accounts: []string{"anna", "bob"}}
+	pub := newFakePublisher()
+	opts := poolExportOptions{RunID: "run-1", SiteID: "site-a"}
+
+	first, err := exportPool(context.Background(), src, pub, opts)
+	require.NoError(t, err)
+
+	second, err := exportPool(context.Background(), src, pub, opts)
+	require.NoError(t, err, "re-exporting the same population must be a safe retry")
+	assert.Equal(t, first.ConfigDigest, second.ConfigDigest)
+	assert.Equal(t, []string{"anna", "bob"}, pub.artifacts[first.ArtifactKey].Accounts)
 }
