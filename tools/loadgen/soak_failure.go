@@ -882,7 +882,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, bool, error) {
 		// interval, which is what the claim outcome recorded below already says.
 		retryAt := now.Add(r.retryInterval)
 		if verifyErr == nil {
-			retryAt = nextReconcileProbe(
+			retryAt = soakreconcile.NextProbe(
 				now, operation.VerifyAfter, operation.Deadline, r.retryInterval)
 		}
 		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
@@ -954,7 +954,7 @@ func (r *soakFailureReconciler) observeSearchIndex(
 			// newer messages expire for want of a look. A probe that could not
 			// answer keeps the flat interval — that retries a call, not a
 			// pending effect.
-			retryAt = nextReconcileProbe(
+			retryAt = soakreconcile.NextProbe(
 				now, r.searchProbeAnchor(operation), operation.Deadline, r.retryInterval)
 		}
 		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {

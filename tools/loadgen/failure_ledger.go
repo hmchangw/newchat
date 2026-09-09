@@ -25,8 +25,6 @@ var failureInvalidationReasonRegistry = map[string]struct{}{
 }
 
 type failureLedgerConfig = failuremodel.LedgerConfig
-type failureLedgerRecorder = failuremodel.LedgerRecorder
-type failureLedgerSnapshot = failuremodel.LedgerSnapshot
 type failureLedger = failuremodel.Ledger
 
 func newFailureLedger(cfg *failureLedgerConfig) (*failureLedger, error) {

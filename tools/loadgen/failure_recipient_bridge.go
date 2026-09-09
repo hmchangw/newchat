@@ -14,7 +14,6 @@ const (
 
 type recipientExpectationConfig = failuremodel.RecipientExpectationConfig
 type recipientEvidence = failuremodel.RecipientEvidence
-type recipientEvidenceDisposition = failuremodel.RecipientEvidenceDisposition
 
 const (
 	recipientEvidenceUntracked  = failuremodel.RecipientEvidenceUntracked

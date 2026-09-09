@@ -124,18 +124,6 @@ const (
 	failureResultMissingAfterDeadline = failuremodel.ResultMissingAfterDeadline
 )
 
-const (
-	failureObserverEvent = failuremodel.ObserverEvent
-	failureObserverQuery = failuremodel.ObserverQuery
-	failureObserverBoth  = failuremodel.ObserverBoth
-)
-
-type failureObserverDefinition = failuremodel.ObserverDefinition
-
-func failureObserverDefinitionFor(observer failureObserver) (failureObserverDefinition, bool) {
-	return failuremodel.ObserverDefinitionFor(observer)
-}
-
 type failureOperation = failuremodel.Operation
 
 type failureLedgerEvent = failuremodel.Event
@@ -173,10 +161,6 @@ func validFailureObservation(observation failureObservation) bool {
 	return failuremodel.ValidObservation(observation)
 }
 
-func validFailureReason(reason failureReason) bool {
-	return failuremodel.ValidReason(reason)
-}
-
 func validFailureResult(result failureResult) bool {
 	return failuremodel.ValidResult(result)
 }
@@ -185,16 +169,8 @@ func failureOperationResult(operation *failureOperation) failureResult {
 	return failuremodel.OperationResult(operation)
 }
 
-func failureOperationFinalReason(operation *failureOperation, result failureResult) failureReason {
-	return failuremodel.OperationFinalReason(operation, result)
-}
-
 func cloneFailureOperation(operation *failureOperation) *failureOperation {
 	return failuremodel.CloneOperation(operation)
-}
-
-func defaultFailureReason(observer failureObserver, observation failureObservation) failureReason {
-	return failuremodel.DefaultReason(observer, observation)
 }
 
 func validateFailureObserverContract(contract failureObserverContract) error {

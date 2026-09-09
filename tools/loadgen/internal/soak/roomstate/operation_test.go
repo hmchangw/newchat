@@ -9,12 +9,12 @@ import (
 	"github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
-func TestMemberIntent_MapsMutationDirection(t *testing.T) {
+func TestSoakMemberIntent_MapsMutationDirection(t *testing.T) {
 	assert.Equal(t, failure.OperationMemberAdd, (MemberIntent{Add: true}).OperationType())
 	assert.Equal(t, failure.OperationMemberRemove, (MemberIntent{Add: false}).OperationType())
 }
 
-func TestStateOperations_PreserveVerificationInputs(t *testing.T) {
+func TestSoakStateOperations_PreserveVerificationInputs(t *testing.T) {
 	baseline := time.Unix(123, 0).UTC()
 	assert.Equal(t, baseline, (ReadIntent{Baseline: baseline}).Baseline)
 	assert.True(t, (RoomProbe{Mute: true}).Mute)

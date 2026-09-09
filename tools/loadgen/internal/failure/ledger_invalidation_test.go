@@ -60,7 +60,8 @@ func TestFailureLedger_ListsActiveOperationsInStableOrder(t *testing.T) {
 
 func invalidationReasons(events []Event) []string {
 	reasons := make([]string, 0)
-	for _, event := range events {
+	for i := range events {
+		event := &events[i]
 		if event.Type == EventInvalidated {
 			reasons = append(reasons, event.InvalidReason)
 		}

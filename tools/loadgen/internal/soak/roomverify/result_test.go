@@ -9,7 +9,7 @@ import (
 	"github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
-func TestRoomVerification_ClassifiesAuthoritativeState(t *testing.T) {
+func TestSoakRoomVerification_ClassifiesAuthoritativeState(t *testing.T) {
 	assert.Equal(t, ResultAbsent, Resolve(ResultMatched, ResultAbsent))
 	assert.Equal(t, ResultMatched, Resolve(ResultMatched, ResultUnknown))
 	assert.Equal(t, ResultUnknown, Resolve(ResultAbsent, ResultUnknown))
@@ -18,7 +18,7 @@ func TestRoomVerification_ClassifiesAuthoritativeState(t *testing.T) {
 	assert.Equal(t, failure.ReasonRoomStateMissing, ReasonFor(ResultAbsent, failure.ReasonRoomNameMismatch))
 }
 
-func TestRoomVerification_ClassifiesReadCursor(t *testing.T) {
+func TestSoakRoomVerification_ClassifiesReadCursor(t *testing.T) {
 	baseline := time.Unix(100, 0).UTC()
 	after := baseline.Add(time.Second)
 	before := baseline.Add(-time.Second)

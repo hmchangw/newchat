@@ -36,15 +36,15 @@ const (
 )
 
 type RecipientEvidenceResult struct {
-	Observation    Observation      `json:"observation"`
-	Missing        []string           `json:"missing,omitempty"`
-	Unexpected     []string           `json:"unexpected,omitempty"`
-	Duplicates     []string           `json:"duplicates,omitempty"`
-	Mismatches     []string           `json:"mismatches,omitempty"`
+	Observation    Observation `json:"observation"`
+	Missing        []string    `json:"missing,omitempty"`
+	Unexpected     []string    `json:"unexpected,omitempty"`
+	Duplicates     []string    `json:"duplicates,omitempty"`
+	Mismatches     []string    `json:"mismatches,omitempty"`
 	durableRecords map[string]map[string]struct{}
 }
 
-func (r RecipientEvidenceResult) Durable(kind, recipient string) bool {
+func (r *RecipientEvidenceResult) Durable(kind, recipient string) bool {
 	_, ok := r.durableRecords[kind][recipient]
 	return ok
 }

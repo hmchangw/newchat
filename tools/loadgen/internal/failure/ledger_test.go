@@ -14,10 +14,6 @@ import (
 // messageCreateExpectedEffects is the fully-enabled observer set. Production
 // always derives the set from the runtime observer flags, so this shorthand
 // exists only for tests that do not exercise those flags.
-func messageCreateExpectedEffects(recipientCount int, recipientHash string) []ExpectedEffect {
-	return MessageCreateExpectedEffects(true, false, recipientCount, recipientHash)
-}
-
 func TestFailureLedger_FinalizesOnlyAfterEveryObservation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := NewLedger(&LedgerConfig{

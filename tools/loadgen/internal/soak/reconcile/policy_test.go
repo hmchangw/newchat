@@ -10,7 +10,7 @@ import (
 	"github.com/hmchangw/chat/tools/loadgen/internal/soak/search"
 )
 
-func TestReconcilePolicy_BackoffAndClosedOutcomes(t *testing.T) {
+func TestSoakReconcilePolicy_BackoffAndClosedOutcomes(t *testing.T) {
 	now := time.Unix(100, 0)
 	assert.Equal(t, now.Add(5*time.Second), NextProbe(now, now, now.Add(time.Minute), 5*time.Second))
 	assert.Equal(t, ClaimUnavailable, ProbeOutcome(errors.New("unavailable")))
@@ -20,7 +20,7 @@ func TestReconcilePolicy_BackoffAndClosedOutcomes(t *testing.T) {
 	assert.Equal(t, ClaimRetried, SearchProbeOutcome(search.IndexMissing, true, nil))
 }
 
-func TestShareGate_RefundsAndBoundsAdmission(t *testing.T) {
+func TestSoakShareGate_RefundsAndBoundsAdmission(t *testing.T) {
 	gate := NewShareGate(0.5)
 	assert.False(t, gate.Allow())
 	assert.True(t, gate.Allow())
