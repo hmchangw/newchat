@@ -300,15 +300,24 @@ func Notification(account string) string {
 // Pass the result to `nats.CustomInboxPrefix`; nats.go appends its own
 // `.<nuid>` token and subscribes the mux at `<prefix>.<nuid>.*`.
 //
-// Panics on a token carrying a NATS wildcard: a `*` or `>` account would put
-// the mux subscription across every user's namespace, which is exactly what
-// the per-user prefix exists to prevent — and it is a programming error, never
-// user input, since the account comes from the client's own credentials.
+// The account is encoded the same way the fanout subjects encode it
+// (SubscriptionUpdate, RoomKeyUpdate): a dotted ".bot" account spans subject
+// tokens, and auth-service encodes it before stamping the JWT's `account:` tag
+// (`auth-service/handler.go:247`), so `{{tag(account)}}` is evaluated against
+// the encoded form. An unencoded prefix would be a five-token subject that the
+// grant cannot match.
+//
+// Panics on a token still carrying a NATS wildcard AFTER encoding: a `*` or
+// `>` account would put the mux subscription across every user's namespace,
+// which is exactly what the per-user prefix exists to prevent — and it is a
+// programming error, never user input, since the account comes from the
+// client's own credentials.
 func UserInboxPrefix(account string) string {
-	if !isValidAccountToken(account) {
+	encoded := EncodeAccount(account)
+	if !isValidAccountToken(encoded) {
 		panic("invalid account token: contains NATS wildcard characters")
 	}
-	return "chat.user." + account
+	return "chat.user." + encoded
 }
 
 // InboxExternal is the subject a service uses to publish a cross-site

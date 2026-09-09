@@ -138,7 +138,14 @@ throughput but never dials NATS with it; bots authenticate over HTTP through
 > The prefix now lives in `subject.UserInboxPrefix(account)` (returning
 > `chat.user.{account}`, per §9 — **not** §4's superseded `_INBOX.{account}`),
 > and clientsim passes it through `nats.CustomInboxPrefix`
-> (`tools/clientsim/conn.go`, `dialOptions`).
+> (`tools/clientsim/conn.go`, `dialOptions`). It encodes the account through
+> `EncodeAccount`, as `SubscriptionUpdate` and `RoomKeyUpdate` do: a dotted
+> `.bot` account spans subject tokens, and auth-service encodes it before
+> stamping the JWT's `account:` tag (`auth-service/handler.go:247`), so
+> `{{tag(account)}}` is evaluated against the encoded form. §3's claim that "an
+> account is always exactly one safe subject token" is true only of the encoded
+> account — the raw one can carry dots, and the validator §3 cites rejects
+> them.
 >
 > The rule the original reasoning missed, and which any future Go client should
 > read off this line: **the prefix belongs to the JWT template, not to the

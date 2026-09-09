@@ -1369,6 +1369,20 @@ func TestUserInboxPrefix(t *testing.T) {
 	// the `chat.user.{{tag(account)}}.>` grant at any depth.
 	assert.True(t, strings.HasPrefix(subject.UserInboxPrefix("alice")+".nuid.token", "chat.user.alice."))
 
+	// A dotted ".bot" account spans subject tokens, and auth-service encodes it
+	// before stamping the JWT's account: tag (handler.go:247), so the grant is
+	// evaluated against the encoded form. An unencoded prefix would be a
+	// five-token subject that `chat.user.weather_site-a_bot.>` cannot match —
+	// and the wildcard guard, which rejects ".", would panic the process before
+	// the broker ever got to deny it.
+	assert.Equal(t, "chat.user.weather_site-a_bot", subject.UserInboxPrefix("weather.site-a.bot"))
+	assert.Equal(t, subject.SubscriptionUpdate("weather.site-a.bot"),
+		subject.UserInboxPrefix("weather.site-a.bot")+".event.subscription.update",
+		"the inbox prefix must encode the account the same way the fanout subjects do")
+
+	// "-" is already a legal NATS token rune, so it passes through untouched.
+	assert.Equal(t, "chat.user.some-user", subject.UserInboxPrefix("some-user"))
+
 	// A wildcard would subscribe the mux across every account's namespace —
 	// exactly what the per-user prefix exists to stop.
 	assert.Panics(t, func() { subject.UserInboxPrefix("*") })
