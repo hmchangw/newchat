@@ -269,8 +269,8 @@ func TestFailureLedger_ExpireReportsAnOperationRetiredBeforeTheFailure(t *testin
 	expired, err := ledger.Expire(at.Add(2 * time.Minute))
 
 	require.Error(t, err, "a failed compaction must still surface")
-	assert.NotContains(t, ledger.active, "op",
-		"the operation was retired before the compaction failed")
+	_, active := ledger.Active("op")
+	assert.False(t, active, "the operation was retired before the compaction failed")
 	assert.Equal(t, []string{"op"}, expired,
 		"an operation that left the ledger must be reported or its evidence is stranded")
 }
@@ -322,8 +322,8 @@ func TestSoakFailureTracker_AbandonUnsentReleasesTheExpectationItRetired(t *test
 	err = tracker.AbandonUnsent(pending)
 
 	require.Error(t, err, "the compaction failure must still be propagated")
-	assert.NotContains(t, ledger.active, pending.MessageID,
-		"the operation was retired before the compaction failed")
+	_, active := ledger.Active(pending.MessageID)
+	assert.False(t, active, "the operation was retired before the compaction failed")
 	assert.Zero(t, observer.evidence.Len(),
 		"an expectation the ledger has retired must be released, error or not")
 }

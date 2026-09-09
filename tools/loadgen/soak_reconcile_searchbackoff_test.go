@@ -41,8 +41,8 @@ func TestSoakFailureReconciler_BacksOffASearchProbeThatFoundNothing(t *testing.T
 		require.NoError(t, err)
 		_, _, err = reconciler.Try(context.Background())
 		require.NoError(t, err)
-		operation := ledger.active["m1"]
-		require.NotNil(t, operation)
+		operation, active := ledger.Active("m1")
+		require.True(t, active)
 		return operation.NextVerifyAt()
 	}
 

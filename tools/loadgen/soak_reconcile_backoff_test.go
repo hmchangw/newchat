@@ -118,8 +118,8 @@ func TestSoakFailureReconciler_BacksOffThePollForAMessageThatHasNotLanded(t *tes
 
 	require.NoError(t, err)
 	require.True(t, ran)
-	operation := ledger.active[pending.MessageID]
-	require.NotNil(t, operation, "an operation before its deadline must stay active")
+	operation, active := ledger.Active(pending.MessageID)
+	require.True(t, active, "an operation before its deadline must stay active")
 	assert.Equal(t, now.Add(time.Minute), operation.NextVerifyAt(),
 		"the poll must wait the time already spent waiting, not the flat interval")
 }

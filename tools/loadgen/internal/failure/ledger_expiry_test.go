@@ -1,4 +1,4 @@
-package main
+package failure
 
 import (
 	"fmt"
@@ -9,10 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func startExpiredOperations(t *testing.T, ledger *failureLedger, count int, at time.Time) {
+func startExpiredOperations(t *testing.T, ledger *Ledger, count int, at time.Time) {
 	t.Helper()
 	for i := range count {
-		operation := testFailureOperation(fmt.Sprintf("stale-%05d", i), at)
+		operation := testLedgerOperation(fmt.Sprintf("stale-%05d", i), at)
 		operation.Deadline = at.Add(20 * time.Second)
 		require.NoError(t, ledger.Start(operation))
 	}
@@ -25,7 +25,7 @@ func startExpiredOperations(t *testing.T, ledger *failureLedger, count int, at t
 // makes the pause predictable; the backlog drains over the following sweeps.
 func TestFailureLedger_ExpireRetiresAtMostOneBatchPerSweep(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
-	ledger, err := newFailureLedger(&failureLedgerConfig{
+	ledger, err := NewLedger(&LedgerConfig{
 		Capacity: 1000, ExpireBatch: 25, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -36,12 +36,12 @@ func TestFailureLedger_ExpireRetiresAtMostOneBatchPerSweep(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 25, finalized)
-	assert.Equal(t, 75, ledger.Snapshot().Active)
+	assert.Len(t, ledger.active, 75)
 }
 
 func TestFailureLedger_ExpireDrainsTheBacklogOverSuccessiveSweeps(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
-	ledger, err := newFailureLedger(&failureLedgerConfig{
+	ledger, err := NewLedger(&LedgerConfig{
 		Capacity: 1000, ExpireBatch: 25, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -56,12 +56,12 @@ func TestFailureLedger_ExpireDrainsTheBacklogOverSuccessiveSweeps(t *testing.T) 
 	}
 
 	assert.Equal(t, 100, total)
-	assert.Zero(t, ledger.Snapshot().Active)
+	assert.Empty(t, ledger.active)
 }
 
 func TestFailureLedger_ExpireIsUnboundedWhenNoBatchIsConfigured(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
-	ledger, err := newFailureLedger(&failureLedgerConfig{
+	ledger, err := NewLedger(&LedgerConfig{
 		Capacity: 1000, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)

@@ -119,7 +119,7 @@ func TestFailureLedger_RecoveryStreamsInsteadOfBufferingTheJournal(t *testing.T)
 	assert.Equal(t, 1, journal.streamedReplay)
 	assert.Equal(t, 0, journal.bufferedReplay,
 		"recovery must not fall back to buffering when the journal streams")
-	assert.Len(t, ledger.active, 1, "streaming must rebuild the same state")
+	assert.Equal(t, 1, ledger.Snapshot().Active, "streaming must rebuild the same state")
 }
 
 // A journal that cannot stream still has to recover, or an older on-disk format
@@ -134,7 +134,7 @@ func TestFailureLedger_RecoveryFallsBackToBufferingWhenTheJournalCannotStream(t 
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, journal.replays)
-	assert.Len(t, ledger.active, 1)
+	assert.Equal(t, 1, ledger.Snapshot().Active)
 }
 
 type bufferOnlyFailureJournal struct {

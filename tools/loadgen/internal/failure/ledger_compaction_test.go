@@ -1,4 +1,4 @@
-package main
+package failure
 
 import (
 	"fmt"
@@ -10,15 +10,15 @@ import (
 )
 
 type compactionCountingJournal struct {
-	events   []failureLedgerEvent
+	events   []Event
 	appends  int
 	compacts int
 	size     int64
 }
 
-func (j *compactionCountingJournal) Replay() ([]failureLedgerEvent, error) { return j.events, nil }
+func (j *compactionCountingJournal) Replay() ([]Event, error) { return j.events, nil }
 
-func (j *compactionCountingJournal) ReplayEach(emit func(*failureLedgerEvent) error) error {
+func (j *compactionCountingJournal) ReplayEach(emit func(*Event) error) error {
 	for i := range j.events {
 		if err := emit(&j.events[i]); err != nil {
 			return err
@@ -27,13 +27,13 @@ func (j *compactionCountingJournal) ReplayEach(emit func(*failureLedgerEvent) er
 	return nil
 }
 
-func (j *compactionCountingJournal) Append(*failureLedgerEvent) error {
+func (j *compactionCountingJournal) Append(*Event) error {
 	j.appends++
 	j.size += 512
 	return nil
 }
 
-func (j *compactionCountingJournal) Compact(events []failureLedgerEvent) error {
+func (j *compactionCountingJournal) Compact(events []Event) error {
 	j.compacts++
 	j.size = int64(len(events)) * 512
 	return nil
@@ -42,15 +42,15 @@ func (j *compactionCountingJournal) Compact(events []failureLedgerEvent) error {
 func (j *compactionCountingJournal) Size() int64  { return j.size }
 func (j *compactionCountingJournal) Close() error { return nil }
 
-func compactionTestEvents(t *testing.T, operations int) []failureLedgerEvent {
+func compactionTestEvents(t *testing.T, operations int) []Event {
 	t.Helper()
 	now := time.Unix(1000, 0).UTC()
-	events := make([]failureLedgerEvent, 0, operations*2)
+	events := make([]Event, 0, operations*2)
 	for i := range operations {
 		id := fmt.Sprintf("op-%05d", i)
 		events = append(events,
-			failureLedgerEvent{Type: failureLedgerEventStarted, Operation: testFailureOperation(id, now), At: now},
-			failureLedgerEvent{Type: failureLedgerEventActivated, OperationID: id, At: now},
+			Event{Type: EventStarted, Operation: testLedgerOperation(id, now), At: now},
+			Event{Type: EventActivated, OperationID: id, At: now},
 		)
 	}
 	return events
@@ -64,11 +64,11 @@ func compactionTestEvents(t *testing.T, operations int) []failureLedgerEvent {
 func TestFailureLedger_CompactsOnceAfterRecoveringAJournal(t *testing.T) {
 	journal := &compactionCountingJournal{events: compactionTestEvents(t, 50), size: 1 << 20}
 
-	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1000, Journal: journal})
+	ledger, err := NewLedger(&LedgerConfig{Capacity: 1000, Journal: journal})
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, journal.compacts, "recovery must reclaim the inherited journal")
-	assert.Equal(t, 50, ledger.Snapshot().Active)
+	assert.Len(t, ledger.active, 50)
 	assert.Less(t, journal.Size(), int64(1<<20),
 		"compaction must actually shrink the file it rewrote")
 }
@@ -76,7 +76,7 @@ func TestFailureLedger_CompactsOnceAfterRecoveringAJournal(t *testing.T) {
 func TestFailureLedger_DoesNotCompactAnEmptyJournalOnRecovery(t *testing.T) {
 	journal := &compactionCountingJournal{}
 
-	_, err := newFailureLedger(&failureLedgerConfig{Capacity: 1000, Journal: journal})
+	_, err := NewLedger(&LedgerConfig{Capacity: 1000, Journal: journal})
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, journal.compacts, "there is nothing to reclaim in a fresh journal")
@@ -87,7 +87,7 @@ func TestFailureLedger_DoesNotCompactAnEmptyJournalOnRecovery(t *testing.T) {
 // it triggers on its own.
 func TestFailureLedger_CompactsWhenTheJournalOutgrowsItsBudget(t *testing.T) {
 	journal := &compactionCountingJournal{}
-	ledger, err := newFailureLedger(&failureLedgerConfig{
+	ledger, err := NewLedger(&LedgerConfig{
 		Capacity: 1000, Journal: journal,
 		CompactEvery: 1000000, MaxJournalBytes: 4096,
 	})
@@ -95,7 +95,7 @@ func TestFailureLedger_CompactsWhenTheJournalOutgrowsItsBudget(t *testing.T) {
 	now := time.Unix(2000, 0).UTC()
 
 	for i := range 40 {
-		operation := testFailureOperation(fmt.Sprintf("live-%03d", i), now)
+		operation := testLedgerOperation(fmt.Sprintf("live-%03d", i), now)
 		require.NoError(t, ledger.Start(operation))
 	}
 
@@ -106,13 +106,13 @@ func TestFailureLedger_CompactsWhenTheJournalOutgrowsItsBudget(t *testing.T) {
 
 func TestFailureLedger_LeavesTheJournalAloneWhileUnderBudget(t *testing.T) {
 	journal := &compactionCountingJournal{}
-	ledger, err := newFailureLedger(&failureLedgerConfig{
+	ledger, err := NewLedger(&LedgerConfig{
 		Capacity: 1000, Journal: journal,
 		CompactEvery: 1000000, MaxJournalBytes: 1 << 20,
 	})
 	require.NoError(t, err)
 	now := time.Unix(2000, 0).UTC()
-	require.NoError(t, ledger.Start(testFailureOperation("live-000", now)))
+	require.NoError(t, ledger.Start(testLedgerOperation("live-000", now)))
 	before := journal.compacts
 
 	require.NoError(t, ledger.MaybeCompact(now))
@@ -123,6 +123,22 @@ func TestFailureLedger_LeavesTheJournalAloneWhileUnderBudget(t *testing.T) {
 // An operation between claiming its slot and having its start record written is
 // not in the active set a compaction rewrites from, so compacting now would
 // erase it. The budget check must not override that.
+func TestFailureLedger_DefersCompactionWhileAnOperationIsMidStart(t *testing.T) {
+	journal := &compactionCountingJournal{}
+	ledger, err := NewLedger(&LedgerConfig{
+		Capacity: 1000, Journal: journal,
+		CompactEvery: 1000000, MaxJournalBytes: 1,
+	})
+	require.NoError(t, err)
+	ledger.starting["in-flight"] = struct{}{}
+	before := journal.compacts
+
+	require.NoError(t, ledger.MaybeCompact(time.Unix(2000, 0).UTC()))
+
+	assert.Equal(t, before, journal.compacts,
+		"compacting now would drop the operation whose start record is still in flight")
+}
+
 // Replay drops operations it has no capacity for rather than crash-looping the
 // pod, and the journal is the only thing that still holds them: raise the
 // capacity, restart, and they come back. Compacting rewrites the journal from
@@ -131,10 +147,10 @@ func TestFailureLedger_LeavesTheJournalAloneWhileUnderBudget(t *testing.T) {
 func TestFailureLedger_DoesNotReclaimAJournalItCouldNotFullyRecover(t *testing.T) {
 	journal := &compactionCountingJournal{events: compactionTestEvents(t, 50), size: 1 << 20}
 
-	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 10, Journal: journal})
+	ledger, err := NewLedger(&LedgerConfig{Capacity: 10, Journal: journal})
 	require.NoError(t, err)
 
-	require.Positive(t, ledger.Snapshot().Dropped, "the fixture must exceed the capacity")
+	require.Positive(t, ledger.dropped, "the fixture must exceed the capacity")
 	assert.Equal(t, 0, journal.compacts,
 		"the dropped operations only exist in the journal; compacting would erase them")
 }
@@ -147,11 +163,11 @@ func TestFailureLedger_DoesNotReclaimAJournalItCouldNotFullyRecover(t *testing.T
 // trigger has to keep working — a full volume takes the run down either way.
 func TestFailureLedger_StillReclaimsOnSizeAfterRecoveryDroppedOperations(t *testing.T) {
 	journal := &compactionCountingJournal{events: compactionTestEvents(t, 50), size: 1 << 20}
-	ledger, err := newFailureLedger(&failureLedgerConfig{
+	ledger, err := NewLedger(&LedgerConfig{
 		Capacity: 10, Journal: journal, CompactEvery: 1000000, MaxJournalBytes: 4096,
 	})
 	require.NoError(t, err)
-	require.Positive(t, ledger.Snapshot().Dropped, "the fixture must exceed the capacity")
+	require.Positive(t, ledger.dropped, "the fixture must exceed the capacity")
 	require.Equal(t, 0, journal.compacts, "recovery must leave the inherited journal alone")
 
 	require.NoError(t, ledger.MaybeCompact(time.Unix(2000, 0).UTC()))
@@ -170,17 +186,17 @@ func TestFailureLedger_SurvivesAFailedRecoveryReclamation(t *testing.T) {
 		},
 	}
 
-	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 100, Journal: journal})
+	ledger, err := NewLedger(&LedgerConfig{Capacity: 100, Journal: journal})
 
 	require.NoError(t, err, "a failed reclamation must not fail recovery")
-	assert.Equal(t, 5, ledger.Snapshot().Active, "the recovered state must survive")
+	assert.Len(t, ledger.active, 5, "the recovered state must survive")
 }
 
 type compactFailingJournal struct {
 	compactionCountingJournal
 }
 
-func (j *compactFailingJournal) Compact([]failureLedgerEvent) error {
+func (j *compactFailingJournal) Compact([]Event) error {
 	j.compacts++
 	return fmt.Errorf("no space left on device")
 }

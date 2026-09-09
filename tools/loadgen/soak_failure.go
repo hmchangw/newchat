@@ -16,6 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	failuremodel "github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
 const (
@@ -44,7 +45,7 @@ func setSoakRunInfo(metrics *Metrics, environment string) {
 }
 
 func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
-	return min(30*time.Second, max(time.Second, deadline/10))
+	return failuremodel.ExpiryInterval(deadline)
 }
 
 // watchSoakLedgerDurability stops a run whose ledger can no longer record the
