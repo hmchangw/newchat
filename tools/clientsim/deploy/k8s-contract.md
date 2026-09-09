@@ -81,8 +81,9 @@ Env — all of these already exist in the loadgen half of the chart except the
 
 ```text
 subscriptions: {siteId, roomType: "channel", open: {$ne: false},
-                origin: {$ne: "teams"}}
+                origin: {$ne: "teams"}, u.isBot: {$ne: true}}
              → distinct u.account, sorted ascending
+             → ".bot" accounts dropped
 ```
 
 Mirrors user-service's own `subscription.list` match, narrowed to `channel`:
@@ -98,6 +99,16 @@ and reports ready while subscribing to nothing. It is applied unconditionally
 rather than mirroring the per-account allowlist: for a load pool,
 under-selecting costs a few connections and over-selecting costs silent
 measurement loss.
+
+**Bots are excluded twice, on purpose.** A bot that owns a room holds a
+genuine channel subscription — `bot-room-service` writes `u.isBot: true` with
+`roomType: "channel"`, and its `$setOnInsert` never sets `open` — so every
+other condition above is legitimately true of it. clientsim cannot connect as
+one: bots authenticate over HTTP through `pkg/botauth`, not the user JWT path,
+and a dotted `.bot` account spans subject tokens, which panics
+`subject.UserSubscriptionList` before a request is made. The query drops them
+on the stored flag so the bulk never leaves the server; a second pass in Go
+drops them on the account shape, catching a row whose flag was never stored.
 
 The sort is load-bearing, not cosmetic — see the sharding note above.
 

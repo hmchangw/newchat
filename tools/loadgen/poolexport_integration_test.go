@@ -40,6 +40,21 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 		// and report ready while measuring nothing.
 		bson.M{"_id": "x6", "siteId": "site-a", "roomType": "channel",
 			"origin": "teams", "u": bson.M{"account": "teamsOnly"}},
+		// A bot that owns a room holds a real channel subscription
+		// (bot-room-service/handler.go:213-216 writes IsBot:true with
+		// RoomTypeChannel, and its $setOnInsert never sets `open`, so the
+		// open filter passes it through). clientsim cannot connect as one:
+		// bots authenticate over HTTP through pkg/botauth, not the user JWT
+		// path, and a dotted ".bot" account spans subject tokens — it panics
+		// subject.UserSubscriptionList before any request is made.
+		bson.M{"_id": "x7", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "weather.site-a.bot", "isBot": true}},
+		// isBot without the suffix, and the suffix without the flag: either
+		// alone disqualifies, so neither filter carries the rule by itself.
+		bson.M{"_id": "x8", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "p_admin", "isBot": true}},
+		bson.M{"_id": "x9", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "legacy.site-a.bot"}},
 	}
 	_, err := db.Collection("subscriptions").InsertMany(ctx, docs)
 	require.NoError(t, err)

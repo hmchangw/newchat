@@ -55,7 +55,7 @@ const (
 // channel: clientsim opens room lanes only for channels, because DM traffic
 // arrives on the user lane instead. An account with no channel subscription
 // would connect cleanly and then measure nothing.
-const poolExportQuery = `subscriptions: {siteId, roomType: "channel", open: {$ne: false}, origin: {$ne: "teams"}} -> distinct u.account, sorted`
+const poolExportQuery = `subscriptions: {siteId, roomType: "channel", open: {$ne: false}, origin: {$ne: "teams"}, u.isBot: {$ne: true}} -> distinct u.account, sorted, then ".bot" accounts dropped`
 
 type poolExportOptions struct {
 	RunID  string
@@ -103,11 +103,38 @@ func poolDigest(accounts []string) string {
 
 // exportPool reads the population, publishes the artifact the fleet consumes
 // and the manifest that explains it.
+// dropBots removes bot accounts from a population. A bot that owns a room
+// holds a genuine channel subscription (bot-room-service/handler.go:213-216
+// writes IsBot:true with RoomTypeChannel, and its $setOnInsert never sets
+// `open`, so the open filter passes it too), so every condition the query
+// matches on is legitimately true of it.
+//
+// clientsim cannot connect as one either way: bots authenticate over HTTP
+// through pkg/botauth rather than the user JWT path, and a dotted ".bot"
+// account spans subject tokens — subject.UserSubscriptionList panics on it
+// before a request is made.
+//
+// Belt to the query's braces, and not redundant with it: the query keys on the
+// stored u.isBot flag, this keys on the account shape, and a row written
+// without the flag is caught only here. Cheap — the population is already in
+// memory and sorted.
+func dropBots(accounts []string) []string {
+	kept := accounts[:0:0]
+	for _, a := range accounts {
+		if model.IsBot(a) {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	return kept
+}
+
 func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, opts poolExportOptions) (poolExportResult, error) {
 	accounts, err := src.channelSubscriberAccounts(ctx, opts.SiteID)
 	if err != nil {
 		return poolExportResult{}, fmt.Errorf("list channel subscribers for %s: %w", opts.SiteID, err)
 	}
+	accounts = dropBots(accounts)
 	// The failure this export exists to prevent: a fleet that starts against
 	// nobody reports a healthy zero. Fail here, in the tool that can say why.
 	if len(accounts) == 0 {
@@ -192,6 +219,11 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 			// connections and over-selecting costs silent measurement loss,
 			// so it fails safe in the same direction as roomGlobal.
 			"origin": bson.M{"$ne": model.OriginTeams},
+			// Bots hold channel subscriptions like anyone else; see dropBots
+			// for why they cannot be in a clientsim pool. Dropped here so the
+			// bulk never leaves the server, and again in Go on the account
+			// shape, for a row whose flag was never stored.
+			"u.isBot": bson.M{"$ne": true},
 		}}},
 		{{Key: "$group", Value: bson.M{"_id": "$u.account"}}},
 		{{Key: "$sort", Value: bson.M{"_id": 1}}},

@@ -182,3 +182,41 @@ func TestValidatePoolRunID(t *testing.T) {
 		assert.Error(t, validatePoolRunID(bad), bad)
 	}
 }
+
+// A bot that owns a room holds a genuine channel subscription
+// (bot-room-service/handler.go:213-216 writes IsBot:true with RoomTypeChannel),
+// so the Mongo filter alone is one flag away from letting one through. It must
+// not reach the artifact: clientsim authenticates on the user JWT path bots
+// never take, and a dotted ".bot" account spans subject tokens — it panics
+// subject.UserSubscriptionList before a request is ever made. The drop is here
+// rather than only in the query so it holds for any source, and so a row whose
+// isBot was never stored is still caught.
+func TestExportPool_DropsBotAccounts(t *testing.T) {
+	src := &fakeAccountSource{accounts: []string{
+		"anna", "legacy.site-a.bot", "bob", "weather.site-a.bot",
+	}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.NoError(t, err)
+
+	art := pub.artifacts["site-a/run-1/pool.json.gz"]
+	require.NotNil(t, art)
+	assert.Equal(t, []string{"anna", "bob"}, art.Accounts)
+	assert.Equal(t, 2, res.Accounts, "the reported count is the population that will connect")
+}
+
+// A site whose only channel subscribers are bots is empty for clientsim's
+// purposes. It must fail like any other empty population rather than publish
+// an artifact no pod can use.
+func TestExportPool_RejectsAPopulationOfOnlyBots(t *testing.T) {
+	src := &fakeAccountSource{accounts: []string{"weather.site-a.bot", "alerts.site-a.bot"}}
+
+	_, err := exportPool(context.Background(), src, newFakePublisher(), poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no accounts")
+}
