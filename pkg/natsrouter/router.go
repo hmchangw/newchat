@@ -199,7 +199,7 @@ func (r *Router) Use(mw ...HandlerFunc) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
+func (r *Router) addRoute(method natsmetrics.RPCMethod, pattern string, handlers []HandlerFunc) {
 	rt := parsePattern(pattern)
 	all := make([]HandlerFunc, 0, len(r.middleware)+1+len(handlers))
 	all = append(all, r.middleware...)
@@ -209,20 +209,34 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 	all = append(all, traceIdentity(r.siteID))
 	all = append(all, handlers...)
 
+	// record is nil for a RegisterVoid route, which declares no method. Resolving
+	// it once here rather than per message is the point of the change: the label
+	// used to come from parsing m.Subject on every dispatch, which ran even with
+	// metrics disabled and recognised only the room and orgs subject families.
+	var record func(context.Context, time.Duration, natsmetrics.RequestResult)
+	if method != natsmetrics.MethodNone {
+		record = func(ctx context.Context, d time.Duration, result natsmetrics.RequestResult) {
+			r.metrics.HandledRequest(ctx, method, d, result)
+		}
+	}
+
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {
 		started := time.Now()
-		operation := natsmetrics.RequestOperationFromSubject(m.Subject)
 		// Stopping gate: reject before admit so Shutdown's contract holds
 		// even if a callback fires mid-drain or after Shutdown's ctx expired.
 		if r.stopping.Load() {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			if record != nil {
+				record(msgCtx, time.Since(started), natsmetrics.RequestUnavailable)
+			}
 			return
 		}
 		admitted, release := r.admit()
 		if !admitted {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			if record != nil {
+				record(msgCtx, time.Since(started), natsmetrics.RequestUnavailable)
+			}
 			return
 		}
 		r.wg.Add(1)
@@ -239,7 +253,9 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all, r.reply)
 			defer releaseContext(c)
 			defer func() {
-				r.metrics.HandledRequest(msgCtx, operation, time.Since(started), c.requestResult)
+				if record != nil {
+					record(msgCtx, time.Since(started), c.requestResult)
+				}
 			}()
 			defer func() {
 				if rec := recover(); rec != nil {

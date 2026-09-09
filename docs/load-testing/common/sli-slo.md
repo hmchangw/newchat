@@ -332,9 +332,13 @@ partition slice). Targets: §1.
   (v2). Labelled proxy until then.
 - 🔧 **Enter channel / thread** — the `natsrouter` metrics middleware (§8 P1):
   `rpc_server_call_duration_seconds{rpc_method, error_type}`; the `rpc_method`
-  label slices both workflows from one middleware — `channel_history` for SLO-4,
-  `thread_open` for SLO-5. Names follow the OTel RPC semantic conventions rather
-  than the spelling this document first proposed.
+  label slices both workflows from one middleware — `list_channel_messages` for
+  SLO-4, `list_thread_messages` for SLO-5. `rpc_method` is declared at route
+  registration from a closed vocabulary, one method per route; the names follow
+  the OTel RPC semantic conventions and AIP-131/132/190 rather than the spelling
+  this document first proposed. They read `channel_history` and `thread_open`
+  before that vocabulary landed — neither SLO was measuring yet, so the rename
+  needed no cutover.
 
   **The denominator is not the family total.** `error_type` is absent on success,
   so it is tempting to write good/valid as `{error_type=""}` over `_count` — but
@@ -345,12 +349,12 @@ partition slice). Targets: §1.
   ```promql
   # good  — succeeded within the bound
   sum by (site) (rate(rpc_server_call_duration_seconds_bucket{
-        service_name="history-service", rpc_method="thread_open",
+        service_name="history-service", rpc_method="list_thread_messages",
         error_type="", le="0.25"}[28d]))
   /
   # valid — success + budget-burning failures, never the 4xx classes
   sum by (site) (rate(rpc_server_call_duration_seconds_count{
-        service_name="history-service", rpc_method="thread_open",
+        service_name="history-service", rpc_method="list_thread_messages",
         error_type=~"|internal|unavailable|too_many_requests"}[28d]))
   ```
 
@@ -370,7 +374,7 @@ partition slice). Targets: §1.
   `too_many_requests`, `unavailable` and `internal` are eligible; and a
   server-side timeout carries no `errcode` so it falls to the default branch and
   arrives as `internal`. SLO-4 is the same expression with
-  `rpc_method="channel_history"` and `le="0.5"`. Pin this label set in the
+  `rpc_method="list_channel_messages"` and `le="0.5"`. Pin this label set in the
   recording rule's test — adding a tenth `RequestResult` without revisiting the
   regex silently moves it into or out of the denominator.
 

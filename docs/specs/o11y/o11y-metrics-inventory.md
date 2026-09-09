@@ -197,15 +197,18 @@ labels. `nats_slow_consumer_events_total` is scoped the same way.
 All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
 `not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
-Room and history operations are coarse bounded categories — `room_read`,
-`room_mutation`, `member_read`, `member_mutation`, `channel_history`,
-`thread_open`, `history_read`, `history_mutation`, `room_publish`,
-`member_publish`, `outbox_publish`. `channel_history` and `thread_open` are
-deliberately finer than the rest: each is the whole numerator and denominator of
-an SLO (SLO-4 and SLO-5), which the coarse `history_read` cannot serve because it
-also carries scroll, jump, single and batch reads, pinned lists and thread
-parents. Subject families that do not map normalize to `unknown` rather than
-minting a label.
+`rpc_method` on the two RPC families is a closed 91-constant vocabulary,
+declared at route registration — one method per route, verb-first snake_case per
+AIP-131/132/190. A route that declares none does not compile, and a value outside
+the vocabulary records as semconv's `_OTHER` rather than minting a label. It was
+previously derived from the subject, which recognised only the room and orgs
+families and left 51 of 96 routes on `unknown`; the derivation is gone. Publish
+operations remain the coarse bounded set they were — `room_publish`,
+`member_publish`, `outbox_publish`, `canonical_publish`, `client_response`,
+`recipient_publish`, `notification_publish`, `push_publish`, `thread_tcount`,
+`teams_user_upsert` — plus the three the outbound client lane still passes
+(`history_get_message`, `member_read`, `presence_lookup`), with `unknown` as
+their fallback.
 Raw subjects, room IDs, account IDs, site IDs parsed out of subject tokens, and
 error strings are never labels.
 

@@ -8,12 +8,14 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
-// Register subscribes a typed handler to a subject pattern.
+// Register subscribes a typed handler to a subject pattern under method, the
+// rpc.method label its rpc_server_call_duration_seconds samples carry.
 // Handler receives *Context (implements context.Context) and unmarshalled request.
 // Panics if subscription fails (startup-only, fatal).
 func Register[Req, Resp any](
 	r *Router,
 	pattern string,
+	method natsmetrics.RPCMethod,
 	fn func(c *Context, req Req) (*Resp, error),
 ) {
 	handler := HandlerFunc(func(c *Context) {
@@ -35,13 +37,14 @@ func Register[Req, Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addRoute(method, pattern, []HandlerFunc{handler})
 }
 
-// RegisterNoBody subscribes a handler that takes no request body.
+// RegisterNoBody subscribes a handler that takes no request body, under method.
 func RegisterNoBody[Resp any](
 	r *Router,
 	pattern string,
+	method natsmetrics.RPCMethod,
 	fn func(c *Context) (*Resp, error),
 ) {
 	handler := HandlerFunc(func(c *Context) {
@@ -54,13 +57,14 @@ func RegisterNoBody[Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addRoute(method, pattern, []HandlerFunc{handler})
 }
 
-// RegisterOptionalBody is like Register but treats a zero-length payload as the zero-value request instead of a bad_request (e.g. sso.refresh).
+// RegisterOptionalBody is like Register, under method, but treats a zero-length payload as the zero-value request instead of a bad_request (e.g. sso.refresh).
 func RegisterOptionalBody[Req, Resp any](
 	r *Router,
 	pattern string,
+	method natsmetrics.RPCMethod,
 	fn func(c *Context, req Req) (*Resp, error),
 ) {
 	handler := HandlerFunc(func(c *Context) {
@@ -81,10 +85,12 @@ func RegisterOptionalBody[Req, Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addRoute(method, pattern, []HandlerFunc{handler})
 }
 
 // RegisterVoid subscribes a handler that processes a request without replying.
+// It declares no method and records no rpc.server.call.duration sample: with no
+// reply there is no round trip to time. See natsmetrics.MethodNone.
 func RegisterVoid[Req any](
 	r *Router,
 	pattern string,
@@ -104,7 +110,7 @@ func RegisterVoid[Req any](
 		}
 	})
 
-	r.addRoute(pattern, []HandlerFunc{handler})
+	r.addRoute(natsmetrics.MethodNone, pattern, []HandlerFunc{handler})
 }
 
 // replyErr classifies err and sends the errcode envelope on the reply subject.

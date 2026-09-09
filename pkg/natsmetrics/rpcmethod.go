@@ -39,19 +39,19 @@ const (
 	MethodCountSubscriptions           RPCMethod = "count_subscriptions"
 	MethodCreateBotRoom                RPCMethod = "create_bot_room"
 	MethodCreateChatlistSection        RPCMethod = "create_chatlist_section"
-	MethodCreateDmRoom                 RPCMethod = "create_dm_room"
+	MethodCreateDMRoom                 RPCMethod = "create_dm_room"
 	MethodCreateRoom                   RPCMethod = "create_room"
 	MethodCreateTeamsMeeting           RPCMethod = "create_teams_meeting"
 	MethodDeleteChatlistSection        RPCMethod = "delete_chatlist_section"
 	MethodDeleteEmoji                  RPCMethod = "delete_emoji"
 	MethodDeleteMessage                RPCMethod = "delete_message"
 	MethodEditMessage                  RPCMethod = "edit_message"
-	MethodEnsureBotDmRoom              RPCMethod = "ensure_bot_dm_room"
+	MethodEnsureBotDMRoom              RPCMethod = "ensure_bot_dm_room"
 	MethodEnsureRoomKey                RPCMethod = "ensure_room_key"
 	MethodGetBotRoom                   RPCMethod = "get_bot_room"
 	MethodGetChatlist                  RPCMethod = "get_chatlist"
 	MethodGetCurrentUser               RPCMethod = "get_current_user"
-	MethodGetDmSubscription            RPCMethod = "get_dm_subscription"
+	MethodGetDMSubscription            RPCMethod = "get_dm_subscription"
 	MethodGetMessage                   RPCMethod = "get_message"
 	MethodGetRoomAppCommandMenu        RPCMethod = "get_room_app_command_menu"
 	MethodGetRoomAppTabs               RPCMethod = "get_room_app_tabs"
@@ -88,35 +88,37 @@ const (
 	MethodMoveChat                     RPCMethod = "move_chat"
 	MethodOpenRoom                     RPCMethod = "open_room"
 	MethodPinMessage                   RPCMethod = "pin_message"
-	MethodRefreshSsoToken              RPCMethod = "refresh_sso_token"
-	MethodRemoveBotRoomMembers         RPCMethod = "remove_bot_room_members"
-	MethodRemoveMember                 RPCMethod = "remove_member"
-	MethodRemovePriorityContact        RPCMethod = "remove_priority_contact"
-	MethodRenameChatlistSection        RPCMethod = "rename_chatlist_section"
-	MethodRenameRoom                   RPCMethod = "rename_room"
-	MethodReorderChatlistSections      RPCMethod = "reorder_chatlist_sections"
-	MethodSearchApps                   RPCMethod = "search_apps"
-	MethodSearchMessages               RPCMethod = "search_messages"
-	MethodSearchOrgs                   RPCMethod = "search_orgs"
-	MethodSearchRooms                  RPCMethod = "search_rooms"
-	MethodSearchUsers                  RPCMethod = "search_users"
-	MethodSendDm                       RPCMethod = "send_dm"
-	MethodSendRoomMessage              RPCMethod = "send_room_message"
-	MethodSetAppSubscription           RPCMethod = "set_app_subscription"
-	MethodSetChatlistSectionSortMode   RPCMethod = "set_chatlist_section_sort_mode"
-	MethodSetManualPresence            RPCMethod = "set_manual_presence"
-	MethodSetRoomRestricted            RPCMethod = "set_room_restricted"
-	MethodSetSettings                  RPCMethod = "set_settings"
-	MethodSetSsoToken                  RPCMethod = "set_sso_token"
-	MethodSetUserStatus                RPCMethod = "set_user_status"
-	MethodStartTeamsRoomCall           RPCMethod = "start_teams_room_call"
-	MethodStartTeamsUserCall           RPCMethod = "start_teams_user_call"
-	MethodToggleFavorite               RPCMethod = "toggle_favorite"
-	MethodToggleMessageReaction        RPCMethod = "toggle_message_reaction"
-	MethodToggleMute                   RPCMethod = "toggle_mute"
-	MethodTranslateText                RPCMethod = "translate_text"
-	MethodUnpinMessage                 RPCMethod = "unpin_message"
-	MethodUpdateMemberRole             RPCMethod = "update_member_role"
+	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	MethodRefreshSSOToken            RPCMethod = "refresh_sso_token"
+	MethodRemoveBotRoomMembers       RPCMethod = "remove_bot_room_members"
+	MethodRemoveMember               RPCMethod = "remove_member"
+	MethodRemovePriorityContact      RPCMethod = "remove_priority_contact"
+	MethodRenameChatlistSection      RPCMethod = "rename_chatlist_section"
+	MethodRenameRoom                 RPCMethod = "rename_room"
+	MethodReorderChatlistSections    RPCMethod = "reorder_chatlist_sections"
+	MethodSearchApps                 RPCMethod = "search_apps"
+	MethodSearchMessages             RPCMethod = "search_messages"
+	MethodSearchOrgs                 RPCMethod = "search_orgs"
+	MethodSearchRooms                RPCMethod = "search_rooms"
+	MethodSearchUsers                RPCMethod = "search_users"
+	MethodSendDM                     RPCMethod = "send_dm"
+	MethodSendRoomMessage            RPCMethod = "send_room_message"
+	MethodSetAppSubscription         RPCMethod = "set_app_subscription"
+	MethodSetChatlistSectionSortMode RPCMethod = "set_chatlist_section_sort_mode"
+	MethodSetManualPresence          RPCMethod = "set_manual_presence"
+	MethodSetRoomRestricted          RPCMethod = "set_room_restricted"
+	MethodSetSettings                RPCMethod = "set_settings"
+	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	MethodSetSSOToken           RPCMethod = "set_sso_token"
+	MethodSetUserStatus         RPCMethod = "set_user_status"
+	MethodStartTeamsRoomCall    RPCMethod = "start_teams_room_call"
+	MethodStartTeamsUserCall    RPCMethod = "start_teams_user_call"
+	MethodToggleFavorite        RPCMethod = "toggle_favorite"
+	MethodToggleMessageReaction RPCMethod = "toggle_message_reaction"
+	MethodToggleMute            RPCMethod = "toggle_mute"
+	MethodTranslateText         RPCMethod = "translate_text"
+	MethodUnpinMessage          RPCMethod = "unpin_message"
+	MethodUpdateMemberRole      RPCMethod = "update_member_role"
 )
 
 // MethodOther is the record-time fallback for a method outside the vocabulary.
@@ -126,6 +128,13 @@ const (
 // service over a value it might not even record. It is deliberately not Valid(),
 // so no route can claim it and the fallback keeps meaning "should never happen".
 const MethodOther RPCMethod = "_OTHER"
+
+// MethodNone marks a route that records no rpc.server.call.duration sample.
+// RegisterVoid routes carry it: a void handler sends no reply, so there is no
+// round trip to time, and recording local handler cost under a call-duration
+// histogram would misreport what the metric means. It is the zero RPCMethod so
+// the intent is explicit at the call site rather than an omitted argument.
+const MethodNone RPCMethod = ""
 
 // rpcMethodVocabulary is the closed set Valid() reports. A map rather than a
 // switch so rpcMethodVocabularySize can report its length to the completeness
@@ -144,19 +153,19 @@ var rpcMethodVocabulary = map[RPCMethod]struct{}{
 	MethodCountSubscriptions:           {},
 	MethodCreateBotRoom:                {},
 	MethodCreateChatlistSection:        {},
-	MethodCreateDmRoom:                 {},
+	MethodCreateDMRoom:                 {},
 	MethodCreateRoom:                   {},
 	MethodCreateTeamsMeeting:           {},
 	MethodDeleteChatlistSection:        {},
 	MethodDeleteEmoji:                  {},
 	MethodDeleteMessage:                {},
 	MethodEditMessage:                  {},
-	MethodEnsureBotDmRoom:              {},
+	MethodEnsureBotDMRoom:              {},
 	MethodEnsureRoomKey:                {},
 	MethodGetBotRoom:                   {},
 	MethodGetChatlist:                  {},
 	MethodGetCurrentUser:               {},
-	MethodGetDmSubscription:            {},
+	MethodGetDMSubscription:            {},
 	MethodGetMessage:                   {},
 	MethodGetRoomAppCommandMenu:        {},
 	MethodGetRoomAppTabs:               {},
@@ -193,35 +202,37 @@ var rpcMethodVocabulary = map[RPCMethod]struct{}{
 	MethodMoveChat:                     {},
 	MethodOpenRoom:                     {},
 	MethodPinMessage:                   {},
-	MethodRefreshSsoToken:              {},
-	MethodRemoveBotRoomMembers:         {},
-	MethodRemoveMember:                 {},
-	MethodRemovePriorityContact:        {},
-	MethodRenameChatlistSection:        {},
-	MethodRenameRoom:                   {},
-	MethodReorderChatlistSections:      {},
-	MethodSearchApps:                   {},
-	MethodSearchMessages:               {},
-	MethodSearchOrgs:                   {},
-	MethodSearchRooms:                  {},
-	MethodSearchUsers:                  {},
-	MethodSendDm:                       {},
-	MethodSendRoomMessage:              {},
-	MethodSetAppSubscription:           {},
-	MethodSetChatlistSectionSortMode:   {},
-	MethodSetManualPresence:            {},
-	MethodSetRoomRestricted:            {},
-	MethodSetSettings:                  {},
-	MethodSetSsoToken:                  {},
-	MethodSetUserStatus:                {},
-	MethodStartTeamsRoomCall:           {},
-	MethodStartTeamsUserCall:           {},
-	MethodToggleFavorite:               {},
-	MethodToggleMessageReaction:        {},
-	MethodToggleMute:                   {},
-	MethodTranslateText:                {},
-	MethodUnpinMessage:                 {},
-	MethodUpdateMemberRole:             {},
+	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	MethodRefreshSSOToken:            {},
+	MethodRemoveBotRoomMembers:       {},
+	MethodRemoveMember:               {},
+	MethodRemovePriorityContact:      {},
+	MethodRenameChatlistSection:      {},
+	MethodRenameRoom:                 {},
+	MethodReorderChatlistSections:    {},
+	MethodSearchApps:                 {},
+	MethodSearchMessages:             {},
+	MethodSearchOrgs:                 {},
+	MethodSearchRooms:                {},
+	MethodSearchUsers:                {},
+	MethodSendDM:                     {},
+	MethodSendRoomMessage:            {},
+	MethodSetAppSubscription:         {},
+	MethodSetChatlistSectionSortMode: {},
+	MethodSetManualPresence:          {},
+	MethodSetRoomRestricted:          {},
+	MethodSetSettings:                {},
+	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	MethodSetSSOToken:           {},
+	MethodSetUserStatus:         {},
+	MethodStartTeamsRoomCall:    {},
+	MethodStartTeamsUserCall:    {},
+	MethodToggleFavorite:        {},
+	MethodToggleMessageReaction: {},
+	MethodToggleMute:            {},
+	MethodTranslateText:         {},
+	MethodUnpinMessage:          {},
+	MethodUpdateMemberRole:      {},
 }
 
 // Valid reports whether m is one of the vocabulary constants. MethodOther is
