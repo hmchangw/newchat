@@ -235,9 +235,9 @@ func (mr *MockAdminStoreMockRecorder) ListRoomMembers(ctx, roomID any) *gomock.C
 }
 
 // ListRooms mocks base method.
-func (m *MockAdminStore) ListRooms(ctx context.Context, siteID string, page, limit int) ([]model.Room, int64, error) {
+func (m *MockAdminStore) ListRooms(ctx context.Context, siteID, q string, page, limit int) ([]model.Room, int64, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListRooms", ctx, siteID, page, limit)
+	ret := m.ctrl.Call(m, "ListRooms", ctx, siteID, q, page, limit)
 	ret0, _ := ret[0].([]model.Room)
 	ret1, _ := ret[1].(int64)
 	ret2, _ := ret[2].(error)
@@ -245,9 +245,9 @@ func (m *MockAdminStore) ListRooms(ctx context.Context, siteID string, page, lim
 }
 
 // ListRooms indicates an expected call of ListRooms.
-func (mr *MockAdminStoreMockRecorder) ListRooms(ctx, siteID, page, limit any) *gomock.Call {
+func (mr *MockAdminStoreMockRecorder) ListRooms(ctx, siteID, q, page, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListRooms", reflect.TypeOf((*MockAdminStore)(nil).ListRooms), ctx, siteID, page, limit)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListRooms", reflect.TypeOf((*MockAdminStore)(nil).ListRooms), ctx, siteID, q, page, limit)
 }
 
 // Ping mocks base method.

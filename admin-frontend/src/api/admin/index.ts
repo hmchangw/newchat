@@ -58,6 +58,8 @@ export interface AdminRoomMember {
 }
 
 export interface ListRoomsParams {
+  /** Substring matched against the room name or id, case-insensitively. */
+  q?: string
   page?: number
   limit?: number
 }
@@ -495,7 +497,7 @@ export async function listRooms(
   authToken: string,
   params: ListRoomsParams = {},
 ): Promise<{ rooms: AdminRoom[]; total: number }> {
-  const qs = buildQuery({ page: params.page, limit: params.limit })
+  const qs = buildQuery({ q: params.q, page: params.page, limit: params.limit })
   return adminFetch<{ rooms: AdminRoom[]; total: number }>(authToken, 'GET', `/rooms${qs}`)
 }
 

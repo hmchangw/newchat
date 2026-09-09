@@ -1429,7 +1429,7 @@ func TestIntegration_ListRooms(t *testing.T) {
 	}
 
 	t.Run("returns only the requested site's rooms", func(t *testing.T) {
-		results, total, err := st.ListRooms(ctx, "site-a", 1, 10)
+		results, total, err := st.ListRooms(ctx, "site-a", "", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(3), total)
 		require.Len(t, results, 3)
@@ -1439,7 +1439,7 @@ func TestIntegration_ListRooms(t *testing.T) {
 	})
 
 	t.Run("projects the console fields", func(t *testing.T) {
-		results, _, err := st.ListRooms(ctx, "site-a", 1, 10)
+		results, _, err := st.ListRooms(ctx, "site-a", "", 1, 10)
 		require.NoError(t, err)
 		require.NotEmpty(t, results)
 		assert.Equal(t, "room-a1", results[0].ID)
@@ -1453,20 +1453,62 @@ func TestIntegration_ListRooms(t *testing.T) {
 	})
 
 	t.Run("pages by _id in a stable order", func(t *testing.T) {
-		first, total, err := st.ListRooms(ctx, "site-a", 1, 2)
+		first, total, err := st.ListRooms(ctx, "site-a", "", 1, 2)
 		require.NoError(t, err)
 		assert.Equal(t, int64(3), total)
 		require.Len(t, first, 2)
 		assert.Equal(t, []string{"room-a1", "room-a2"}, []string{first[0].ID, first[1].ID})
 
-		second, _, err := st.ListRooms(ctx, "site-a", 2, 2)
+		second, _, err := st.ListRooms(ctx, "site-a", "", 2, 2)
 		require.NoError(t, err)
 		require.Len(t, second, 1)
 		assert.Equal(t, "room-a3", second[0].ID)
 	})
 
+	t.Run("a query narrows on the room name, case-insensitively", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "site-a", "GENER", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), total)
+		require.Len(t, results, 1)
+		assert.Equal(t, "room-a1", results[0].ID)
+	})
+
+	t.Run("a query also narrows on the room id", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "site-a", "room-a3", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), total)
+		require.Len(t, results, 1)
+		assert.Equal(t, "room-a3", results[0].ID)
+	})
+
+	t.Run("a query stays inside the site", func(t *testing.T) {
+		// "other-site" lives at site-b: the term matches its name exactly, so a
+		// filter that replaced the siteId clause instead of joining it would show it.
+		results, total, err := st.ListRooms(ctx, "site-a", "other-site", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+
+	t.Run("regex metacharacters are matched literally", func(t *testing.T) {
+		// Unescaped, ".*" would match every room in the site.
+		results, total, err := st.ListRooms(ctx, "site-a", ".*", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+
+	t.Run("a query pages and counts on the narrowed set", func(t *testing.T) {
+		// "a" hits room-a1/a2/a3 by id; total must be the match count, not the site count.
+		first, total, err := st.ListRooms(ctx, "site-a", "room-a", 1, 2)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+		require.Len(t, first, 2)
+		assert.Equal(t, []string{"room-a1", "room-a2"}, []string{first[0].ID, first[1].ID})
+	})
+
 	t.Run("a site with no rooms returns an empty slice", func(t *testing.T) {
-		results, total, err := st.ListRooms(ctx, "site-zzz", 1, 10)
+		results, total, err := st.ListRooms(ctx, "site-zzz", "", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, results)

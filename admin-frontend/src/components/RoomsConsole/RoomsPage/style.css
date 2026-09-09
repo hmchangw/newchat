@@ -24,3 +24,20 @@
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
+
+.rooms-search-input {
+  flex: 1;
+  max-width: 320px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-input);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.rooms-search-input:focus {
+  outline: none;
+  background: var(--bg-surface);
+  border-color: var(--accent);
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -33,12 +34,15 @@ type roomMemberView struct {
 	IsBot   bool   `json:"isBot"`
 }
 
-// listRooms handles GET /rooms — the rooms homed at this site, paged.
+// listRooms handles GET /rooms — the rooms homed at this site, paged, and
+// narrowed by an optional `q` substring. Trimmed, because the console sends
+// the search box verbatim on a debounce and a lone space is not a search.
 func (h *Handler) listRooms(c *gin.Context) {
 	ctx := c.Request.Context()
+	q := strings.TrimSpace(c.Query("q"))
 	page, limit := parsePaging(c, 1, 20)
 
-	rooms, total, err := h.store.ListRooms(ctx, h.cfg.SiteID, page, limit)
+	rooms, total, err := h.store.ListRooms(ctx, h.cfg.SiteID, q, page, limit)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("list rooms: %w", err))
 		return

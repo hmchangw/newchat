@@ -55,7 +55,7 @@ func TestHandler_listRooms(t *testing.T) {
 			name:  "lists the configured site's rooms with paging",
 			query: "?page=2&limit=10",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), "site-A", 2, 10).
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "", 2, 10).
 					Return([]model.Room{{
 						ID: "r1", Name: "general", Type: model.RoomTypeChannel,
 						UserCount: 7, Restricted: true, ExternalAccess: true,
@@ -78,7 +78,7 @@ func TestHandler_listRooms(t *testing.T) {
 			name:  "defaults page=1 limit=20",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 20).
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "", 1, 20).
 					Return([]model.Room{}, int64(0), nil)
 			},
 			wantStatus: http.StatusOK,
@@ -93,7 +93,7 @@ func TestHandler_listRooms(t *testing.T) {
 			name:  "limit is clamped to maxPageLimit",
 			query: "?limit=100000",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 100).
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "", 1, 100).
 					Return([]model.Room{}, int64(0), nil)
 			},
 			wantStatus: http.StatusOK,
@@ -102,7 +102,7 @@ func TestHandler_listRooms(t *testing.T) {
 			name:  "an unrestricted room reports both duty flags as false rather than omitting them",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 20).
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "", 1, 20).
 					Return([]model.Room{{
 						ID: "r2", Name: "dm", Type: model.RoomTypeDM, UserCount: 2,
 					}}, int64(1), nil)
@@ -123,7 +123,7 @@ func TestHandler_listRooms(t *testing.T) {
 			name:  "reports a restricted room without external access as exactly that",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 20).
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "", 1, 20).
 					Return([]model.Room{{
 						ID: "r3", Name: "half", Type: model.RoomTypeChannel,
 						UserCount: 9, Restricted: true,
@@ -143,7 +143,7 @@ func TestHandler_listRooms(t *testing.T) {
 			name:  "reports external access without the restriction as not on duty",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 20).
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "", 1, 20).
 					Return([]model.Room{{
 						ID: "r4", Name: "other-half", Type: model.RoomTypeChannel,
 						UserCount: 9, ExternalAccess: true,
@@ -158,10 +158,35 @@ func TestHandler_listRooms(t *testing.T) {
 			},
 		},
 		{
+			name:  "passes the search query through to the store",
+			query: "?q=gen&page=2",
+			setupMock: func(m *MockAdminStore) {
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "gen", 2, 20).
+					Return([]model.Room{{
+						ID: "r1", Name: "general", Type: model.RoomTypeChannel, UserCount: 7,
+					}}, int64(1), nil)
+			},
+			wantStatus: http.StatusOK,
+			checkBody: func(t *testing.T, body map[string]any) {
+				assert.Equal(t, "general", firstRoom(t, body)["name"])
+			},
+		},
+		{
+			name:  "a whitespace-only query is treated as no query",
+			query: "?q=%20%20",
+			setupMock: func(m *MockAdminStore) {
+				// Trimmed, so a half-typed term the user backspaced away does not
+				// become a literal search for spaces that matches nothing.
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "", 1, 20).
+					Return([]model.Room{}, int64(0), nil)
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:  "store error → 500",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				m.EXPECT().ListRooms(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(nil, int64(0), fmt.Errorf("db offline"))
 			},
 			wantStatus: http.StatusInternalServerError,

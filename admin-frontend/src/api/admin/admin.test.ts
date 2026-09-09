@@ -847,6 +847,22 @@ describe('listRooms', () => {
     expect(result).toEqual({ rooms: [ROOM], total: 1 })
   })
 
+  it('sends the search term as q', async () => {
+    const fetchMock = stubFetch(200, { rooms: [ROOM], total: 1 })
+
+    await listRooms('tok', { q: 'gener', page: 1, limit: 20 })
+
+    expect(new URL(fetchMock.mock.calls[0][0]).searchParams.get('q')).toBe('gener')
+  })
+
+  it('omits q entirely when the search box is empty', async () => {
+    const fetchMock = stubFetch(200, { rooms: [], total: 0 })
+
+    await listRooms('tok', { q: '', page: 1, limit: 20 })
+
+    expect(new URL(fetchMock.mock.calls[0][0]).searchParams.has('q')).toBe(false)
+  })
+
   it('throws AsyncJobError on a non-2xx response', async () => {
     stubFetch(403, { error: { code: 'forbidden', reason: 'not_admin', message: 'nope' } })
 

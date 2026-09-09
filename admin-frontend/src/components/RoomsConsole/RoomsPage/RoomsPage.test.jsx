@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 
 vi.mock('@/context/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('@/api', async (importOriginal) => {
@@ -70,6 +70,70 @@ describe('RoomsPage', () => {
     await waitFor(() => expect(listRooms).toHaveBeenCalledWith('tok', { page: 1, limit: 20 }))
     expect(await screen.findByText('r-off')).toBeInTheDocument()
     expect(screen.getByText('r-on')).toBeInTheDocument()
+  })
+
+  it('re-queries with {q} after the search input debounces', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render(<RoomsPage />)
+      await waitFor(() => expect(listRooms).toHaveBeenCalledWith('tok', { page: 1, limit: 20 }))
+
+      fireEvent.change(screen.getByLabelText(/search rooms/i), { target: { value: 'gener' } })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+
+      await waitFor(() =>
+        expect(listRooms).toHaveBeenCalledWith('tok', { q: 'gener', page: 1, limit: 20 }),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('omits q from the request once the search box is cleared', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render(<RoomsPage />)
+      const box = await screen.findByLabelText(/search rooms/i)
+
+      fireEvent.change(box, { target: { value: 'gener' } })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      fireEvent.change(box, { target: { value: '' } })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+
+      // Not `{q: ''}`: the empty filter must drop out so the unfiltered call is
+      // byte-identical to the one on mount.
+      expect(listRooms).toHaveBeenLastCalledWith('tok', { page: 1, limit: 20 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the search term when paging', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      listRooms.mockResolvedValue({ rooms: [OPEN, ONDUTY], total: 40 })
+      render(<RoomsPage />)
+      fireEvent.change(await screen.findByLabelText(/search rooms/i), {
+        target: { value: 'gener' },
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /next/i }))
+
+      await waitFor(() =>
+        expect(listRooms).toHaveBeenLastCalledWith('tok', { q: 'gener', page: 2, limit: 20 }),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows the total room count', async () => {

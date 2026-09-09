@@ -170,8 +170,22 @@ var roomMemberProjection = bson.M{"u.account": 1, "u.isBot": 1, "_id": 0}
 
 // ListRooms pages this site's rooms ordered by _id — the _id index serves the
 // sort for free, so paging stays stable without a blocking in-memory sort.
-func (s *storeMongo) ListRooms(ctx context.Context, siteID string, page, limit int) ([]model.Room, int64, error) {
+// A search term narrows on name or id; both are substring regexes, so neither
+// is index-served — acceptable while the collection has no siteId index either
+// and every listing already scans.
+func (s *storeMongo) ListRooms(ctx context.Context, siteID, q string, page, limit int) ([]model.Room, int64, error) {
 	filter := bson.M{"siteId": siteID}
+	if q != "" {
+		// Escaped for the same reason SearchUsers escapes: the term is a literal
+		// substring, never a caller-supplied regex. Matched against the two
+		// columns the console shows as text — an id pasted from a bug report is
+		// as likely a search term here as a room name.
+		escaped := regexp.QuoteMeta(q)
+		filter["$or"] = bson.A{
+			bson.M{"name": bson.M{"$regex": escaped, "$options": "i"}},
+			bson.M{"_id": bson.M{"$regex": escaped, "$options": "i"}},
+		}
+	}
 
 	total, err := s.rooms.CountDocuments(ctx, filter)
 	if err != nil {

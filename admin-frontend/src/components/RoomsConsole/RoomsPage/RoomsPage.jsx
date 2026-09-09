@@ -14,24 +14,39 @@ const UnsetOnDutyDialog = lazy(() => import('../UnsetOnDutyDialog'))
 // Matches admin-service's parsePaging default limit (handler.go).
 const PAGE_SIZE = 20
 
-// The listing takes no filters — unlike Audit and Permissions, this console has no
-// search box, so the hook's debounce path is never exercised.
-const NO_FILTERS = {}
+const DEFAULT_FILTERS = { q: '' }
+
+// Only include the term when the admin actually typed one — mirrors Permissions'
+// buildFilterParams so an unfiltered listing stays `{page, limit}` on the wire.
+function buildFilterParams(filters) {
+  return filters.q ? { q: filters.q } : {}
+}
 
 // Settings → Rooms console. Owns which duty dialog is open; the toggle returns only
 // {status:"ok"}, so a landed change is picked up by refetching rather than by
-// patching the row in place. Paging shell comes from usePagedAdminList.
+// patching the row in place. Paging, the debounced search and the not_admin
+// branch all come from usePagedAdminList.
 export default function RoomsPage() {
   const { session } = useAuth()
   const authToken = session?.authToken
 
-  const { data, total, page, loading, error, notAuthorized, goToPage, refresh } =
-    usePagedAdminList({
-      authToken,
-      fetcher: (token, _filters, paging) => listRooms(token, paging),
-      defaultFilters: NO_FILTERS,
-      pageSize: PAGE_SIZE,
-    })
+  const {
+    data,
+    total,
+    page,
+    filters,
+    loading,
+    error,
+    notAuthorized,
+    updateFilter,
+    goToPage,
+    refresh,
+  } = usePagedAdminList({
+    authToken,
+    fetcher: (token, f, paging) => listRooms(token, { ...buildFilterParams(f), ...paging }),
+    defaultFilters: DEFAULT_FILTERS,
+    pageSize: PAGE_SIZE,
+  })
   const rooms = data?.rooms ?? []
 
   const [onDutyTarget, setOnDutyTarget] = useState(null)
@@ -48,6 +63,14 @@ export default function RoomsPage() {
   return (
     <div className="rooms-page">
       <div className="rooms-page-header">
+        <input
+          type="search"
+          className="rooms-search-input"
+          placeholder="Search rooms…"
+          aria-label="Search rooms"
+          value={filters.q}
+          onChange={(e) => updateFilter('q', e.target.value)}
+        />
         <span className="rooms-page-total">{total} rooms</span>
       </div>
 
