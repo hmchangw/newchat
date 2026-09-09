@@ -291,6 +291,10 @@ StatefulSet: clientsim             object store ──► every pod reads the SA
   — with a NetworkPolicy admitting only the clientsim and loadgen pods.
   clientsim reaches it by service DNS and nothing else changes in the code:
   `CLIENTSIM_AUTH_URL=http://dev-auth-service.NAMESPACE.svc.cluster.local:8080`.
+  > The NetworkPolicy controls who can reach the issuer, not whether the wire
+  > is readable — and what comes back is a NATS user JWT. Under a service mesh
+  > with mTLS that is covered; without one, terminate TLS on the issuer and use
+  > `https://`. See `deploy/k8s-contract.md`.
   > ⚠️ **Test and staging only.** Dev mode mints a NATS JWT for *any*
   > account the caller names, so anything that can reach this Deployment can
   > impersonate any user of that site. That is acceptable against synthetic

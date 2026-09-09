@@ -155,10 +155,20 @@ Image: **clientsim**. Replicas = `CLIENTSIM_SHARD_COUNT`.
 | `POOL_S3_ENDPOINT` / `_ACCESS_KEY` / `_SECRET_KEY` | ✅ | same store the Job wrote to. Read-only credentials are enough |
 | `POOL_S3_BUCKET` | | ignored on this path — `CLIENTSIM_POOL_URL` must name its bucket, and that one wins |
 | `CLIENTSIM_NATS_WS_URL` | ✅ | `wss://…` |
-| `CLIENTSIM_AUTH_URL` | ✅ | `http://dev-auth-service.<ns>.svc.cluster.local:8080` |
+| `CLIENTSIM_AUTH_URL` | ✅ | `http://dev-auth-service.<ns>.svc.cluster.local:8080` — see the note below before keeping `http://` |
 | `CLIENTSIM_SITE_ID` | ✅ | must match the artifact, or startup fails |
 | `CLIENTSIM_SHARD_INDEX` | ✅ | pod ordinal, via the downward API |
 | `CLIENTSIM_SHARD_COUNT` | ✅ | = replicas |
+
+> **The side issuer returns NATS user JWTs, so `http://` is a real trade-off.**
+> The ClusterIP-plus-NetworkPolicy posture above controls *who can reach* the
+> issuer; it does not encrypt what crosses the pod network, and a JWT on that
+> wire is a credential anyone with packet capture in the namespace can replay
+> until it expires. If the cluster already runs a service mesh with mTLS, that
+> covers it and `http://` is fine. If it does not, terminate TLS on the side
+> issuer and use `https://` — clientsim needs no code change, only the URL and
+> the issuer's CA in the pod's trust store. Deciding this is the chart owner's
+> call, which is why it is written here rather than enforced in the tool.
 
 Everything else has a default — see the Configuration table in the README.
 

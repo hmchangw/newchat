@@ -401,3 +401,27 @@ func TestLoadPool_ReadsTheConfiguredSource(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "object key")
 }
+
+// The pool is a list of real employee accounts and the fetch carries the
+// store's access key ID, so a plaintext endpoint is a real exposure — but
+// rejecting it outright would break the documented docker-compose loop, which
+// runs MinIO over HTTP on localhost. Make the posture visible instead of
+// silent, and only where it is actually a network hop.
+func TestWarnPlaintextObjectStore(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint string
+		useSSL   bool
+		want     bool
+	}{
+		{"tls anywhere is fine", "minio.svc.cluster.local:9000", true, false},
+		{"plaintext to a remote host warns", "minio.svc.cluster.local:9000", false, true},
+		{"plaintext to localhost is the dev loop", "localhost:9000", false, false},
+		{"plaintext to 127.0.0.1 is the dev loop", "127.0.0.1:9000", false, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, plaintextObjectStore(tt.endpoint, tt.useSSL))
+		})
+	}
+}
