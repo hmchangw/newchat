@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
+
+	roomverify "github.com/hmchangw/chat/tools/loadgen/internal/soak/roomverify"
 )
 
 const (
@@ -16,27 +17,27 @@ const (
 // observer can reconstruct the expected final state without holding run state
 // in memory. They survive a restart because they live in the WAL record.
 const (
-	soakFailureAttributeTargetAccount  = "target_account"
-	soakFailureAttributeExpectedMember = "expected_member"
-	soakFailureAttributeExpectedName   = "expected_name"
-	soakFailureAttributePreviousName   = "previous_name"
-	soakFailureAttributeExpectedMuted  = "expected_muted"
-	soakFailureAttributeReadBaseline   = "read_baseline_unix_ms"
-	soakFailureAttributeRequester      = "requester_account"
+	soakFailureAttributeTargetAccount  = roomverify.AttributeTargetAccount
+	soakFailureAttributeExpectedMember = roomverify.AttributeExpectedMember
+	soakFailureAttributeExpectedName   = roomverify.AttributeExpectedName
+	soakFailureAttributePreviousName   = roomverify.AttributePreviousName
+	soakFailureAttributeExpectedMuted  = roomverify.AttributeExpectedMuted
+	soakFailureAttributeReadBaseline   = roomverify.AttributeReadBaseline
+	soakFailureAttributeRequester      = roomverify.AttributeRequester
 )
 
-type soakRoomStateResult string
+type soakRoomStateResult = roomverify.Result
 
 const (
-	soakRoomStateMatched  soakRoomStateResult = "matched"
-	soakRoomStateMismatch soakRoomStateResult = "mismatch"
-	soakRoomStateAbsent   soakRoomStateResult = "absent"
-	soakRoomStateUnknown  soakRoomStateResult = "unknown"
+	soakRoomStateMatched  = roomverify.ResultMatched
+	soakRoomStateMismatch = roomverify.ResultMismatch
+	soakRoomStateAbsent   = roomverify.ResultAbsent
+	soakRoomStateUnknown  = roomverify.ResultUnknown
 )
 
 const (
-	soakRoomStateSourceRPC   = "room_service"
-	soakRoomStateSourceStore = "mongo"
+	soakRoomStateSourceRPC   = roomverify.SourceRPC
+	soakRoomStateSourceStore = roomverify.SourceStore
 )
 
 // soakRoomStateVerifier is the room_state observer body. It asks room-service
@@ -398,34 +399,11 @@ func classifySoakReadCursor(
 	baseline time.Time,
 	hasBaseline bool,
 ) soakRoomStateResult {
-	if observed == nil || observed.IsZero() {
-		return soakRoomStateAbsent
-	}
-	if !hasBaseline {
-		return soakRoomStateMatched
-	}
-	switch {
-	case observed.After(baseline):
-		return soakRoomStateMatched
-	case observed.Before(baseline):
-		return soakRoomStateMismatch
-	default:
-		return soakRoomStateAbsent
-	}
+	return roomverify.ClassifyReadCursor(observed, baseline, hasBaseline)
 }
 
 func soakReadBaseline(operation *failureOperation) (time.Time, bool, error) {
-	raw := operation.Attributes[soakFailureAttributeReadBaseline]
-	if raw == "" {
-		return time.Time{}, false, nil
-	}
-	millis, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf(
-			"failure operation %q has an unreadable read baseline: %w", operation.ID, err,
-		)
-	}
-	return time.UnixMilli(millis).UTC(), true, nil
+	return roomverify.ReadBaseline(operation)
 }
 
 func (v *soakRoomStateVerifier) readerAccount(
@@ -476,52 +454,23 @@ func (v *soakRoomStateVerifier) setHealth(up bool, reason string) {
 // whenever it can answer: room-service reporting nothing may only mean its read
 // path is degraded, so an absence claim needs the primary read behind it.
 func resolveSoakRoomState(rpc, authoritative soakRoomStateResult) soakRoomStateResult {
-	if authoritative != soakRoomStateUnknown {
-		return authoritative
-	}
-	if rpc == soakRoomStateMatched {
-		return soakRoomStateMatched
-	}
-	return soakRoomStateUnknown
+	return roomverify.Resolve(rpc, authoritative)
 }
 
 // classifySoakRoomName separates "our rename did not land" from an impossible
 // name. The pool serializes renames per room, so the only name that may legally
 // appear other than the expected one is the previous one.
 func classifySoakRoomName(found bool, actual, expected, previous string) soakRoomStateResult {
-	switch {
-	case !found:
-		return soakRoomStateMismatch
-	case actual == expected:
-		return soakRoomStateMatched
-	case previous == "" || actual == previous:
-		return soakRoomStateAbsent
-	default:
-		return soakRoomStateMismatch
-	}
+	return roomverify.ClassifyName(found, actual, expected, previous)
 }
 
 func flipSoakRoomStatePresence(result soakRoomStateResult) soakRoomStateResult {
-	switch result {
-	case soakRoomStateMatched:
-		return soakRoomStateAbsent
-	case soakRoomStateAbsent:
-		return soakRoomStateMatched
-	default:
-		return result
-	}
+	return roomverify.FlipPresence(result)
 }
 
 func soakRoomStateReasonFor(
 	result soakRoomStateResult,
 	mismatchReason failureReason,
 ) failureReason {
-	switch result {
-	case soakRoomStateMismatch:
-		return mismatchReason
-	case soakRoomStateAbsent:
-		return failureReasonRoomStateMissing
-	default:
-		return failureReasonNone
-	}
+	return roomverify.ReasonFor(result, mismatchReason)
 }
