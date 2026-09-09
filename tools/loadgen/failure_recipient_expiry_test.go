@@ -191,7 +191,7 @@ func TestRunSoakFailureExpiry_KeepsEvidenceWhenLedgerExpiryFails(t *testing.T) {
 // LEDGER_CAPACITY and this had nothing.
 func TestRecipientEvidence_RefusesToGrowPastItsCapacity(t *testing.T) {
 	evidence := newRecipientEvidence(false)
-	evidence.capacity = 2
+	evidence.SetCapacity(2)
 	for _, id := range []string{"op-1", "op-2"} {
 		require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
 			OperationID: id, Recipients: []string{"a"}, Complete: true,
@@ -246,9 +246,9 @@ func TestFailureRecipientObserver_EvidenceCarriesHeadroomOverTheLedger(t *testin
 	observer := newFailureRecipientObserver(nil, nil, 1, nil,
 		withFailureRecipientEvidenceCapacity(10))
 
-	require.Greater(t, observer.evidence.capacity, 10,
+	require.Greater(t, observer.evidence.Capacity(), 10,
 		"an evidence map sized exactly like the ledger rejects during the cleanup lag")
-	assert.Equal(t, 20, observer.evidence.capacity)
+	assert.Equal(t, 20, observer.evidence.Capacity())
 }
 
 // finalizeLocked removes the operation from l.active and compacts afterwards,
