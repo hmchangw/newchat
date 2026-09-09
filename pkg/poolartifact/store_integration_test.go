@@ -57,9 +57,12 @@ func TestIntegration_Store_LargePoolRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Dot-free: an account carrying one is not a usable NATS subject token,
+	// and this fixture asserting otherwise was the artifact validator's first
+	// catch. Real non-bot accounts have no dots, and bots never reach a pool.
 	accounts := make([]string, 30_000)
 	for i := range accounts {
-		accounts[i] = "stg.employee." + strconv.Itoa(i)
+		accounts[i] = "stg-employee-" + strconv.Itoa(i)
 	}
 	ctx := context.Background()
 	key := s.Key("site-a", "run-large", "pool.json.gz")
