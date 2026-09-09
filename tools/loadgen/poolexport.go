@@ -131,10 +131,8 @@ func poolDigest(accounts []string) string {
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
-// exportPool reads the population, publishes the artifact the fleet consumes
-// and the manifest that explains it.
-// dropUnusable removes accounts a clientsim run cannot connect as. A bot that owns a room
-// holds a genuine channel subscription (bot-room-service/handler.go:213-216
+// dropUnusable removes accounts a clientsim run cannot connect as. A bot that
+// owns a room holds a genuine channel subscription (bot-room-service/handler.go:213-216
 // writes IsBot:true with RoomTypeChannel, and its $setOnInsert never sets
 // `open`, so the open filter passes it too), so every condition the query
 // matches on is legitimately true of it.
@@ -161,6 +159,8 @@ func dropUnusable(accounts []string) []string {
 	return kept
 }
 
+// exportPool reads the population, publishes the artifact the fleet consumes
+// and the manifest that explains it.
 func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, opts poolExportOptions) (poolExportResult, error) {
 	accounts, err := src.channelSubscriberAccounts(ctx, opts.SiteID, opts.Limit)
 	if err != nil {
@@ -217,7 +217,15 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 		Query: poolExportQuery, Source: "mongodb",
 		ExportedAt: time.Now().UTC(),
 	}); err != nil {
-		return poolExportResult{}, fmt.Errorf("publish pool manifest: %w", err)
+		// The artifact is already claimed and immutable at this point. Re-running
+		// repairs this ONLY while the population is unchanged — the retry loses
+		// the claim, matches the digest, and falls through to write the manifest.
+		// If the site churns first, the digest no longer matches and the run ID
+		// is spent: the artifact is readable but has no record of how it was
+		// selected. Say so, rather than leave the operator to discover it.
+		return poolExportResult{}, fmt.Errorf(
+			"publish pool manifest for run %q (the artifact is already claimed — re-run promptly to repair it, or use a new --run-id if the population may have changed since): %w",
+			opts.RunID, err)
 	}
 
 	if opts.OutFile != "" {
