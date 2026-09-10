@@ -84,8 +84,10 @@ subscriptions: {siteId, roomType: "channel", open: {$ne: false},
                 origin: {$ne: "teams"}}
              → group by u.account, isBot = $max(u.isBot)
              → match isBot != true          ← AFTER the group, see below
-             → match _id not empty and not matching /[.*>\s]/
-             → sort ascending, then limit
+             → match _id not null
+             → sort ascending
+   then, walking the cursor: keep the accounts a run can connect as,
+   stop at --limit, count the rest
 ```
 
 Mirrors user-service's own `subscription.list` match, narrowed to `channel`:
@@ -115,28 +117,45 @@ other condition above is legitimately true of it. clientsim cannot connect as
 one: bots authenticate over HTTP through `pkg/botauth`, not the user JWT path,
 and a dotted `.bot` account spans subject tokens, which panics
 `subject.UserSubscriptionList` before a request is made. The query drops them
-on the stored flag so the bulk never leaves the server; a second pass in Go
-drops them on the account shape, catching a row whose flag was never stored.
+on the stored flag so the bulk never leaves the server; the Go pass below
+catches a row whose flag was never stored, on the account's own shape.
 
-**The shape rule is the subject-token rule, not a `.bot` rule.** Any account
-carrying a dot, wildcard or whitespace rune panics the pod, and not all of them
-are bots: `k6.test-1.user` is a leftover subscription row from another load
-tool, with no `isBot` flag and no `.bot` suffix to mark it as anything else.
-Such a row used to fail the **whole** export at `pkg/poolartifact`'s validator —
-one stale record blocking every run against that site. It is now excluded like
-any other account clientsim cannot connect as: dropped, counted, and reported.
+**The shape rule runs in Go, not in the aggregation.** Any account carrying a
+dot, wildcard, whitespace or control rune panics `subject.UserSubscriptionList`
+inside the pod, and not all of them are bots: `k6.test-1.user` is a leftover
+subscription row from another load tool, with no `isBot` flag and no `.bot`
+suffix to mark it as anything else. Such a row used to fail the **whole** export
+at `pkg/poolartifact`'s validator — one stale record blocking every run against
+that site. It is now skipped like any other account clientsim cannot connect as.
 
-- The regex is the weaker half of `subject.IsValidAccountToken` on purpose
-  (`\s` is the ASCII spaces; the validator refuses every unicode space and
-  control rune), so the Go pass stays the belt. Weaker in that direction costs
-  a `--limit` slot; stronger would drop accounts the pods can serve.
-- Every exclusion sits **before** the `$limit`, because the bound counts
-  whatever reaches it: an account removed afterwards has already consumed a
-  slot, and `--limit N` quietly returns fewer than N.
-- What was dropped is visible, not silent: a `WARN` line with the count and up
-  to five examples, and `skippedAccounts` in the manifest. An export whose
-  entire population is unusable fails and names what it dropped, which is a
-  different fix from a site nobody uses.
+Why the rule is not a `$match` regex, which would keep those rows off the wire:
+
+- **A regex is a second dialect of `subject.IsValidAccountToken`**, evaluated by
+  another engine (MongoDB runs PCRE2, and `\s` does not mean the same thing in
+  every one). Two spellings of one rule can only drift, and the account that
+  panics a pod is exactly the one they disagree about.
+- **The layer that bounds `--limit` has to be the layer that judges
+  eligibility.** The bound counts whatever reaches it, so an account removed
+  afterwards has already consumed a slot and `--limit N` quietly delivers fewer.
+- **The layer that judges is the only one that can report.** Filtering
+  server-side hides the row from every counter downstream: the WARN, the result
+  and the manifest would all read zero while the pool silently shrank.
+
+So the cursor is walked rather than `$limit`ed — each account checked with the
+validator, usable ones accumulating until the bound, the rest counted with a
+bounded sample. The Job's heap holds the bound, not the population. The cost is
+a `$sort` the server cannot cap at top-N (over the grouped keys `$group` already
+materialised) and unusable rows crossing the wire, a rounding error beside the
+population itself.
+
+The `isBot` flag stays a query filter because it defines *which subscriptions
+count* — like `roomType`, `open` and `origin` — rather than judging an account
+string. What it removes is the population's definition, not a skip.
+
+**Skipping is not silent.** A `WARN` with the count and up to five examples,
+`skippedAccounts` in the manifest, and — when a site's whole population is
+unusable — a failure that names what was dropped, which is a different fix from
+a site nobody uses.
 
 The sort is load-bearing, not cosmetic — see the sharding note above.
 

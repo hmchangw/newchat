@@ -1,17 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/poolartifact"
-	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type fakeAccountSource struct {
@@ -19,31 +19,33 @@ type fakeAccountSource struct {
 	accounts []string
 	err      error
 	gotSite  string
-	// raw models a source that does NOT filter for itself — the case the Go
-	// belt exists for. The Mongo source excludes unusable accounts in the
-	// pipeline, so on that path the belt has nothing left to remove and
-	// nothing to report; a test about what the belt catches has to come from
-	// a source that hands it something.
+	// raw models a source that neither filters nor reports — the case the belt
+	// under it exists for. The Mongo source does both, so on that path the
+	// belt finds nothing; a test about what the belt catches needs a source
+	// that hands it something.
 	raw bool
 }
 
-// channelSubscriberAccounts mirrors the pipeline: bots are excluded BEFORE the
-// bound, so the bound counts only accounts that survive to the artifact. A fake
-// that ignored the bound would make every test about it vacuous.
-func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID string, limit int) ([]string, error) {
+// channelSubscriberAccounts mirrors the real source: it applies the usability
+// rule, bounds on what SURVIVES it, and reports what it dropped. A fake that
+// filtered without reporting would make every test about the skip evidence
+// pass while production reported nothing — the defect this contract exists to
+// prevent.
+func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID string, limit int) (poolCandidates, error) {
 	f.gotSite = siteID
 	f.gotLimit = limit
 	if f.err != nil {
-		return nil, f.err
+		return poolCandidates{}, f.err
 	}
-	out := f.accounts
-	if !f.raw {
-		out, _ = dropUnusable(out)
+	if f.raw {
+		// A source that does none of it, which is what the belt is for.
+		return poolCandidates{Accounts: f.accounts}, nil
 	}
-	if n := cursorLimit(limit); len(out) > n {
-		out = out[:n]
+	kept, skipped := dropUnusable(f.accounts)
+	if n := cursorLimit(limit); len(kept) > n {
+		kept = kept[:n]
 	}
-	return out, nil
+	return poolCandidates{Accounts: kept, Skipped: len(skipped), Sample: sampleAccounts(skipped)}, nil
 }
 
 type fakePublisher struct {
@@ -244,7 +246,8 @@ func TestExportPool_RejectsAPopulationOfOnlyBots(t *testing.T) {
 		RunID: "run-1", SiteID: "site-a",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no accounts")
+	assert.Contains(t, err.Error(), "none a clientsim run can connect as")
+	assert.Contains(t, err.Error(), "weather.site-a.bot", "the failure must name what it dropped")
 }
 
 // --run-id was validated as a single path segment; siteId, its immediate
@@ -339,6 +342,8 @@ func TestPoolExportQuery_DescribesThePipelineItRuns(t *testing.T) {
 	assert.Contains(t, poolExportQuery, "group", "the exclusion runs after the group; the record must say so")
 	assert.NotContains(t, poolExportQuery, `u.isBot: {$ne: true}} ->`,
 		"that shape claims the flag is filtered on rows before dedup, which is the bug this pipeline fixed")
+	assert.Contains(t, poolExportQuery, "usable",
+		"the bound applies to usable accounts, and the record has to say which selection produced the pool")
 }
 
 // The staging population holds leftovers from other load tools —
@@ -369,15 +374,16 @@ func TestExportPool_DropsAccountsThatCannotBeSubjectTokens(t *testing.T) {
 // one stale k6 row to the whole site, the operator has to be able to see it.
 // The export reports what it dropped so the caller can say so.
 func TestExportPool_ReportsWhatItSkipped(t *testing.T) {
-	src := &fakeAccountSource{raw: true, accounts: []string{"anna", "k6.test-1.user", "weather.site-a.bot", ""}}
+	src := &fakeAccountSource{accounts: []string{"anna", "k6.test-1.user", "weather.site-a.bot", ""}}
 	pub := newFakePublisher()
 
 	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
 		RunID: "run-1", SiteID: "site-a",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"k6.test-1.user", "weather.site-a.bot", ""}, res.Skipped,
-		"every dropped account is reported, whatever disqualified it")
+	assert.Equal(t, 3, res.Skipped, "every dropped account is counted, whatever disqualified it")
+	assert.Equal(t, []string{"k6.test-1.user", "weather.site-a.bot", ""}, res.SkippedSample,
+		"and quoted, so an operator knows which leftover to clean up")
 
 	man, ok := pub.blobs["site-a/run-1/pool-manifest.json"].(poolManifest)
 	require.True(t, ok)
@@ -390,7 +396,7 @@ func TestExportPool_ReportsWhatItSkipped(t *testing.T) {
 // subscriptions at all. The two need different fixes: one is a load-tool
 // leftover to clean up, the other is a site nobody uses.
 func TestExportPool_RejectsAPopulationOfOnlyUnusableAccounts(t *testing.T) {
-	src := &fakeAccountSource{raw: true, accounts: []string{"k6.test-1.user", "k6.test-2.user"}}
+	src := &fakeAccountSource{accounts: []string{"k6.test-1.user", "k6.test-2.user"}}
 
 	_, err := exportPool(context.Background(), src, newFakePublisher(), poolExportOptions{
 		RunID: "run-1", SiteID: "site-a",
@@ -416,31 +422,6 @@ func TestExportPool_LimitIsHonouredWhenAnUnusableAccountSitsInTheHead(t *testing
 	assert.Equal(t, []string{"aaa", "ccc", "ddd"}, pub.artifacts[res.ArtifactKey].Accounts)
 }
 
-// The pipeline and the Go belt encode the same rule in two languages: a regex
-// Mongo evaluates, and the validator the subject builders use. They must agree
-// on every account either can see, or the layer that is wrong decides — and
-// which one that is depends on where the account came from.
-func TestUnusableAccountPattern_AgreesWithTheSubjectValidator(t *testing.T) {
-	re := regexp.MustCompile(unusableAccountPattern)
-
-	for _, account := range []string{
-		"anna", "p_admin", "user-1", "UPPER", "ac.count", "k6.test-1.user",
-		"weather.site-a.bot", "has space", "wild*card", "tail>token", "tab\tname",
-	} {
-		assert.Equal(t, !subject.IsValidAccountToken(account), re.MatchString(account),
-			"account %q must be judged the same by the pipeline regex and the validator", account)
-	}
-
-	// The one asymmetry, stated so it cannot be mistaken for a bug: the regex
-	// is the weaker half, so these reach the Go belt and are dropped there.
-	// Weaker in this direction costs a --limit slot; stronger would drop
-	// accounts the pods can serve.
-	for _, account := range []string{"ctrl\x07name", "nbsp\u00a0name"} {
-		assert.False(t, subject.IsValidAccountToken(account), "%q is not a usable account", account)
-		assert.False(t, re.MatchString(account), "%q is the belt's to catch, not the pipeline's", account)
-	}
-}
-
 // The sample is what an operator acts on, and the cap is what keeps one bad
 // site from turning a warning into a wall of names. Both halves matter: a cap
 // that also truncated a short list would hide the only account there was.
@@ -451,4 +432,152 @@ func TestSampleAccounts_CapsWithoutTruncatingShortLists(t *testing.T) {
 	long := []string{"a", "b", "c", "d", "e", "f", "g"}
 	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, sampleAccounts(long))
 	assert.Len(t, long, 7, "sampling must not modify the caller's slice")
+}
+
+// The belt's job, stated as a test: a source that hands over unusable accounts
+// without saying so must not be able to make the export lie. Whatever the belt
+// removes is added to the same count and sample the source contributes to.
+func TestExportPool_CountsWhatTheBeltCatchesFromAnUnreportingSource(t *testing.T) {
+	src := &fakeAccountSource{raw: true, accounts: []string{"anna", "k6.test-1.user", "bob"}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna", "bob"}, pub.artifacts[res.ArtifactKey].Accounts)
+	assert.Equal(t, 1, res.Skipped)
+	assert.Equal(t, []string{"k6.test-1.user"}, res.SkippedSample)
+
+	man := pub.blobs[res.ManifestKey].(poolManifest)
+	assert.Equal(t, 1, man.SkippedAccounts)
+}
+
+// Both layers can skip in the same export: the source drops what it saw while
+// bounding, the belt drops what the source let through. The count is the sum,
+// or one of them is invisible.
+func TestExportPool_SumsSkipsFromBothLayers(t *testing.T) {
+	// A source that reports one skip of its own, then hands over an account it
+	// did not check.
+	src := &countingSource{accounts: []string{"anna", "k6.test-2.user"}, skipped: 1, sample: []string{"k6.test-1.user"}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{RunID: "run-1", SiteID: "site-a"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Skipped, "the source's count and the belt's must both be in it")
+	assert.Equal(t, []string{"k6.test-1.user", "k6.test-2.user"}, res.SkippedSample)
+	assert.Equal(t, 2, pub.blobs[res.ManifestKey].(poolManifest).SkippedAccounts)
+}
+
+type countingSource struct {
+	accounts []string
+	skipped  int
+	sample   []string
+}
+
+func (c *countingSource) channelSubscriberAccounts(_ context.Context, _ string, _ int) (poolCandidates, error) {
+	return poolCandidates{Accounts: c.accounts, Skipped: c.skipped, Sample: c.sample}, nil
+}
+
+// The WARN is the only place an operator sees the leftovers before the run
+// starts, so it is worth pinning: it fires when something was skipped, carries
+// the count and the sample, and stays quiet when nothing was.
+func TestLogSkippedAccounts(t *testing.T) {
+	capture := func(skipped int, sample []string) string {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+		logSkippedAccounts("site-a", skipped, sample)
+		return buf.String()
+	}
+
+	line := capture(2, []string{"k6.test-1.user", ""})
+	assert.Contains(t, line, `"level":"WARN"`)
+	assert.Contains(t, line, `"skipped":2`)
+	assert.Contains(t, line, "k6.test-1.user", "the sample is what tells an operator which leftover to clean up")
+
+	assert.Empty(t, capture(0, nil), "an export that skipped nothing must not warn about it")
+}
+
+// fakeRows is a cursor over a fixed, sorted candidate list — what the
+// aggregation hands the walk, without a database.
+type fakeRows struct {
+	accounts  []string
+	i         int
+	decodeErr error
+	err       error
+	// stopped records how far the walk read, which is the whole point of
+	// bounding client-side: the rest of the population is never transferred.
+	stopped int
+}
+
+func (f *fakeRows) Next(context.Context) bool {
+	if f.i >= len(f.accounts) {
+		return false
+	}
+	f.i++
+	f.stopped = f.i
+	return true
+}
+
+func (f *fakeRows) Decode(v any) error {
+	if f.decodeErr != nil {
+		return f.decodeErr
+	}
+	row, ok := v.(*struct {
+		Account string `bson:"_id"`
+	})
+	if !ok {
+		return fmt.Errorf("unexpected decode target %T", v)
+	}
+	row.Account = f.accounts[f.i-1]
+	return nil
+}
+
+func (f *fakeRows) Err() error { return f.err }
+
+// The bound counts accounts a run can CONNECT AS. A bound applied to rows —
+// which is what a server-side $limit does — stops early on a site whose sorted
+// head holds leftovers, and hands back fewer accounts than asked while
+// eligible ones sit unread.
+func TestCollectUsableAccounts_BoundsOnUsableAccountsNotRows(t *testing.T) {
+	rows := &fakeRows{accounts: []string{"anna", "k6.test-1.user", "has space", "bob", "cleo", "dave"}}
+
+	got, err := collectUsableAccounts(context.Background(), rows, 3)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna", "bob", "cleo"}, got.Accounts, "--limit 3 must deliver 3 usable accounts")
+	assert.Equal(t, 2, got.Skipped)
+	assert.Equal(t, []string{"k6.test-1.user", "has space"}, got.Sample)
+	assert.Equal(t, 5, rows.stopped, "the walk stops at the bound rather than reading the whole site")
+}
+
+// Every rune class the validator refuses, including the two no practical regex
+// spells out the same way in two engines — which is why the rule lives here
+// rather than in the aggregation.
+func TestCollectUsableAccounts_SkipsEveryUnusableShape(t *testing.T) {
+	rows := &fakeRows{accounts: []string{
+		"", "anna", "ctrl\x07name", "has space", "k6.test-1.user", "nbsp name",
+		"tail>token", "weather.site-a.bot", "wild*card",
+	}}
+
+	got, err := collectUsableAccounts(context.Background(), rows, 100)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna"}, got.Accounts)
+	assert.Equal(t, 8, got.Skipped)
+	assert.Len(t, got.Sample, skipSample, "the sample is capped; the count carries the scale")
+}
+
+// A cursor that fails mid-walk must not look like a small population: an
+// export built on a truncated read would publish a pool nobody selected.
+func TestCollectUsableAccounts_PropagatesCursorErrors(t *testing.T) {
+	_, err := collectUsableAccounts(context.Background(),
+		&fakeRows{accounts: []string{"anna"}, err: errors.New("connection reset")}, 10)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read channel subscribers")
+
+	_, err = collectUsableAccounts(context.Background(),
+		&fakeRows{accounts: []string{"anna"}, decodeErr: errors.New("type mismatch")}, 10)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode channel subscriber")
 }

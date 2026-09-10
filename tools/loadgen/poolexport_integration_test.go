@@ -74,21 +74,19 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 	// on: every pod slices the same array, so an unstable one would overlap
 	// or skip accounts across pods.
 	//
-	// legacy.site-a.bot is here on purpose. Bots are excluded at two layers
-	// and this is only the first: the query keys on the stored u.isBot flag,
-	// so it drops x7 and x8 but cannot see x9, whose flag was never written.
-	// Asserting it away here would hide which layer is carrying the rule.
-	// legacy.site-a.bot is gone from the source now: the pipeline excludes the
-	// ".bot" suffix too, because the server-side $limit bounds whatever
-	// reaches it and a bot counted against --limit under-delivers the run.
-	assert.Equal(t, []string{"anna", "bob", "carol"}, got)
+	// The query drops x7 and x8 on the stored u.isBot flag, and mixedbot on
+	// the grouped $max of it; those never leave the server and are the
+	// population's definition, not skipped accounts. legacy.site-a.bot and the
+	// empty account carry no flag, so the cursor walks them — and counts them.
+	assert.Equal(t, []string{"anna", "bob", "carol"}, got.Accounts)
+	assert.Equal(t, 2, got.Skipped)
+	assert.Equal(t, []string{"", "legacy.site-a.bot"}, got.Sample)
 
-	// dropUnusable is now a belt with nothing to remove on this path — which is
-	// the point: it stays for any other source, and composing it must not
-	// change what the Mongo source already returned.
-	kept, skipped := dropUnusable(got)
-	assert.Equal(t, got, kept)
-	assert.Empty(t, skipped)
+	// dropUnusable is the belt, and on this path it must find nothing:
+	// composing it cannot change what the source already returned.
+	kept, beltSkipped := dropUnusable(got.Accounts)
+	assert.Equal(t, got.Accounts, kept)
+	assert.Empty(t, beltSkipped)
 }
 
 // An account with BOTH a Teams room and an ordinary channel is still a valid
@@ -106,7 +104,7 @@ func TestIntegration_MongoPoolSource_KeepsAccountsWithANonTeamsChannel(t *testin
 
 	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 0)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"mixed"}, got)
+	assert.Equal(t, []string{"mixed"}, got.Accounts)
 }
 
 // A site with nobody must come back empty rather than erroring, so the caller
@@ -116,7 +114,8 @@ func TestIntegration_MongoPoolSource_EmptySite(t *testing.T) {
 	db := testutil.MongoDB(t, "poolexport-empty")
 	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(context.Background(), "site-none", 0)
 	require.NoError(t, err)
-	assert.Empty(t, got)
+	assert.Empty(t, got.Accounts)
+	assert.Zero(t, got.Skipped)
 }
 
 // The $limit bounds whatever reaches it, so anything the Go pass would remove
@@ -140,8 +139,9 @@ func TestIntegration_MongoPoolSource_LimitSkipsUnusableAccounts(t *testing.T) {
 
 	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 1)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"zoe"}, got,
+	assert.Equal(t, []string{"zoe"}, got.Accounts,
 		"limit=1 must return the first USABLE account, not the first row")
+	assert.Equal(t, 2, got.Skipped, "the two it walked past are counted, not forgotten")
 }
 
 // The failure that motivated this: a staging site holds "k6.test-1.user", a
@@ -150,10 +150,11 @@ func TestIntegration_MongoPoolSource_LimitSkipsUnusableAccounts(t *testing.T) {
 // tokens, so poolartifact refused the artifact and the whole export died on one
 // stale row.
 //
-// The exclusion is in the pipeline, not only in the Go pass, for the reason
-// the empty account and the ".bot" suffix are: $limit bounds whatever reaches
-// it, so an account removed afterwards has already consumed a slot.
-func TestIntegration_MongoPoolSource_ExcludesAccountsThatSpanSubjectTokens(t *testing.T) {
+// The rule runs in Go, on the rows this cursor walks, so the same layer that
+// bounds --limit is the one that counts what it passed over. A regex in the
+// pipeline would filter them where nothing can count them — and would be a
+// second dialect of subject.IsValidAccountToken, evaluated by another engine.
+func TestIntegration_MongoPoolSource_SkipsAndCountsUnusableAccounts(t *testing.T) {
 	db := testutil.MongoDB(t, "poolexporttokens")
 	ctx := context.Background()
 
@@ -166,20 +167,91 @@ func TestIntegration_MongoPoolSource_ExcludesAccountsThatSpanSubjectTokens(t *te
 			"u": bson.M{"account": "wild*card"}},
 		bson.M{"_id": "k4", "siteId": "site-a", "roomType": "channel",
 			"u": bson.M{"account": "tail>token"}},
-		bson.M{"_id": "k5", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "anna"}},
-		bson.M{"_id": "k6", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "zoe"}},
+		// The two a Mongo-side regex would have missed: \s in a pattern is the
+		// ASCII spaces, and neither engine spells out every control rune.
+		// Here they are just accounts the validator refuses, like any other.
+		bson.M{"_id": "k5", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "nbsp\u00a0user"}},
+		bson.M{"_id": "k6", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "ctrl\x07user"}},
+		// A row with no account at all: not an account, so not a skipped one.
+		bson.M{"_id": "k7", "siteId": "site-a", "roomType": "channel", "u": bson.M{}},
+		bson.M{"_id": "k8", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "anna"}},
+		bson.M{"_id": "k9", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "zoe"}},
 	})
 	require.NoError(t, err)
 
 	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 0)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"anna", "zoe"}, got)
+	assert.Equal(t, []string{"anna", "zoe"}, got.Accounts)
+	assert.Equal(t, 6, got.Skipped, "every unusable account is counted, whatever kind of rune broke it")
+	assert.Contains(t, got.Sample, "k6.test-1.user")
 
-	// "anna" is the only account before "k6.test-1.user" in sort order, so a
-	// pipeline that leaves the junk in returns it for limit=2 and the Go pass
-	// hands back one account for a --limit of two.
+	// The bound counts usable accounts. All six unusable rows sort between
+	// "anna" and "zoe", so a bound applied to ROWS would stop at "ctrl\x07user"
+	// and hand back one account for a --limit of two.
 	bounded, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 2)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"anna", "zoe"}, bounded,
+	assert.Equal(t, []string{"anna", "zoe"}, bounded.Accounts,
 		"--limit 2 must deliver 2 usable accounts, not 2 rows minus the unusable ones")
+}
+
+// The reviewer's question, asked of the real thing: does what Mongo returns
+// reach the artifact, the result and the manifest consistently? Every unit
+// test above this line runs against a fake source that could agree with a
+// wrong implementation.
+func TestIntegration_ExportPool_FromMongo_PublishesAndAccountsForEverySkip(t *testing.T) {
+	db := testutil.MongoDB(t, "poolexportend2end")
+	ctx := context.Background()
+
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "e1", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "anna"}},
+		bson.M{"_id": "e2", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "bob"}},
+		bson.M{"_id": "e3", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "k6.test-1.user"}},
+		bson.M{"_id": "e4", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "weather.site-a.bot", "isBot": true}},
+	})
+	require.NoError(t, err)
+
+	pub := newFakePublisher()
+	res, err := exportPool(ctx, mongoPoolSource{db: db}, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.NoError(t, err, "one leftover row must not fail an export the rest of the site can serve")
+
+	art := pub.artifacts[res.ArtifactKey]
+	require.NotNil(t, art)
+	assert.Equal(t, []string{"anna", "bob"}, art.Accounts)
+	assert.Equal(t, 2, res.Accounts)
+
+	// The evidence, end to end: the flagged bot never leaves the server, so it
+	// is the query's business and not a skip; "k6.test-1.user" is walked past
+	// by the cursor, counted there, and surfaces in all three places.
+	assert.Equal(t, 1, res.Skipped)
+	assert.Equal(t, []string{"k6.test-1.user"}, res.SkippedSample)
+	man, ok := pub.blobs[res.ManifestKey].(poolManifest)
+	require.True(t, ok)
+	assert.Equal(t, 1, man.SkippedAccounts)
+	assert.Equal(t, 2, man.Accounts)
+}
+
+// A site whose channel subscribers are all leftovers fails — and names one, so
+// the operator knows it is junk data to clean rather than a site nobody uses.
+func TestIntegration_ExportPool_FromMongo_FailsNamingAnUnusableSite(t *testing.T) {
+	db := testutil.MongoDB(t, "poolexportjunk")
+	ctx := context.Background()
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "j1", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "k6.test-1.user"}},
+		bson.M{"_id": "j2", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "k6.test-2.user"}},
+	})
+	require.NoError(t, err)
+
+	_, err = exportPool(ctx, mongoPoolSource{db: db}, newFakePublisher(), poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "k6.test-1.user")
 }
