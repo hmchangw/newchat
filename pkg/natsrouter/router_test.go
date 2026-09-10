@@ -941,3 +941,26 @@ func TestRegisterDegradesUndeclaredMethodToOther(t *testing.T) {
 		return assert.ObjectsAreEqual([]string{"_OTHER"}, serverCallMethods(t, reader))
 	}, time.Second, 10*time.Millisecond)
 }
+
+// MethodNone is the RegisterVoid marker and the zero RPCMethod, so a
+// request/reply registration can pass it — the compiler requires the argument
+// but cannot require a meaningful one. It must still record: the route has a
+// reply and a real round trip, so losing its duration series would be a silent
+// telemetry hole. Bounded to _OTHER, the same as any out-of-vocabulary value.
+func TestRegisterWithMethodNoneStillRecords(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "test", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open", natsmetrics.MethodNone,
+		func(_ *Context, _ testReq) (*testResp, error) { return &testResp{Greeting: "ok"}, nil })
+
+	_, err := nc.Request(context.Background(),
+		"chat.user.alice.request.room.room-a.site-a.open", []byte(`{"name":"ok"}`), 2*time.Second)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]string{"_OTHER"}, serverCallMethods(t, reader))
+	}, time.Second, 10*time.Millisecond)
+}

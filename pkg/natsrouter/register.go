@@ -37,7 +37,7 @@ func Register[Req, Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(method, pattern, []HandlerFunc{handler})
+	r.addRoute(method, true, pattern, []HandlerFunc{handler})
 }
 
 // RegisterNoBody subscribes a handler that takes no request body, under method.
@@ -57,7 +57,7 @@ func RegisterNoBody[Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(method, pattern, []HandlerFunc{handler})
+	r.addRoute(method, true, pattern, []HandlerFunc{handler})
 }
 
 // RegisterOptionalBody is like Register, under method, but treats a zero-length payload as the zero-value request instead of a bad_request (e.g. sso.refresh).
@@ -85,7 +85,7 @@ func RegisterOptionalBody[Req, Resp any](
 		c.ReplyJSON(resp)
 	})
 
-	r.addRoute(method, pattern, []HandlerFunc{handler})
+	r.addRoute(method, true, pattern, []HandlerFunc{handler})
 }
 
 // RegisterVoid subscribes a handler that processes a request without replying.
@@ -110,7 +110,7 @@ func RegisterVoid[Req any](
 		}
 	})
 
-	r.addRoute(natsmetrics.MethodNone, pattern, []HandlerFunc{handler})
+	r.addRoute(natsmetrics.MethodNone, false, pattern, []HandlerFunc{handler})
 }
 
 // replyErr classifies err and sends the errcode envelope on the reply subject.

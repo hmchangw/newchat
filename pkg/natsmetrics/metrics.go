@@ -652,8 +652,9 @@ func normalizeOperation(operation Operation) Operation {
 }
 
 // normalizeRPCMethod bounds the rpc.method label. A method outside the
-// vocabulary records as MethodOther rather than minting a series from an
-// unbounded value; addRPCRoute has already logged the defect at registration.
+// vocabulary — including the zero value, only reachable by passing MethodNone to
+// a request/reply registration — records as MethodOther rather than minting a
+// series from an unbounded value, or vanishing.
 func normalizeRPCMethod(method RPCMethod) RPCMethod {
 	if method.Valid() {
 		return method

@@ -199,7 +199,12 @@ func (r *Router) Use(mw ...HandlerFunc) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) addRoute(method natsmetrics.RPCMethod, pattern string, handlers []HandlerFunc) {
+// recordRPC comes from the registration shape, never from the method value: a
+// request/reply route always records, and only RegisterVoid opts out. Deciding
+// it from the value instead would let a caller pass natsmetrics.MethodNone to
+// Register and silently lose the route's duration series — the compiler requires
+// the argument, but it cannot require a meaningful one.
+func (r *Router) addRoute(method natsmetrics.RPCMethod, recordRPC bool, pattern string, handlers []HandlerFunc) {
 	rt := parsePattern(pattern)
 	all := make([]HandlerFunc, 0, len(r.middleware)+1+len(handlers))
 	all = append(all, r.middleware...)
@@ -209,12 +214,12 @@ func (r *Router) addRoute(method natsmetrics.RPCMethod, pattern string, handlers
 	all = append(all, traceIdentity(r.siteID))
 	all = append(all, handlers...)
 
-	// record is nil for a RegisterVoid route, which declares no method. Resolving
-	// it once here rather than per message is the point of the change: the label
-	// used to come from parsing m.Subject on every dispatch, which ran even with
-	// metrics disabled and recognised only the room and orgs subject families.
+	// record is nil for a RegisterVoid route. Resolving it once here rather than
+	// per message is the point of the change: the label used to come from parsing
+	// m.Subject on every dispatch, which ran even with metrics disabled and
+	// recognised only the room and orgs subject families.
 	var record func(context.Context, time.Duration, natsmetrics.RequestResult)
-	if method != natsmetrics.MethodNone {
+	if recordRPC {
 		record = func(ctx context.Context, d time.Duration, result natsmetrics.RequestResult) {
 			r.metrics.HandledRequest(ctx, method, d, result)
 		}

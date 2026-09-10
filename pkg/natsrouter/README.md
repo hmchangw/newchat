@@ -196,10 +196,17 @@ func RegisterVoid[Req any](
 `method` is the `rpc.method` label the route's `rpc_server_call_duration_seconds`
 samples carry. It comes from the closed vocabulary in
 `pkg/natsmetrics/rpcmethod.go` — one constant per route — so a route that
-declares none does not compile. A value outside the vocabulary (only reachable
-by writing `natsmetrics.RPCMethod("…")` deliberately) records as semconv's
-`_OTHER` rather than minting an unbounded label; nothing panics, because metrics
-are opt-in and a telemetry defect should not stop a service.
+*omits* it does not compile. The compiler cannot require a *meaningful* value,
+so the two ways to supply a meaningless one are both bounded rather than silent:
+`natsmetrics.RPCMethod("…")` written deliberately, and `natsmetrics.MethodNone`
+(the `RegisterVoid` marker, which is also the zero value) both record as
+semconv's `_OTHER`. Nothing panics, and nothing silently stops recording —
+metrics are opt-in, so a telemetry defect should neither stop a service nor
+quietly delete a series.
+
+Whether a route records at all is decided by which function registered it, never
+by the method value: `Register`, `RegisterNoBody` and `RegisterOptionalBody`
+always record, and only `RegisterVoid` opts out.
 
 `RegisterVoid` takes no `method` and records no sample: with no reply subject
 there is no round trip to time, and timing local handler cost under a
