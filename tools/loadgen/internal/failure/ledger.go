@@ -731,8 +731,10 @@ func (l *Ledger) scheduleNextLocked(operation *Operation) bool {
 		if _, observed := operation.Observations[observer]; observed {
 			continue
 		}
-		definition, _ := ObserverDefinitionFor(observer)
-		if definition.Mode == ObserverQuery {
+		// Read the registry directly: this runs per enqueue per expected
+		// observer under l.mu, and ObserverDefinitionFor clones Effects that
+		// nothing here reads.
+		if observerRegistry[observer].Mode == ObserverQuery {
 			if operation.NextVerifyAt().IsZero() {
 				operation.SetNextVerifyAt(operation.VerifyAfter)
 			}
