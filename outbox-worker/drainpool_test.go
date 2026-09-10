@@ -32,7 +32,7 @@ func TestDrainPool_WaitCoversPumpGoroutine(t *testing.T) {
 	iter := &stubIter{stopped: make(chan struct{})}
 	sem := make(chan struct{}, 1)
 	var wg sync.WaitGroup
-	drainPool(context.Background(), iter, sem, &wg, func(context.Context, jetstream.Msg) {}, func(error) {})
+	drainPool(iter, sem, &wg, func(context.Context, jetstream.Msg) {}, func(error) {})
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
@@ -71,7 +71,7 @@ func TestDrainPool_ReportsTerminalErrorToStopped(t *testing.T) {
 	got := make(chan error, 1)
 	sem := make(chan struct{}, 1)
 	var wg sync.WaitGroup
-	drainPool(context.Background(), dyingIter{}, sem, &wg, func(context.Context, jetstream.Msg) {},
+	drainPool(dyingIter{}, sem, &wg, func(context.Context, jetstream.Msg) {},
 		func(err error) { got <- err })
 	wg.Wait()
 

@@ -92,18 +92,36 @@ func (g *Guard) Check() health.Check {
 	}}
 }
 
+// signaller is the one method SelfShutdown needs from a process, so the
+// undeliverable-signal path is reachable from a test.
+type signaller interface{ Signal(os.Signal) error }
+
+// Swapped in tests; os.Exit and os.FindProcess in production.
+var (
+	findProcess = func(pid int) (signaller, error) { return os.FindProcess(pid) }
+	exitProcess = os.Exit
+)
+
 // SelfShutdown raises SIGTERM on this process so shutdown.WaitOn runs the
 // ordinary graceful teardown — draining in-flight work rather than abandoning
-// it, which os.Exit here would do. The caller must have armed the signal
+// it, which an immediate exit would do. The caller must have armed the signal
 // (shutdown.Signals) BEFORE starting any loop able to call this, or the signal
 // keeps its default disposition and kills the process outright.
+//
+// When the signal cannot be delivered, exit non-zero rather than return: the
+// guard has already latched its hook, so nothing retries the restart, and a
+// worker left running would sit ready-but-idle — the failure this package
+// exists to eliminate. A drain lost to a hard exit is the lesser cost, and the
+// non-zero status is what a restart-on-failure supervisor needs to see.
 func SelfShutdown() {
-	p, err := os.FindProcess(os.Getpid())
+	p, err := findProcess(os.Getpid())
 	if err != nil {
-		slog.Error("cannot signal self after consume loop stopped; the pod will stay up and idle", "error", err)
+		slog.Error("cannot find own process to signal after consume loop stopped; exiting non-zero so the supervisor replaces the pod", "error", err)
+		exitProcess(1)
 		return
 	}
 	if err := p.Signal(syscall.SIGTERM); err != nil {
-		slog.Error("cannot signal self after consume loop stopped; the pod will stay up and idle", "error", err)
+		slog.Error("cannot signal self after consume loop stopped; exiting non-zero so the supervisor replaces the pod", "error", err)
+		exitProcess(1)
 	}
 }

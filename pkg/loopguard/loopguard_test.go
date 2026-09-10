@@ -145,24 +145,6 @@ func TestGuard_WatchClosedReportsWhenChannelCloses(t *testing.T) {
 	assert.Error(t, g.Check().Probe(context.Background()))
 }
 
-// SelfShutdown must raise SIGTERM on this very process so shutdown.WaitOn runs
-// the ordinary graceful teardown. The test arms a handler first, exactly as a
-// worker must, so the signal is observed rather than fatal.
-func TestSelfShutdown_RaisesSIGTERMOnOwnProcess(t *testing.T) {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM)
-	defer signal.Stop(sig)
-
-	SelfShutdown()
-
-	select {
-	case got := <-sig:
-		assert.Equal(t, syscall.SIGTERM, got)
-	case <-time.After(2 * time.Second):
-		t.Fatal("SelfShutdown must deliver SIGTERM to the current process")
-	}
-}
-
 // capturingHandler records the level and message of everything logged, so a
 // test can assert HOW a stop was reported rather than merely that it was.
 type capturingHandler struct {
@@ -210,3 +192,78 @@ func captureLogs(t *testing.T) *capturingHandler {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return h
 }
+
+// A self-signal that cannot be delivered must not leave the worker alive. The
+// hook has already latched `fired`, so nothing retries the restart: without a
+// non-zero exit the pod stays up consuming nothing, which is the exact failure
+// this package exists to eliminate. Readiness alone never replaces a queue
+// worker, since nothing routes traffic to it.
+func TestSelfShutdown_ExitsNonZeroWhenProcessLookupFails(t *testing.T) {
+	restoreFind := findProcess
+	restoreExit := exitProcess
+	t.Cleanup(func() { findProcess = restoreFind; exitProcess = restoreExit })
+
+	findProcess = func(int) (signaller, error) { return nil, errors.New("no such process") }
+	codes := make(chan int, 1)
+	exitProcess = func(code int) { codes <- code }
+
+	SelfShutdown()
+
+	select {
+	case code := <-codes:
+		assert.Equal(t, 1, code, "a failed self-signal must exit non-zero so the supervisor replaces the pod")
+	default:
+		t.Fatal("SelfShutdown must exit when it cannot find its own process")
+	}
+}
+
+// Same contract when the process is found but the signal itself is rejected.
+func TestSelfShutdown_ExitsNonZeroWhenSignalFails(t *testing.T) {
+	restoreFind := findProcess
+	restoreExit := exitProcess
+	t.Cleanup(func() { findProcess = restoreFind; exitProcess = restoreExit })
+
+	findProcess = func(int) (signaller, error) { return refusingSignaller{}, nil }
+	codes := make(chan int, 1)
+	exitProcess = func(code int) { codes <- code }
+
+	SelfShutdown()
+
+	select {
+	case code := <-codes:
+		assert.Equal(t, 1, code, "a rejected SIGTERM must exit non-zero rather than leave the worker idle")
+	default:
+		t.Fatal("SelfShutdown must exit when the signal is rejected")
+	}
+}
+
+// A delivered signal must NOT exit: the whole point is to let shutdown.WaitOn
+// run the graceful teardown and drain in-flight work.
+func TestSelfShutdown_DoesNotExitWhenSignalSucceeds(t *testing.T) {
+	restoreExit := exitProcess
+	t.Cleanup(func() { exitProcess = restoreExit })
+	exited := make(chan int, 1)
+	exitProcess = func(code int) { exited <- code }
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM)
+	defer signal.Stop(sig)
+
+	SelfShutdown()
+
+	select {
+	case <-sig:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SelfShutdown must deliver SIGTERM to the current process")
+	}
+	select {
+	case code := <-exited:
+		t.Fatalf("a delivered signal must not force an exit, got exit(%d)", code)
+	default:
+	}
+}
+
+// refusingSignaller stands in for a process whose Signal call is rejected.
+type refusingSignaller struct{}
+
+func (refusingSignaller) Signal(os.Signal) error { return errors.New("operation not permitted") }

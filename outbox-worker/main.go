@@ -148,7 +148,7 @@ func main() {
 		cg := loopguard.New("outbox-concurrent-"+dest, loopguard.SelfShutdown)
 		guards = append(guards, cg)
 		checks = append(checks, cg.Check())
-		drainPool(ctx, iter, sem, &wg, process, cg.Stopped)
+		drainPool(iter, sem, &wg, process, cg.Stopped)
 
 		ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
 		if err != nil {
@@ -219,7 +219,7 @@ func main() {
 // exits when the iterator is Stop()'d on shutdown, or on a terminal iterator
 // error; either way the cause goes to stopped, which is what turns a dead lane
 // into a readiness failure and a restart (pkg/loopguard).
-func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg), stopped func(error)) {
+func drainPool(iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg), stopped func(error)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
