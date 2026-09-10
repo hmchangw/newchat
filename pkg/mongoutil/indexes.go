@@ -14,11 +14,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// IndexEnsureTimeout bounds the index creation or verification a service runs
-// at startup. Like the startup ping, it keeps a MongoDB that answers hello but
-// stalls commands from hanging startup; a service that starts degraded also
-// keeps this attempt best-effort, so the budget is what its consumers wait on
-// before the first write re-asks for the index.
+// IndexEnsureTimeout bounds a service's startup index work, so a MongoDB that answers hello but
+// stalls commands cannot hang startup. A degradable service keeps the attempt best-effort.
 const IndexEnsureTimeout = 30 * time.Second
 
 // WarnMissingIndexes warns (never errors) for each named index absent from coll.
@@ -30,14 +27,8 @@ func WarnMissingIndexes(ctx context.Context, coll *mongo.Collection, names ...st
 	warnMissingIndexes(ctx, coll, false, names...)
 }
 
-// WarnMissingUniqueIndexes is WarnMissingIndexes for an index whose UNIQUENESS
-// the dependent relies on, not merely its presence. WarnMissingIndexes matches
-// on name alone, so a same-keys index that lost its constraint passes it
-// silently — and a write path that reads the duplicate-key error as "already
-// exists" then accepts duplicates. This warns distinctly when the index exists
-// but is not unique. Still warn-only: a degradable service cannot even list
-// indexes during the outage it starts through, so blocking here would block
-// exactly then.
+// WarnMissingUniqueIndexes also warns when a named index exists but lost its unique option, which the
+// name-only WarnMissingIndexes passes silently. Warn-only: a degradable service cannot list indexes mid-outage.
 func WarnMissingUniqueIndexes(ctx context.Context, coll *mongo.Collection, names ...string) {
 	warnMissingIndexes(ctx, coll, true, names...)
 }
@@ -63,9 +54,7 @@ func warnMissingIndexes(ctx context.Context, coll *mongo.Collection, requireUniq
 	}
 }
 
-// listIndexUniqueness maps each index name on coll to whether it is unique.
-// The unique option is absent (not false) on a non-unique index, so a missing
-// field decodes to false, which is the honest reading.
+// listIndexUniqueness maps index name to unique; the option is absent on a non-unique index, so false is honest.
 func listIndexUniqueness(ctx context.Context, coll *mongo.Collection) (map[string]bool, error) {
 	cur, err := coll.Indexes().List(ctx)
 	if err != nil {
@@ -80,9 +69,7 @@ func listIndexUniqueness(ctx context.Context, coll *mongo.Collection) (map[strin
 			Unique bool   `bson:"unique"`
 		}
 		if err := cur.Decode(&idx); err != nil {
-			// Skipped deliberately: an undecodable index document is reported
-			// as absent by the caller, which is the safe reading; the cause is
-			// kept at debug so it can be found without failing the listing.
+			// Skipped deliberately: the caller reads an undecodable index as absent; the cause stays at debug.
 			slog.DebugContext(ctx, "mongo: skipping undecodable index document",
 				"collection", coll.Name(), "error", err)
 			continue
@@ -95,9 +82,7 @@ func listIndexUniqueness(ctx context.Context, coll *mongo.Collection) (map[strin
 	return have, nil
 }
 
-// missingUniqueIndexes partitions names into those absent from have and those
-// present without the unique option. have maps index name to unique. Order
-// follows names, so the warnings are stable.
+// missingUniqueIndexes partitions names into absent and present-but-not-unique, in names order.
 func missingUniqueIndexes(have map[string]bool, names ...string) (absent, nonUnique []string) {
 	for _, n := range names {
 		unique, ok := have[n]
@@ -111,18 +96,11 @@ func missingUniqueIndexes(have map[string]bool, names ...string) (absent, nonUni
 	return absent, nonUnique
 }
 
-// ErrIndexSpecConflict reports that an index with the same keys but a
-// different spec already exists and EnsureIndex was not allowed to repair it.
+// ErrIndexSpecConflict reports a same-keys index with a different spec that EnsureIndex may not repair.
 var ErrIndexSpecConflict = errors.New("conflicting index exists; its owner service must repair it")
 
-// EnsureIndex creates model on coll without ever dropping anything: a no-op when
-// an identical index exists, ErrIndexSpecConflict (wrapped) when a same-keys
-// index with a different spec does. For a service that co-creates an index it
-// does not own — a degradable dependent confirming a unique key before a write
-// — so that only the owner's EnsureIndexWithRepair is destructive: two
-// repairers racing on one dirty index can drop each other's freshly built
-// replacement, and a dependent that has already marked the index confirmed
-// would then write without it.
+// EnsureIndex creates model without ever dropping anything: a no-op on an identical index, a wrapped
+// ErrIndexSpecConflict on a same-keys conflict. Only the owner repairs (two repairers can drop each other's rebuild).
 func EnsureIndex(ctx context.Context, coll *mongo.Collection, model mongo.IndexModel) error {
 	_, err := coll.Indexes().CreateOne(ctx, model)
 	switch {

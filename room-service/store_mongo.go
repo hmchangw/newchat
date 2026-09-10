@@ -123,14 +123,8 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// Unique logical key for subscriptions. Same retry-idempotency rationale.
 	unique(s.subscriptions, "subscriptions (roomId,u.account)",
 		bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}})
-	// room-service owns the thread_rooms unique key too. message-worker's
-	// CreateThreadRoom blind-inserts and reads the duplicate-key error as "this
-	// thread already exists", so without this constraint every reply creates its
-	// own thread room. message-worker co-creates it with this same spec and
-	// confirms it on demand before each insert (its indexGate), but never
-	// repairs: this fail-fast service is the only repairer (see
-	// mongoutil.EnsureIndex). Ahead of the read-path indexes so the shared
-	// startup budget (mongoutil.IndexEnsureTimeout) reaches it.
+	// Owned here: message-worker's CreateThreadRoom reads the duplicate-key error as "exists", co-creates
+	// this same spec, and never repairs. Ahead of the read-path indexes so the startup budget reaches it.
 	unique(s.threadRooms, "thread_rooms (parentMessageId)",
 		bson.D{{Key: "parentMessageId", Value: 1}})
 	// users.account + apps.assistant_name_idx are owned by user-service; verify + warn only.

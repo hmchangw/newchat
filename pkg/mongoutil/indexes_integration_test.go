@@ -105,15 +105,13 @@ func TestListIndexUniqueness_ReportsUniqueFlagPerIndex(t *testing.T) {
 	have, err := listIndexUniqueness(ctx, coll)
 	require.NoError(t, err)
 
-	// A same-named index that lost its constraint must read as present-but-not-unique,
-	// never as unique: that is the whole reason this exists beside WarnMissingIndexes.
+	// An index that lost its constraint must read as present-but-not-unique: the reason this exists.
 	assert.False(t, have["plain_1"], "plain_1 must be listed as non-unique")
 	assert.True(t, have["strict_1"], "strict_1 must be listed as unique")
 	assert.Contains(t, have, "_id_")
 }
 
-// recordHandler captures each slog message with its index attribute so a test
-// can assert which warning named which index.
+// recordHandler captures each slog message with its index attribute.
 type recordHandler struct {
 	mu      sync.Mutex
 	entries []struct{ msg, index string }
@@ -162,9 +160,8 @@ func (h *recordHandler) indexesWarned() map[string][]string {
 	return out
 }
 
-// WarnMissingUniqueIndexes must tell apart an absent index from one that exists
-// under the expected name but lost its unique option — the case the name-only
-// WarnMissingIndexes passes silently — and stay quiet for a unique one.
+// WarnMissingUniqueIndexes must tell an absent index from one that lost its unique option (which the
+// name-only WarnMissingIndexes passes silently) and stay quiet for a unique one.
 func TestWarnMissingUniqueIndexes_DistinguishesAbsentFromNonUnique(t *testing.T) {
 	ctx := context.Background()
 	coll := testutil.MongoDB(t, "mongoutil_warn_unique_test").Collection("things")
@@ -183,9 +180,7 @@ func TestWarnMissingUniqueIndexes_DistinguishesAbsentFromNonUnique(t *testing.T)
 	assert.Equal(t, []string{"loose_1"}, got["not unique"])
 }
 
-// WarnMissingIndexes shares the listing with the unique variant, so an
-// unlistable collection yields one "cannot list" warning, never a misleading
-// "missing" per name.
+// WarnMissingIndexes shares the listing: an unlistable collection yields one "cannot list", not "missing" per name.
 func TestWarnMissingIndexes_ReportsOnlyAbsentNames(t *testing.T) {
 	ctx := context.Background()
 	coll := testutil.MongoDB(t, "mongoutil_warn_missing_test").Collection("things")
@@ -201,9 +196,7 @@ func TestWarnMissingIndexes_ReportsOnlyAbsentNames(t *testing.T) {
 	assert.Empty(t, got["not unique"], "the name-only variant never judges uniqueness")
 }
 
-// EnsureIndex is the non-destructive sibling of EnsureIndexWithRepair: it
-// creates an absent index, is a no-op on an identical one, and refuses to touch
-// a same-keys index with a different spec — that repair belongs to the owner.
+// EnsureIndex creates an absent index, no-ops on an identical one, and never repairs a conflicting one.
 func TestEnsureIndex_CreatesAbsentAndRefusesToRepair(t *testing.T) {
 	ctx := context.Background()
 	unique := mongo.IndexModel{Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true)}

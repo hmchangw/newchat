@@ -64,10 +64,8 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// A persistent failure — duplicate data that no index build can get past —
-// must not turn every thread write and every NAK redelivery into another
-// collection-wide createIndexes: the failure is remembered and re-probed once
-// per backoff interval, doubling up to a cap.
+// A persistent failure (duplicate data no index build gets past) must not turn every write and NAK
+// redelivery into another collection-wide createIndexes: remembered, re-probed once per doubling interval.
 func TestIndexGate_Ready_BacksOffAfterFailure(t *testing.T) {
 	var calls atomic.Int32
 	g := newIndexGate("t (k)", func(context.Context) error {
@@ -127,8 +125,7 @@ func TestIndexGate_Ready_ConcurrentCallersEnsureOnce(t *testing.T) {
 	assert.EqualValues(t, 1, calls.Load(), "waiters serialize behind one ensure instead of racing it")
 }
 
-// A failed attempt is shared with the callers already waiting on it: they must
-// not each repeat the same network round trip before they can NAK.
+// Waiters share a failed attempt instead of each repeating the round trip before they can NAK.
 func TestIndexGate_Ready_WaitersShareOneFailedAttempt(t *testing.T) {
 	var calls atomic.Int32
 	started := make(chan struct{})
@@ -154,9 +151,7 @@ func TestIndexGate_Ready_WaitersShareOneFailedAttempt(t *testing.T) {
 		wg.Add(1)
 		go func(i int) { defer wg.Done(); errs[i] = g.Ready(context.Background()) }(i)
 	}
-	// Whether a waiter reaches the in-flight attempt or arrives just after it
-	// failed makes no difference: the former shares the flight, the latter gets
-	// the remembered failure, and neither starts a new probe.
+	// Sharing the flight or getting the remembered failure: either way no waiter starts a new probe.
 	close(release)
 	wg.Wait()
 
@@ -171,11 +166,8 @@ func TestIndexGate_Ready_WaitersShareOneFailedAttempt(t *testing.T) {
 	assert.EqualValues(t, 2, calls.Load())
 }
 
-// The on-demand ensure must not inherit the caller's open-ended context: a
-// MongoDB that answers server selection but stalls the command would otherwise
-// hold every thread reply behind one blocked attempt. Nor may a leader that is
-// cancelled mid-attempt take the attempt down with it: the leader is released
-// with its own error and the attempt completes for everyone else.
+// The ensure must not inherit the caller's open-ended context (a stalled command would hold every
+// reply), nor may a leader cancelled mid-attempt abort it: the leader is released, the attempt completes.
 func TestIndexGate_Ready_BoundsTheEnsureAndDetachesCancellation(t *testing.T) {
 	var sawDeadline bool
 	var cancelledWhileRunning bool
@@ -202,9 +194,7 @@ func TestIndexGate_Ready_BoundsTheEnsureAndDetachesCancellation(t *testing.T) {
 	assert.False(t, cancelledWhileRunning, "the leader's cancellation did not reach the attempt")
 }
 
-// Startup asks both gates in turn under one shared 30s context. A gate must
-// not replace a sooner caller deadline with its own full budget, or two
-// sequential ensures could take twice the advertised bound.
+// A gate must not replace a sooner caller deadline with its own budget: startup shares one across both.
 func TestIndexGate_Ready_HonoursASoonerCallerDeadline(t *testing.T) {
 	var seen time.Time
 	g := newIndexGate("t (k)", func(ctx context.Context) error {
@@ -218,8 +208,7 @@ func TestIndexGate_Ready_HonoursASoonerCallerDeadline(t *testing.T) {
 	assert.False(t, seen.After(callerDeadline), "ensure's deadline %v must not exceed the caller's %v", seen, callerDeadline)
 }
 
-// A handler whose context is cancelled mid-wait — the consumer draining — must
-// be released promptly, while the shared attempt keeps running for the others.
+// A waiter cancelled mid-wait (consumer draining) is released promptly; the shared attempt runs on.
 func TestIndexGate_Ready_ReleasesACancelledWaiterWithoutAbortingTheAttempt(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

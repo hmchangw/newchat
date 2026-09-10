@@ -193,8 +193,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 }
 
 func setupMongo(t *testing.T) *mongo.Database {
-	// No seeded indexes: the store's gates create the unique keys it depends
-	// on before the first write (same spec as room-service's).
+	// No seeded indexes: the store's gates create the unique keys before the first write.
 	return testutil.MongoDB(t, "message_worker_test")
 }
 
@@ -876,12 +875,8 @@ func TestThreadStoreMongo_CreateThreadRoom(t *testing.T) {
 	})
 }
 
-// On a fresh site nothing orders room-service's EnsureIndexes before the first
-// thread reply here, and CreateThreadRoom's duplicate-key branch is what stops a
-// second reply opening a second thread room. message-worker therefore creates
-// the unique key itself on a healthy start, alongside room-service, rather than
-// only verifying it — the rule is that a degradable service must not be the
-// SOLE creator, not that it may not create at all.
+// On a fresh site nothing orders room-service's EnsureIndexes before the first reply, so message-worker
+// creates the key itself too: a degradable service must not be the SOLE creator, not never a creator.
 func TestThreadStoreMongo_EnsureIndexes_CreatesParentMessageIDUniqueOnFreshDB(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_fresh_idx_test") // no seeded index
@@ -893,11 +888,8 @@ func TestThreadStoreMongo_EnsureIndexes_CreatesParentMessageIDUniqueOnFreshDB(t 
 		"thread_rooms.parentMessageId must be unique after EnsureIndexes on an index-less DB")
 }
 
-// The recovery race: a worker whose startup EnsureIndexes failed (MongoDB was
-// down) resumes consuming the moment MongoDB is back, before room-service has
-// restarted and built the key. CreateThreadRoom therefore confirms the unique
-// index itself before the first insert, so two replies to one parent can never
-// both land — the second must read as errThreadRoomExists.
+// The recovery race: a worker whose startup ensure failed resumes before room-service has rebuilt
+// the key, so CreateThreadRoom confirms it first and a second reply to one parent reads as exists.
 func TestThreadStoreMongo_CreateThreadRoom_ConfirmsIndexBeforeInsertOnFreshDB(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_gate_test") // no seeded index, EnsureIndexes never called
@@ -918,13 +910,7 @@ func TestThreadStoreMongo_CreateThreadRoom_ConfirmsIndexBeforeInsertOnFreshDB(t 
 	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_rooms"))["parentMessageId:1"])
 }
 
-// The same recovery race applies to thread_subscriptions: two concurrent
-// upserts on one (threadRoomId, userAccount) both insert when the unique key
-// is absent, and those duplicates make room-service's later index build fail.
-// The document-creating writes confirm the key first.
-// A same-keys index with the wrong spec is room-service's to repair, never this
-// worker's (see mongoutil.EnsureIndex): the gate refuses the write (NAK) and
-// leaves the index alone.
+// A conflicting index is room-service's to repair: the gate refuses the write (NAK) and leaves it alone.
 func TestThreadStoreMongo_CreateThreadRoom_RefusesToRepairAConflictingIndex(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_gate_conflict_test")
@@ -947,6 +933,7 @@ func TestThreadStoreMongo_CreateThreadRoom_RefusesToRepairAConflictingIndex(t *t
 	assert.False(t, specs["parentMessageId:1"], "and it must still be non-unique: nothing was repaired")
 }
 
+// Without the unique key two concurrent upserts on one (threadRoomId, userAccount) both insert.
 func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_sub_gate_test") // no seeded index, EnsureIndexes never called

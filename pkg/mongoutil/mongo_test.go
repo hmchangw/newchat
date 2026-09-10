@@ -153,9 +153,8 @@ func TestIsAuthError(t *testing.T) {
 		{"socket reset mid-ping (0, NetworkError) is an outage", mongo.CommandError{Code: 0, Labels: []string{"NetworkError"}}, false},
 		{"plain error", errors.New("server selection error"), false},
 		{"context deadline", context.DeadlineExceeded, false},
-		// The warm-pool shape: the ping's own error is a code-0 network-style
-		// CommandError over driver.Error{0}, joined with the pool's rejection.
-		// A first-match search stops at code 0; the rejection is still in the tree.
+		// The warm-pool shape: a code-0 CommandError over driver.Error{0} joined with the pool's
+		// rejection. A first-match search stops at code 0; the rejection is still in the tree.
 		{"non-auth command error joined before the rejection", fmt.Errorf("%w (pool cleared: %w)",
 			mongo.CommandError{Code: 0, Wrapped: driver.Error{Code: 0, Wrapped: errors.New("pool cleared")}},
 			fmt.Errorf("handshake: %w", driver.Error{Code: 18})), true},
@@ -222,9 +221,7 @@ func TestStartupPingBound(t *testing.T) {
 	}
 }
 
-// fastFailPool and warmPool keep the failing-connect tests quick: one pooled
-// connection (or a warm floor of five, for the pool-cleared race) and a short
-// server-selection bound.
+// fastFailPool and warmPool keep the failing-connect tests quick with a short server-selection bound.
 func fastFailPool() PoolConfig {
 	return PoolConfig{MaxPoolSize: 1, ServerSelectionTimeout: 300 * time.Millisecond}
 }
@@ -233,8 +230,7 @@ func warmPool() PoolConfig {
 	return PoolConfig{MaxPoolSize: 10, MinPoolSize: 5, ServerSelectionTimeout: 300 * time.Millisecond}
 }
 
-// requireAuthRejected asserts that Connect refused to start on rejected
-// credentials: an auth error and no client (connect never returns both).
+// requireAuthRejected asserts an auth error and no client (connect never returns both).
 func requireAuthRejected(t *testing.T, client *mongo.Client, err error, msgAndArgs ...any) {
 	t.Helper()
 	require.Error(t, err, msgAndArgs...)
@@ -242,10 +238,8 @@ func requireAuthRejected(t *testing.T, client *mongo.Client, err error, msgAndAr
 	assert.True(t, isAuthError(err), "expected an auth rejection, got: %v", err)
 }
 
-// With a warm floor (MinPoolSize > 0) the pool's background connections race
-// the startup ping to the server; the first one to fail SCRAM clears the pool,
-// and the ping's own checkout then sees only the cleared pool — never the auth
-// error. Rejected credentials must still be fatal on that path.
+// With a warm floor the pool's background connections race the ping: the first SCRAM failure clears
+// the pool and the ping sees only that, never the auth error. Rejection must still be fatal.
 func TestConnect_WarmPool_RejectedCredentialsFatalEvenWithDegradedStart(t *testing.T) {
 	srv := startFakeMongod(t)
 	for i := 0; i < 5; i++ {
@@ -262,8 +256,7 @@ func TestConnect_ColdPool_RejectedCredentialsFatalEvenWithDegradedStart(t *testi
 	requireAuthRejected(t, client, err)
 }
 
-// A cancelled or expired caller context is the caller asking to stop, not
-// MongoDB being down: degraded start must not turn it into a live client.
+// A cancelled or expired caller ctx is the caller asking to stop; degraded start must not return a live client.
 func TestConnect_CallerCancelled_FailsEvenWithDegradedStart(t *testing.T) {
 	srv := startFakeMongod(t)
 	ctx, cancel := context.WithCancel(context.Background())

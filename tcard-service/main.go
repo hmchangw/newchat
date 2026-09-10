@@ -80,9 +80,7 @@ func run() error {
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
 		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
-		// Degraded start here means a NotReady pod, not a cache-served one: the
-		// card cache is an in-memory snapshot, RefreshLoop retries the load every
-		// cacheRetryInterval, and /readyz flips on the first success.
+		// Degraded start means NotReady, not cache-served: RefreshLoop retries the card load and /readyz flips on success.
 		mongoutil.WithDegradedStart())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)

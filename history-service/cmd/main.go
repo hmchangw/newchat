@@ -145,8 +145,7 @@ func main() {
 		mongoutil.WithPool(cfg.Pool),
 		mongoutil.WithObservability(sdk),
 		mongoutil.WithReadPreference(readPref),
-		// Cassandra is the primary datastore here: serve history through an
-		// outage rather than crashloop.
+		// Cassandra is the primary datastore: serve history through an outage rather than crashloop.
 		mongoutil.WithDegradedStart(),
 	)
 	if err != nil {

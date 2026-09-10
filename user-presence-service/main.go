@@ -132,9 +132,8 @@ func main() {
 
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
 		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
-		// Valkey is the presence store; users are a pod-local L1 only, so a cold
-		// degraded pod serves the presence write path in full and pays a
-		// ServerSelectionTimeout per user lookup until MongoDB returns.
+		// Valkey is the presence store and users are a pod-local L1 only, so a cold degraded pod serves
+		// the write path in full and pays a ServerSelectionTimeout per user lookup until MongoDB returns.
 		mongoutil.WithDegradedStart())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)

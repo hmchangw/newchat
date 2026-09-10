@@ -30,8 +30,7 @@ func TestConnectRead_ConnectsAndReads(t *testing.T) {
 	assert.EqualValues(t, 1, n)
 }
 
-// unreachableMongo is an address nothing listens on, with a server-selection
-// bound short enough to keep these tests quick.
+// unreachableMongo: nothing listens there, and the short connect bound keeps these tests quick.
 const unreachableMongo = "mongodb://127.0.0.1:1/?connectTimeoutMS=200"
 
 func TestConnect_UnreachableMongo_FailsWithoutDegradedStart(t *testing.T) {
@@ -72,19 +71,15 @@ func TestConnect_ReachableMongo_DegradedStartUnchangedHappyPath(t *testing.T) {
 	assert.EqualValues(t, 1, n)
 }
 
-// testutil's Mongo runs without --auth and has no users, so any credentials
-// fail SCRAM with AuthenticationFailed (18): the server answered and said no.
-// That is the one startup failure WithDegradedStart must not tolerate.
+// testutil's Mongo has no --auth, so any credentials fail SCRAM with 18: the server answered and said no.
 func TestConnect_RejectedCredentials_FatalEvenWithDegradedStart(t *testing.T) {
 	client, err := Connect(context.Background(), testutil.MongoURI(t), "nobody", "wrong",
 		WithPool(fastFailPool()), WithDegradedStart())
 	requireAuthRejected(t, client, err)
 }
 
-// With MinPoolSize > 0 the pool's warm-up connections fail SCRAM before the
-// ping's checkout, which then sees only the cleared pool; the rejection has to
-// come from the pool event instead. The unit test covers the race against an
-// in-process fake; this one proves the real server's error shape is matched.
+// With MinPoolSize > 0 the warm-up connections fail SCRAM before the ping's checkout, so the rejection
+// must come from the pool event; the unit test covers the race, this one the real server's error shape.
 func TestConnect_RejectedCredentials_FatalWithWarmPool(t *testing.T) {
 	client, err := Connect(context.Background(), testutil.MongoURI(t), "nobody", "wrong",
 		WithPool(warmPool()), WithDegradedStart())

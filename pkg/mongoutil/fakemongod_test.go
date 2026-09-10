@@ -11,13 +11,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/x/bsonx/bsoncore"
 )
 
-// fakeMongod is a minimal wire-protocol server for unit tests that need the
-// driver to complete a handshake and then be REFUSED at authentication: it
-// answers hello/isMaster as a writable primary and every saslStart with
-// AuthenticationFailed (18). A monitor connection never authenticates, so the
-// topology reads healthy while every pooled connection fails SCRAM — exactly the
-// shape of a real server rejecting our credentials. It runs in-process, so
-// these tests are unit tests: no container, no real database.
+// fakeMongod is an in-process wire-protocol server that answers hello as a writable primary and rejects
+// every saslStart with AuthenticationFailed (18): the shape of a real server refusing our credentials.
 type fakeMongod struct {
 	ln net.Listener
 }
@@ -140,12 +135,10 @@ func (f *fakeMongod) serve(conn net.Conn) {
 	}
 }
 
-// maxWireMessage caps a message the fake will read; the replies it builds are
-// a few hundred bytes and the driver's requests are smaller still.
+// maxWireMessage caps a message the fake will read; real traffic here is a few hundred bytes.
 const maxWireMessage = 1 << 20
 
-// wireLen narrows a reply length to the header's uint32 field. The replies
-// here are tiny, so the check is defensive; a panic beats a truncated frame.
+// wireLen narrows a reply length to the header's uint32 field; a panic beats a truncated frame.
 func wireLen(n int) uint32 {
 	if n < 0 || n > maxWireMessage {
 		panic("fakeMongod: reply length out of range")

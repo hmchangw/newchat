@@ -4844,11 +4844,7 @@ func TestMongoStore_RebalanceSection_SpacesByTen(t *testing.T) {
 	}
 }
 
-// room-service owns the thread_rooms unique key: message-worker's
-// CreateThreadRoom blind-inserts and reads the duplicate-key error as "this
-// thread already exists". message-worker co-creates the key and confirms it
-// on demand before each insert, but never repairs a conflicting one; this
-// fail-fast service is the owner, and the only repairer.
+// room-service owns and is the only repairer of thread_rooms' unique key; message-worker co-creates, never repairs.
 func TestEnsureIndexes_ThreadRoomsParentMessageIDUnique_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -4860,15 +4856,13 @@ func TestEnsureIndexes_ThreadRoomsParentMessageIDUnique_Integration(t *testing.T
 		"thread_rooms parentMessageId must exist and be unique")
 }
 
-// A pre-existing non-unique index on the same keys must be repaired, not left
-// in place — EnsureIndexWithRepair drops and recreates it to the unique spec.
+// A pre-existing non-unique index on the same keys is dropped and recreated to the unique spec.
 func TestEnsureIndexes_ThreadRoomsRepairsNonUniqueIndex_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	ctx := context.Background()
 
-	// Same keys, no constraint: the name is parentMessageId_1 either way, which
-	// is what makes this a spec conflict rather than a second index.
+	// Same keys, no constraint: the name is parentMessageId_1 either way, so this is a spec conflict.
 	_, err := db.Collection("thread_rooms").Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "parentMessageId", Value: 1}},
 	})

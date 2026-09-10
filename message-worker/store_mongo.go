@@ -27,9 +27,7 @@ type threadStoreMongo struct {
 	threadRooms         *mongo.Collection
 	threadSubscriptions *mongo.Collection
 	subscriptions       *mongo.Collection
-	// parentIndex gates CreateThreadRoom on thread_rooms.parentMessageId being
-	// confirmed unique, and subIndex gates the thread_subscriptions writes that
-	// create documents on (threadRoomId, userAccount); see indexGate.
+	// parentIndex and subIndex gate the document-creating writes on their unique index; see indexGate.
 	parentIndex *indexGate
 	subIndex    *indexGate
 }
@@ -40,9 +38,7 @@ var _ ThreadStore = (*threadStoreMongo)(nil)
 func newThreadStoreMongo(db *mongo.Database) *threadStoreMongo {
 	threadRooms := db.Collection("thread_rooms")
 	threadSubscriptions := db.Collection("thread_subscriptions")
-	// Same specs as room-service, the owner, so the idempotent creates cannot
-	// conflict. mongoutil.EnsureIndex is non-destructive, so a same-keys index
-	// with a different spec closes the gate (NAK) until room-service repairs it.
+	// Same specs as room-service, the owner; a conflicting index closes the gate until room-service repairs it.
 	return &threadStoreMongo{
 		threadRooms:         threadRooms,
 		threadSubscriptions: threadSubscriptions,
@@ -53,8 +49,7 @@ func newThreadStoreMongo(db *mongo.Database) *threadStoreMongo {
 	}
 }
 
-// uniqueIndexGate gates on a unique index over keys on coll, created
-// non-destructively.
+// uniqueIndexGate gates on a unique index over keys on coll, created non-destructively.
 func uniqueIndexGate(coll *mongo.Collection, keys bson.D) *indexGate {
 	fields := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -69,30 +64,8 @@ func uniqueIndexGate(coll *mongo.Collection, keys bson.D) *indexGate {
 	})
 }
 
-// indexGate confirms an index once, on demand, and retries until it does. A
-// degraded start means the startup EnsureIndexes can fail and the worker keeps
-// running; when MongoDB returns, parked replies resume before room-service —
-// still crashlooping, then backing off — has restarted and built the key. A
-// write that relies on the constraint therefore asks the gate first: it pays
-// one CreateOne on the first call after recovery (a no-op when the index is
-// already there) and an atomic load thereafter. A failed ensure is returned to
-// the caller, whose NAK retries the message later, so no insert ever runs
-// against an unconfirmed constraint.
-//
-// Callers that arrive while an attempt is in flight share its result instead
-// of each repeating the round trip before they can NAK. A failure is then
-// remembered for a backoff interval (indexRetryMin doubling to indexRetryMax):
-// callers inside it get the remembered error and only the first caller after
-// it probes again, so duplicate data that no index build can get past does
-// not turn every write and NAK redelivery into another collection-wide
-// createIndexes. The attempt runs under its own deadline — the caller's when
-// that is sooner, so startup's shared budget is honoured across both gates,
-// else mongoutil.IndexEnsureTimeout — detached from the caller's cancellation, so a
-// MongoDB that answers server selection but stalls the command cannot hold
-// every reply behind one open-ended call, and one cancelled caller cannot fail
-// the attempt its waiters share. A waiter whose own context ends (a draining
-// consumer) is released with its context error while the attempt runs on for
-// the rest.
+// indexGate confirms an index on demand, so a degraded worker that resumes before room-service has
+// rebuilt the key NAKs instead of inserting. All callers share one bounded, detached attempt (see wait).
 type indexGate struct {
 	name   string // names the index in errors
 	ensure func(context.Context) error
@@ -100,16 +73,14 @@ type indexGate struct {
 	flight singleflight.Group
 	ready  atomic.Bool
 
-	// mu guards the remembered failure: the attempt writes it inside the
-	// flight, while Ready's fast path reads it from any caller.
+	// mu guards the remembered failure: written inside the flight, read by any caller's fast path.
 	mu      sync.Mutex
 	lastErr error
 	retryAt time.Time
 	backoff time.Duration
 }
 
-// indexRetryMin and indexRetryMax bound the backoff between probes after a
-// failed ensure.
+// indexRetryMin and indexRetryMax bound the backoff between probes after a failed ensure.
 const (
 	indexRetryMin = 5 * time.Second
 	indexRetryMax = time.Minute
@@ -130,9 +101,8 @@ func (g *indexGate) Ready(ctx context.Context) error {
 	return nil
 }
 
-// wait joins or leads one attempt, or returns the remembered failure while its
-// retry-after has not elapsed (checked before the flight too, so a write during
-// the window does not start a goroutine only to read it).
+// wait returns the remembered failure inside its retry-after, else joins or leads one attempt. A waiter
+// whose ctx ends is released while the attempt runs on for the rest, so one cancelled caller fails nobody.
 func (g *indexGate) wait(ctx context.Context) error {
 	if err := g.remembered(); err != nil {
 		return err
@@ -171,8 +141,8 @@ func (g *indexGate) remembered() error {
 	return nil
 }
 
-// remember records a failure and schedules the next probe, doubling the
-// interval up to indexRetryMax.
+// remember records a failure and schedules the next probe, doubling the interval up to indexRetryMax,
+// so duplicate data no index build gets past cannot turn every NAK redelivery into a createIndexes.
 func (g *indexGate) remember(err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -181,11 +151,9 @@ func (g *indexGate) remember(err error) {
 	g.retryAt = g.now().Add(g.backoff)
 }
 
-// attemptContext detaches the caller's cancellation and bounds the attempt by
-// the caller's deadline when that is sooner than mongoutil.IndexEnsureTimeout.
+// attemptContext detaches the caller's cancellation; deadline = min(caller's, now+IndexEnsureTimeout).
 func (g *indexGate) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	// Wall clock, not g.now: the deadline is enforced by the driver's timers,
-	// while g.now only paces the retry-after (and is faked in tests).
+	// Wall clock, not g.now: the driver enforces this deadline; g.now only paces the retry-after.
 	deadline := time.Now().Add(mongoutil.IndexEnsureTimeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
@@ -193,22 +161,8 @@ func (g *indexGate) attemptContext(ctx context.Context) (context.Context, contex
 	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
-// EnsureIndexes asserts the unique constraints this store's writes depend on.
-// Both are owned by room-service, which fails fast when MongoDB is unreachable
-// and so is the service relied on to assert them; this one starts degraded, so
-// its own attempt is skipped exactly when an outage makes that most likely.
-//
-// thread_rooms.parentMessageId is also created here, with the identical spec
-// (idempotent): on a fresh site nothing orders room-service's startup before
-// the first thread reply, and CreateThreadRoom's duplicate-key branch is the
-// only thing keeping a second reply from opening a second thread room — a hole
-// that, once two rows land, no later index build can close without a manual
-// dedupe. The rule is that a degradable service must not be the SOLE creator.
-// This startup call is best-effort; the writes re-ask the same gates, so a
-// failure here (MongoDB down) only defers the confirmation to the first write
-// after recovery. thread_subscriptions gets the same treatment: without its
-// unique key two concurrent upserts on one (threadRoomId, userAccount) both
-// insert, and the duplicates then make the owner's later index build fail.
+// EnsureIndexes co-creates both unique keys with room-service's spec: on a fresh site the first reply can
+// beat the owner's start, and duplicates once landed block any later build. Best-effort; writes re-ask.
 func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 	if err := s.parentIndex.Ready(ctx); err != nil {
 		return err
@@ -217,8 +171,7 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 }
 
 func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
-	// The duplicate-key branch below is the thread's identity guarantee, so the
-	// index is confirmed before the insert; a failure NAKs (see indexGate).
+	// The duplicate-key branch is the thread's identity guarantee, so the index is confirmed first.
 	if err := s.parentIndex.Ready(ctx); err != nil {
 		return err
 	}
