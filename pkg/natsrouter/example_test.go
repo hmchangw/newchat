@@ -32,7 +32,7 @@ func Example_basicUsage() {
 	natsrouter.Register[RenameRoomRequest, Room](
 		router,
 		"chat.user.{account}.request.room.{roomID}.site-a.rename",
-		natsmetrics.MethodRenameRoom,
+		natsmetrics.RPCMethod("rename_room"),
 		func(c *natsrouter.Context, req RenameRoomRequest) (*Room, error) {
 			return &Room{ID: c.Param("roomID"), Name: req.Name}, nil
 		},
@@ -52,7 +52,7 @@ func Example_withMiddleware() {
 	natsrouter.RegisterNoBody[Settings](
 		router,
 		"chat.user.{account}.request.settings.get",
-		natsmetrics.MethodGetSettings,
+		natsmetrics.RPCMethod("get_settings"),
 		func(c *natsrouter.Context) (*Settings, error) {
 			return &Settings{Account: c.Param("account"), Locale: "zh-TW"}, nil
 		},
@@ -94,7 +94,7 @@ func Example_noBodyHandler() {
 	natsrouter.RegisterNoBody[Room](
 		router,
 		"chat.user.{account}.request.room.{roomID}.site-a.open",
-		natsmetrics.MethodOpenRoom,
+		natsmetrics.RPCMethod("open_room"),
 		func(c *natsrouter.Context) (*Room, error) {
 			roomID := c.Param("roomID")
 			return &Room{ID: roomID, Name: "General"}, nil
@@ -110,7 +110,7 @@ func Example_errorHandling() {
 	natsrouter.Register(
 		router,
 		"chat.user.{account}.request.room.{roomID}.site-a.open",
-		natsmetrics.MethodOpenRoom,
+		natsmetrics.RPCMethod("open_room"),
 		func(c *natsrouter.Context, req OpenRoomRequest) (*Room, error) {
 			room := findRoom(c.Param("roomID"))
 			if room == nil {
@@ -169,7 +169,7 @@ func Example_customMiddleware() {
 	natsrouter.Register[SetSettingsRequest, Settings](
 		router,
 		"chat.user.{account}.request.settings.set",
-		natsmetrics.MethodSetSettings,
+		natsmetrics.RPCMethod("set_settings"),
 		func(c *natsrouter.Context, req SetSettingsRequest) (*Settings, error) {
 			return &Settings{Account: c.Param("account"), Locale: req.Locale}, nil
 		},

@@ -20,7 +20,7 @@ func TestRouter_Shutdown_StopsAcceptingNewRequests(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-shutdown")
 
-	Register(r, "test.shutdown.{id}", natsmetrics.MethodGetSettings,
+	Register(r, "test.shutdown.{id}", natsmetrics.RPCMethod("get_settings"),
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hi"}, nil
 		})
@@ -50,7 +50,7 @@ func TestRouter_Shutdown_WaitsForInflightHandlers(t *testing.T) {
 	release := make(chan struct{})
 	handlerFinished := make(chan struct{})
 
-	Register(r, "test.slow.{id}", natsmetrics.MethodSetSettings,
+	Register(r, "test.slow.{id}", natsmetrics.RPCMethod("set_settings"),
 		func(c *Context, req testReq) (*testResp, error) {
 			close(handlerReached)
 			<-release
@@ -114,7 +114,7 @@ func TestRouter_Shutdown_RespectsContextDeadline(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done) // unblock the handler when test ends
 
-	Register(r, "test.stuck.{id}", natsmetrics.MethodListPriorityContacts,
+	Register(r, "test.stuck.{id}", natsmetrics.RPCMethod("list_priority_contacts"),
 		func(c *Context, req testReq) (*testResp, error) {
 			close(handlerReached)
 			<-done
@@ -139,7 +139,7 @@ func TestRouter_Shutdown_RespectsContextDeadline(t *testing.T) {
 func TestRouter_Shutdown_Idempotent(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-shutdown-idempotent")
-	Register(r, "test.idem.{id}", natsmetrics.MethodAddPriorityContact,
+	Register(r, "test.idem.{id}", natsmetrics.RPCMethod("add_priority_contact"),
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{}, nil
 		})
@@ -155,16 +155,16 @@ func TestRouter_Shutdown_Idempotent(t *testing.T) {
 // registers both — but reusing one here would collapse the routes into a
 // single Routes() line and make the test's own bookkeeping ambiguous.
 var testMethods = []natsmetrics.RPCMethod{
-	natsmetrics.MethodSearchMessages, natsmetrics.MethodSearchRooms,
-	natsmetrics.MethodSearchApps, natsmetrics.MethodSearchUsers,
-	natsmetrics.MethodSearchOrgs, natsmetrics.MethodListEmojis,
-	natsmetrics.MethodDeleteEmoji, natsmetrics.MethodTranslateText,
-	natsmetrics.MethodCreateDMRoom, natsmetrics.MethodSetManualPresence,
-	natsmetrics.MethodBatchGetPresence, natsmetrics.MethodBatchGetPeerPresence,
-	natsmetrics.MethodCreateBotRoom, natsmetrics.MethodAddBotRoomMembers,
-	natsmetrics.MethodRemoveBotRoomMembers, natsmetrics.MethodGetBotRoom,
-	natsmetrics.MethodEnsureBotDMRoom, natsmetrics.MethodSendRoomMessage,
-	natsmetrics.MethodSendDM, natsmetrics.MethodBatchGetPresence,
+	natsmetrics.RPCMethod("search_messages"), natsmetrics.RPCMethod("search_rooms"),
+	natsmetrics.RPCMethod("search_apps"), natsmetrics.RPCMethod("search_users"),
+	natsmetrics.RPCMethod("search_orgs"), natsmetrics.RPCMethod("list_emojis"),
+	natsmetrics.RPCMethod("delete_emoji"), natsmetrics.RPCMethod("translate_text"),
+	natsmetrics.RPCMethod("create_dm_room"), natsmetrics.RPCMethod("set_manual_presence"),
+	natsmetrics.RPCMethod("batch_get_presence"), natsmetrics.RPCMethod("batch_get_peer_presence"),
+	natsmetrics.RPCMethod("create_bot_room"), natsmetrics.RPCMethod("add_bot_room_members"),
+	natsmetrics.RPCMethod("remove_bot_room_members"), natsmetrics.RPCMethod("get_bot_room"),
+	natsmetrics.RPCMethod("ensure_bot_dm_room"), natsmetrics.RPCMethod("send_room_message"),
+	natsmetrics.RPCMethod("send_dm"), natsmetrics.RPCMethod("batch_get_presence"),
 }
 
 // TestShutdown_ConcurrentRegistrationSafe verifies addRoute is safe to run
@@ -199,7 +199,7 @@ func TestRouter_Shutdown_StressUnderLoad(t *testing.T) {
 
 	firstEntered := make(chan struct{})
 	var once sync.Once
-	Register(r, "stress.{id}", natsmetrics.MethodRemovePriorityContact,
+	Register(r, "stress.{id}", natsmetrics.RPCMethod("remove_priority_contact"),
 		func(c *Context, req testReq) (*testResp, error) {
 			once.Do(func() { close(firstEntered) })
 			time.Sleep(time.Duration(1+req.Name[0]%5) * time.Millisecond)

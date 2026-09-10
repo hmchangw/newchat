@@ -651,17 +651,6 @@ func normalizeOperation(operation Operation) Operation {
 	}
 }
 
-// normalizeRPCMethod bounds the rpc.method label. A method outside the
-// vocabulary — including the zero value, only reachable by passing MethodNone to
-// a request/reply registration — records as MethodOther rather than minting a
-// series from an unbounded value, or vanishing.
-func normalizeRPCMethod(method RPCMethod) RPCMethod {
-	if method.Valid() {
-		return method
-	}
-	return MethodOther
-}
-
 func normalizeRequestResult(result RequestResult) RequestResult {
 	switch result {
 	case RequestSuccess, RequestBadRequest, RequestUnauthenticated, RequestForbidden,

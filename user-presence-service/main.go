@@ -207,11 +207,13 @@ func main() {
 // RegisterVoid routes are fire-and-forget: they name no rpc.method and record no
 // server-side sample, so only the three Register routes reach the golden file.
 func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
-	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(siteID), handler.Hello)
-	natsrouter.RegisterVoid(router, subject.PresencePingPattern(siteID), handler.Ping)
-	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(siteID), handler.Activity)
-	natsrouter.RegisterVoid(router, subject.PresenceByePattern(siteID), handler.Bye)
-	natsrouter.Register(router, subject.PresenceManualSetPattern(siteID), natsmetrics.MethodSetManualPresence, handler.SetManual)
-	natsrouter.Register(router, subject.PresenceQueryBatch(siteID), natsmetrics.MethodBatchGetPresence, handler.QueryBatch)
-	natsrouter.Register(router, subject.PresenceQueryBatchPeer(siteID), natsmetrics.MethodBatchGetPeerPresence, handler.QueryBatchPeer)
+	router.RegisterRoutes(
+		natsrouter.Route{Pattern: subject.PresenceHelloPattern(siteID), Bind: natsrouter.HandleVoid(handler.Hello)},
+		natsrouter.Route{Pattern: subject.PresencePingPattern(siteID), Bind: natsrouter.HandleVoid(handler.Ping)},
+		natsrouter.Route{Pattern: subject.PresenceActivityPattern(siteID), Bind: natsrouter.HandleVoid(handler.Activity)},
+		natsrouter.Route{Pattern: subject.PresenceByePattern(siteID), Bind: natsrouter.HandleVoid(handler.Bye)},
+		natsrouter.Route{Pattern: subject.PresenceManualSetPattern(siteID), Method: "set_manual_presence", Bind: natsrouter.Handle(handler.SetManual)},
+		natsrouter.Route{Pattern: subject.PresenceQueryBatch(siteID), Method: "batch_get_presence", Bind: natsrouter.Handle(handler.QueryBatch)},
+		natsrouter.Route{Pattern: subject.PresenceQueryBatchPeer(siteID), Method: "batch_get_peer_presence", Bind: natsrouter.Handle(handler.QueryBatchPeer)},
+	)
 }

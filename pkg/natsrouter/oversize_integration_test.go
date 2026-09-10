@@ -94,7 +94,7 @@ func TestIntegration_OversizeReplyReturnsErrorEnvelope(t *testing.T) {
 	})
 
 	const subject = "chat.user.alice.request.history.load"
-	Register(r, "chat.user.{account}.request.history.load", natsmetrics.MethodListChannelMessages,
+	Register(r, "chat.user.{account}.request.history.load", natsmetrics.RPCMethod("list_channel_messages"),
 		func(c *Context, req bulkReq) (*bulkResp, error) {
 			items := make([]string, req.Limit)
 			for i := range items {
@@ -142,7 +142,7 @@ func TestIntegration_OversizeErrorReplyReturnsErrorEnvelope(t *testing.T) {
 	})
 
 	const subject = "chat.user.bob.request.rooms.info"
-	Register(r, "chat.user.{account}.request.rooms.info", natsmetrics.MethodBatchGetRoomsInfo,
+	Register(r, "chat.user.{account}.request.rooms.info", natsmetrics.RPCMethod("batch_get_rooms_info"),
 		func(c *Context, _ bulkReq) (*bulkResp, error) {
 			return nil, errcode.BadRequest(strings.Repeat("y", cappedMaxPayload*2))
 		})

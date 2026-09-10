@@ -103,8 +103,9 @@ func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 		"chat.nats.publish.failures: destination_kind x operation x outcome")
 	assert.Equal(t, 112, len(allOperations)*len(allRequestOutcomes),
 		"rpc.client.call.duration: still keyed by Operation, one unlabelled success series per value")
-	assert.Equal(t, 837, (len(allRPCMethods)+1)*len(allRequestResults),
-		"rpc.server.call.duration: the vocabulary plus MethodOther, x error.type")
+	// rpc.server.call.duration is not counted here any more. Its rpc.method set
+	// is declared by the services' route tables, which this package cannot see,
+	// so the fleet-wide count lives in natsrouter's fleet golden test instead.
 }
 
 func TestPublishLabelPairsAreFarNarrowerThanTheCrossProduct(t *testing.T) {

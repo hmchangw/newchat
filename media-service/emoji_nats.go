@@ -8,7 +8,6 @@ import (
 	"github.com/hmchangw/chat/pkg/emoji"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -67,6 +66,8 @@ func (h *handler) HandleEmojiDelete(c *natsrouter.Context, req model.EmojiDelete
 // registerEmojiNATS wires the emoji request-reply endpoints; panics on
 // subscription failure (fatal at startup, matching natsrouter semantics).
 func registerEmojiNATS(r *natsrouter.Router, h *handler, siteID string) {
-	natsrouter.RegisterNoBody(r, subject.EmojiListPattern(siteID), natsmetrics.MethodListEmojis, h.HandleEmojiList)
-	natsrouter.Register(r, subject.EmojiDeletePattern(siteID), natsmetrics.MethodDeleteEmoji, h.HandleEmojiDelete)
+	r.RegisterRoutes(
+		natsrouter.Route{Pattern: subject.EmojiListPattern(siteID), Method: "list_emojis", Bind: natsrouter.HandleNoBody(h.HandleEmojiList)},
+		natsrouter.Route{Pattern: subject.EmojiDeletePattern(siteID), Method: "delete_emoji", Bind: natsrouter.Handle(h.HandleEmojiDelete)},
+	)
 }

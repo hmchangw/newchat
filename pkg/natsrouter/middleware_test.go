@@ -315,7 +315,7 @@ func TestRouter_AutomaticallyEnrichesIdentityWithoutOptInMiddleware(t *testing.T
 	nc := startTestNATS(t)
 	r := New(nc, "identity-test")
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.MethodGetCurrentUser,
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.RPCMethod("get_current_user"),
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil
@@ -343,7 +343,7 @@ func TestRouter_DropsForgedIdentityOnClientFacingRoutes(t *testing.T) {
 	nc := startTestNATSWithBaggage(t)
 	r := New(nc, "forged-identity-test")
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.MethodGetUserStatus,
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.RPCMethod("get_user_status"),
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil
@@ -376,7 +376,7 @@ func TestRouter_KeepsUpstreamIdentityOnInternalRoutes(t *testing.T) {
 	nc := startTestNATSWithBaggage(t)
 	r := New(nc, "internal-identity-test")
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.server.request.room.{roomID}.identity", natsmetrics.MethodGetUserProfile,
+	Register(r, "chat.server.request.room.{roomID}.identity", natsmetrics.RPCMethod("get_user_profile"),
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil
@@ -440,7 +440,7 @@ func TestRouter_ClientFacingRouteLabelsSiteFromConfig(t *testing.T) {
 	nc := startTestNATSWithBaggage(t)
 	r := New(nc, "configured-site-test", WithSiteID("site-1"))
 	got := make(chan baggage.Baggage, 1)
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.MethodSetUserStatus,
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity", natsmetrics.RPCMethod("set_user_status"),
 		func(c *Context, _ testReq) (*testResp, error) {
 			got <- baggage.FromContext(c)
 			return &testResp{Greeting: "ok"}, nil

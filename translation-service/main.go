@@ -129,5 +129,7 @@ func main() {
 // function rather than inline in main so the registration table has exactly one
 // definition, which routes_test.go runs against a golden file.
 func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
-	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), natsmetrics.MethodTranslateText, handler.Translate)
+	router.RegisterRoutes(
+		natsrouter.Route{Pattern: subject.TranslateRequestPattern(siteID), Method: "translate_text", Bind: natsrouter.Handle(handler.Translate)},
+	)
 }

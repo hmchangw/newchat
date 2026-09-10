@@ -402,7 +402,9 @@ type jobProcessor interface {
 // is a function rather than inline in main so the registration table has
 // exactly one definition, which routes_test.go runs against a golden file.
 func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
-	natsrouter.Register(router, subject.RoomCreateDMSync(siteID), natsmetrics.MethodCreateDMRoom, handler.serverCreateDM)
+	router.RegisterRoutes(
+		natsrouter.Route{Pattern: subject.RoomCreateDMSync(siteID), Method: "create_dm_room", Bind: natsrouter.Handle(handler.serverCreateDM)},
+	)
 }
 
 // runJobWithRecovery processes one async job and contains any panic so the

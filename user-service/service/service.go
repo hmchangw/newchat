@@ -6,7 +6,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/pagefit"
@@ -231,33 +230,35 @@ func (s *UserService) fanout() int {
 // RegisterHandlers wires all UserService endpoints onto the router.
 // siteID is a literal token in each pattern — this instance only subscribes to its own siteID subjects.
 func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
-	natsrouter.RegisterNoBody(r, subject.UserMePattern(s.siteID), natsmetrics.MethodGetCurrentUser, s.Me)
-	natsrouter.Register(r, subject.UserStatusGetByNamePattern(s.siteID), natsmetrics.MethodGetUserStatus, s.GetStatusByName)
-	natsrouter.Register(r, subject.UserProfileGetByNamePattern(s.siteID), natsmetrics.MethodGetUserProfile, s.GetProfileByName)
-	natsrouter.Register(r, subject.UserStatusSetPattern(s.siteID), natsmetrics.MethodSetUserStatus, s.SetStatus)
-	natsrouter.RegisterNoBody(r, subject.UserSettingsGetPattern(s.siteID), natsmetrics.MethodGetSettings, s.GetSettings)
-	natsrouter.Register(r, subject.UserSettingsSetPattern(s.siteID), natsmetrics.MethodSetSettings, s.SetSettings)
-	natsrouter.RegisterNoBody(r, subject.UserPriorityContactsGetPattern(s.siteID), natsmetrics.MethodListPriorityContacts, s.GetPriorityContacts)
-	natsrouter.Register(r, subject.UserPriorityContactsAddPattern(s.siteID), natsmetrics.MethodAddPriorityContact, s.AddPriorityContact)
-	natsrouter.Register(r, subject.UserPriorityContactsRemovePattern(s.siteID), natsmetrics.MethodRemovePriorityContact, s.RemovePriorityContact)
-	natsrouter.RegisterNoBody(r, subject.UserChatlistGetPattern(s.siteID), natsmetrics.MethodGetChatlist, s.GetChatlist)
-	natsrouter.Register(r, subject.UserChatlistSectionCreatePattern(s.siteID), natsmetrics.MethodCreateChatlistSection, s.CreateChatlistSection)
-	natsrouter.Register(r, subject.UserChatlistSectionDeletePattern(s.siteID), natsmetrics.MethodDeleteChatlistSection, s.DeleteChatlistSection)
-	natsrouter.Register(r, subject.UserChatlistSectionRenamePattern(s.siteID), natsmetrics.MethodRenameChatlistSection, s.RenameChatlistSection)
-	natsrouter.Register(r, subject.UserChatlistSectionReorderPattern(s.siteID), natsmetrics.MethodReorderChatlistSections, s.ReorderChatlistSections)
-	natsrouter.Register(r, subject.UserChatlistSectionSetSortModePattern(s.siteID), natsmetrics.MethodSetChatlistSectionSortMode, s.SetChatlistSectionSortMode)
-	natsrouter.Register(r, subject.UserSubscriptionListPattern(s.siteID), natsmetrics.MethodListSubscriptions, s.ListSubscriptions)
-	natsrouter.Register(r, subject.UserThreadListPattern(s.siteID), natsmetrics.MethodListUserThreads, s.ListUserThreads)
-	natsrouter.Register(r, subject.UserThreadUnreadSummaryPattern(s.siteID), natsmetrics.MethodGetThreadUnreadSummary, s.GetThreadUnreadSummary)
-	natsrouter.Register(r, subject.UserThreadReadAllPattern(s.siteID), natsmetrics.MethodMarkAllThreadsRead, s.ClearAllThreadUnread)
-	natsrouter.Register(r, subject.UserSubscriptionGetChannelsPattern(s.siteID), natsmetrics.MethodListChannelSubscriptions, s.GetChannels)
-	natsrouter.Register(r, subject.UserSubscriptionGetDMPattern(s.siteID), natsmetrics.MethodGetDMSubscription, s.GetDM)
-	natsrouter.Register(r, subject.UserSubscriptionGetByRoomIDPattern(s.siteID), natsmetrics.MethodGetSubscriptionByRoom, s.GetByRoomID)
-	natsrouter.Register(r, subject.UserSubscriptionCountPattern(s.siteID), natsmetrics.MethodCountSubscriptions, s.CountSubscriptions)
-	natsrouter.Register(r, subject.UserSubscriptionSetAppSubscriptionPattern(s.siteID), natsmetrics.MethodSetAppSubscription, s.SetAppSubscription)
-	natsrouter.Register(r, subject.UserAppsListPattern(s.siteID), natsmetrics.MethodListApps, s.ListApps)
-	natsrouter.RegisterNoBody(r, subject.UserAppsCategoriesPattern(s.siteID), natsmetrics.MethodListAppCategories, s.ListAppCategories)
-	natsrouter.Register(r, subject.UserSSOSetPattern(s.siteID), natsmetrics.MethodSetSSOToken, s.SSOSet)
-	natsrouter.RegisterOptionalBody(r, subject.UserSSORefreshPattern(s.siteID), natsmetrics.MethodRefreshSSOToken, s.SSORefresh)
-	natsrouter.Register(r, subject.BadgeCountBatchPattern(s.siteID), natsmetrics.MethodBatchGetBadgeCounts, s.BadgeCountBatch)
+	r.RegisterRoutes(
+		natsrouter.Route{Pattern: subject.UserMePattern(s.siteID), Method: "get_current_user", Bind: natsrouter.HandleNoBody(s.Me)},
+		natsrouter.Route{Pattern: subject.UserStatusGetByNamePattern(s.siteID), Method: "get_user_status", Bind: natsrouter.Handle(s.GetStatusByName)},
+		natsrouter.Route{Pattern: subject.UserProfileGetByNamePattern(s.siteID), Method: "get_user_profile", Bind: natsrouter.Handle(s.GetProfileByName)},
+		natsrouter.Route{Pattern: subject.UserStatusSetPattern(s.siteID), Method: "set_user_status", Bind: natsrouter.Handle(s.SetStatus)},
+		natsrouter.Route{Pattern: subject.UserSettingsGetPattern(s.siteID), Method: "get_settings", Bind: natsrouter.HandleNoBody(s.GetSettings)},
+		natsrouter.Route{Pattern: subject.UserSettingsSetPattern(s.siteID), Method: "set_settings", Bind: natsrouter.Handle(s.SetSettings)},
+		natsrouter.Route{Pattern: subject.UserPriorityContactsGetPattern(s.siteID), Method: "list_priority_contacts", Bind: natsrouter.HandleNoBody(s.GetPriorityContacts)},
+		natsrouter.Route{Pattern: subject.UserPriorityContactsAddPattern(s.siteID), Method: "add_priority_contact", Bind: natsrouter.Handle(s.AddPriorityContact)},
+		natsrouter.Route{Pattern: subject.UserPriorityContactsRemovePattern(s.siteID), Method: "remove_priority_contact", Bind: natsrouter.Handle(s.RemovePriorityContact)},
+		natsrouter.Route{Pattern: subject.UserChatlistGetPattern(s.siteID), Method: "get_chatlist", Bind: natsrouter.HandleNoBody(s.GetChatlist)},
+		natsrouter.Route{Pattern: subject.UserChatlistSectionCreatePattern(s.siteID), Method: "create_chatlist_section", Bind: natsrouter.Handle(s.CreateChatlistSection)},
+		natsrouter.Route{Pattern: subject.UserChatlistSectionDeletePattern(s.siteID), Method: "delete_chatlist_section", Bind: natsrouter.Handle(s.DeleteChatlistSection)},
+		natsrouter.Route{Pattern: subject.UserChatlistSectionRenamePattern(s.siteID), Method: "rename_chatlist_section", Bind: natsrouter.Handle(s.RenameChatlistSection)},
+		natsrouter.Route{Pattern: subject.UserChatlistSectionReorderPattern(s.siteID), Method: "reorder_chatlist_sections", Bind: natsrouter.Handle(s.ReorderChatlistSections)},
+		natsrouter.Route{Pattern: subject.UserChatlistSectionSetSortModePattern(s.siteID), Method: "set_chatlist_section_sort_mode", Bind: natsrouter.Handle(s.SetChatlistSectionSortMode)},
+		natsrouter.Route{Pattern: subject.UserSubscriptionListPattern(s.siteID), Method: "list_subscriptions", Bind: natsrouter.Handle(s.ListSubscriptions)},
+		natsrouter.Route{Pattern: subject.UserThreadListPattern(s.siteID), Method: "list_user_threads", Bind: natsrouter.Handle(s.ListUserThreads)},
+		natsrouter.Route{Pattern: subject.UserThreadUnreadSummaryPattern(s.siteID), Method: "get_thread_unread_summary", Bind: natsrouter.Handle(s.GetThreadUnreadSummary)},
+		natsrouter.Route{Pattern: subject.UserThreadReadAllPattern(s.siteID), Method: "mark_all_threads_read", Bind: natsrouter.Handle(s.ClearAllThreadUnread)},
+		natsrouter.Route{Pattern: subject.UserSubscriptionGetChannelsPattern(s.siteID), Method: "list_channel_subscriptions", Bind: natsrouter.Handle(s.GetChannels)},
+		natsrouter.Route{Pattern: subject.UserSubscriptionGetDMPattern(s.siteID), Method: "get_dm_subscription", Bind: natsrouter.Handle(s.GetDM)},
+		natsrouter.Route{Pattern: subject.UserSubscriptionGetByRoomIDPattern(s.siteID), Method: "get_subscription_by_room", Bind: natsrouter.Handle(s.GetByRoomID)},
+		natsrouter.Route{Pattern: subject.UserSubscriptionCountPattern(s.siteID), Method: "count_subscriptions", Bind: natsrouter.Handle(s.CountSubscriptions)},
+		natsrouter.Route{Pattern: subject.UserSubscriptionSetAppSubscriptionPattern(s.siteID), Method: "set_app_subscription", Bind: natsrouter.Handle(s.SetAppSubscription)},
+		natsrouter.Route{Pattern: subject.UserAppsListPattern(s.siteID), Method: "list_apps", Bind: natsrouter.Handle(s.ListApps)},
+		natsrouter.Route{Pattern: subject.UserAppsCategoriesPattern(s.siteID), Method: "list_app_categories", Bind: natsrouter.HandleNoBody(s.ListAppCategories)},
+		natsrouter.Route{Pattern: subject.UserSSOSetPattern(s.siteID), Method: "set_sso_token", Bind: natsrouter.Handle(s.SSOSet)},
+		natsrouter.Route{Pattern: subject.UserSSORefreshPattern(s.siteID), Method: "refresh_sso_token", Bind: natsrouter.HandleOptionalBody(s.SSORefresh)},
+		natsrouter.Route{Pattern: subject.BadgeCountBatchPattern(s.siteID), Method: "batch_get_badge_counts", Bind: natsrouter.Handle(s.BadgeCountBatch)},
+	)
 }

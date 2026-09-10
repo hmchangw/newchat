@@ -34,13 +34,18 @@ import (
 // intended direction: that combination is a real defect in the soak lane.
 
 var (
-	// The router argument is [\w.]+ because services register on both a local
-	// `r` and a field like `h.router`; the builder is captured whole and its
-	// optional "Pattern" suffix trimmed in Go, because not every registration
-	// uses a Pattern-suffixed builder — subject.RoomsInfoBatchSubscribe is
-	// registered directly, and requiring the suffix skipped it silently.
+	// Routes are declared as natsrouter.Route literals, so the builder appears
+	// before the Bind that says whether a body is decoded — hence builder first,
+	// shape second. The builder is captured whole and its optional "Pattern"
+	// suffix trimmed in Go, because not every registration uses a
+	// Pattern-suffixed builder — subject.RoomsInfoBatchSubscribe is registered
+	// directly, and requiring the suffix skipped it silently.
+	//
+	// This scan only exists because a service's route table lives in package
+	// main and cannot be imported. If services ever expose their []Route through
+	// an accessor, this regex should be replaced by reading the tables.
 	soakRegistrationPattern = regexp.MustCompile(
-		`natsrouter\.(Register|RegisterNoBody)\(\s*[\w.]+\s*,\s*subject\.(\w+)\(`,
+		`natsrouter\.Route\{Pattern:\s*subject\.(\w+)\([^\n]*?Bind:\s*natsrouter\.(Handle|HandleNoBody)\b`,
 	)
 	soakRequestLiteralPattern = regexp.MustCompile(`soakRPCRequest\{`)
 	soakRequestSubjectPattern = regexp.MustCompile(`Subject:\s*subject\.(\w+)\(`)
@@ -89,8 +94,8 @@ func handlerBodyRequirements(t *testing.T, root string) map[string]bool {
 		for _, match := range soakRegistrationPattern.FindAllStringSubmatch(string(source), -1) {
 			// A subject registered both ways anywhere in the repo is treated as
 			// body-required, the stricter reading.
-			builder := strings.TrimSuffix(match[2], "Pattern")
-			requirements[builder] = requirements[builder] || match[1] == "Register"
+			builder := strings.TrimSuffix(match[1], "Pattern")
+			requirements[builder] = requirements[builder] || match[2] == "Handle"
 		}
 		return nil
 	})

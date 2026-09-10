@@ -15,7 +15,6 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -69,10 +68,10 @@ func (h *handler) verifyRoomExists(ctx context.Context, roomID string) error {
 
 // Register attaches send-in-room + send-DM routes.
 func (h *handler) Register(r *natsrouter.Router) {
-	natsrouter.Register[BotSendRoomRequest, BotSendResponse](r,
-		subject.ServerBotMsgRoomSendPattern(h.siteID), natsmetrics.MethodSendRoomMessage, h.handleSendRoom)
-	natsrouter.Register[BotSendRoomRequest, BotSendResponse](r,
-		subject.ServerBotDMSendPattern(h.siteID), natsmetrics.MethodSendDM, h.handleSendDM)
+	r.RegisterRoutes(
+		natsrouter.Route{Pattern: subject.ServerBotMsgRoomSendPattern(h.siteID), Method: "send_room_message", Bind: natsrouter.Handle[BotSendRoomRequest, BotSendResponse](h.handleSendRoom)},
+		natsrouter.Route{Pattern: subject.ServerBotDMSendPattern(h.siteID), Method: "send_dm", Bind: natsrouter.Handle[BotSendRoomRequest, BotSendResponse](h.handleSendDM)},
+	)
 }
 
 // handleSendDM sends to a DM room. BP already ensures the room exists via bot-room-service.dm.ensure before forwarding, so checks here are defence-in-depth.
