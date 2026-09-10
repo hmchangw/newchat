@@ -75,8 +75,9 @@ type Client interface {
 	// SetNX atomically sets key to value with ttl iff key is absent: (true,nil) acquired,
 	// (false,nil) refused, (false,err) transport failure. ttl must be > 0 — a zero ttl stores without expiry.
 	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
-	// IncrEx atomically increments key by 1, returning the post-increment count. ttl applies only
-	// on the 0->1 transition (standard fixed-window rate-limit recipe), via INCR + conditional EXPIRE.
+	// IncrEx increments key by 1, returning the post-increment count. ttl opens a fixed window
+	// via INCR + EXPIRE NX: the first increment sets the expiry, later ones leave a live window
+	// alone but repair a missing one, so a counter can never outlive its window.
 	IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error)
 	Del(ctx context.Context, keys ...string) error
 	// Expire re-arms an existing key's TTL without touching its value, reporting
@@ -250,17 +251,27 @@ func (r *clusterClient) SetNX(ctx context.Context, key, value string, ttl time.D
 }
 
 func (r *clusterClient) IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error) {
-	n, err := r.c.Incr(ctx, key).Result()
-	if err != nil {
+	if ttl <= 0 {
+		n, err := r.c.Incr(ctx, key).Result()
+		if err != nil {
+			return 0, fmt.Errorf("valkey incr: %w", err)
+		}
+		return n, nil
+	}
+	// EXPIRE NX on every increment, not a bare EXPIRE on the 0->1 transition: if a
+	// prior call's INCR landed and its EXPIRE did not, the counter is left with no
+	// expiry, never resets, and permanently throttles the caller once it passes the
+	// ceiling — long after Valkey recovered. NX repairs that on the next increment
+	// while leaving a live window alone, so this stays a fixed window rather than
+	// becoming a sliding one. Pipelined to keep the pair at one round trip; both
+	// commands share a key, so cluster routing keeps them on one node.
+	pipe := r.c.Pipeline()
+	incr := pipe.Incr(ctx, key)
+	pipe.ExpireNX(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("valkey incr: %w", err)
 	}
-	if n == 1 && ttl > 0 {
-		// Only the 0->1 caller sets TTL; failure would let the key persist past the window, so surface it.
-		if err := r.c.Expire(ctx, key, ttl).Err(); err != nil {
-			return n, fmt.Errorf("valkey incr expire: %w", err)
-		}
-	}
-	return n, nil
+	return incr.Val(), nil
 }
 
 // Del issues one DEL per key through a pipeline, for the same reason MGet does:
