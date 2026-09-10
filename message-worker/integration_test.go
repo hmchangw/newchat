@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/userstore"
@@ -192,6 +193,8 @@ func setupCassandra(t *testing.T) *gocql.Session {
 }
 
 func setupMongo(t *testing.T) *mongo.Database {
+	// No seeded indexes: the store's gates create the unique keys it depends
+	// on before the first write (same spec as room-service's).
 	return testutil.MongoDB(t, "message_worker_test")
 }
 
@@ -871,6 +874,96 @@ func TestThreadStoreMongo_CreateThreadRoom(t *testing.T) {
 		err := store.CreateThreadRoom(ctx, dup)
 		require.ErrorIs(t, err, errThreadRoomExists)
 	})
+}
+
+// On a fresh site nothing orders room-service's EnsureIndexes before the first
+// thread reply here, and CreateThreadRoom's duplicate-key branch is what stops a
+// second reply opening a second thread room. message-worker therefore creates
+// the unique key itself on a healthy start, alongside room-service, rather than
+// only verifying it — the rule is that a degradable service must not be the
+// SOLE creator, not that it may not create at all.
+func TestThreadStoreMongo_EnsureIndexes_CreatesParentMessageIDUniqueOnFreshDB(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "message_worker_fresh_idx_test") // no seeded index
+	store := newThreadStoreMongo(db)
+
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_rooms"))["parentMessageId:1"],
+		"thread_rooms.parentMessageId must be unique after EnsureIndexes on an index-less DB")
+}
+
+// The recovery race: a worker whose startup EnsureIndexes failed (MongoDB was
+// down) resumes consuming the moment MongoDB is back, before room-service has
+// restarted and built the key. CreateThreadRoom therefore confirms the unique
+// index itself before the first insert, so two replies to one parent can never
+// both land — the second must read as errThreadRoomExists.
+func TestThreadStoreMongo_CreateThreadRoom_ConfirmsIndexBeforeInsertOnFreshDB(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "message_worker_gate_test") // no seeded index, EnsureIndexes never called
+	store := newThreadStoreMongo(db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	first := &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, store.CreateThreadRoom(ctx, first))
+
+	second := &model.ThreadRoom{ID: "tr-2", ParentMessageID: "msg-parent", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "m2", CreatedAt: now, UpdatedAt: now}
+	require.ErrorIs(t, store.CreateThreadRoom(ctx, second), errThreadRoomExists)
+
+	n, err := db.Collection("thread_rooms").CountDocuments(ctx, bson.M{"parentMessageId": "msg-parent"})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n)
+	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_rooms"))["parentMessageId:1"])
+}
+
+// The same recovery race applies to thread_subscriptions: two concurrent
+// upserts on one (threadRoomId, userAccount) both insert when the unique key
+// is absent, and those duplicates make room-service's later index build fail.
+// The document-creating writes confirm the key first.
+// A same-keys index with the wrong spec is room-service's to repair, never this
+// worker's (see mongoutil.EnsureIndex): the gate refuses the write (NAK) and
+// leaves the index alone.
+func TestThreadStoreMongo_CreateThreadRoom_RefusesToRepairAConflictingIndex(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "message_worker_gate_conflict_test")
+	_, err := db.Collection("thread_rooms").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "parentMessageId", Value: 1}}, // non-unique: the wrong spec
+	})
+	require.NoError(t, err)
+	store := newThreadStoreMongo(db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	err = store.CreateThreadRoom(ctx, &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1",
+		SiteID: "site-a", LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now})
+	require.ErrorIs(t, err, mongoutil.ErrIndexSpecConflict)
+
+	n, err := db.Collection("thread_rooms").CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Zero(t, n, "nothing is inserted behind a closed gate")
+	specs := testutil.IndexSpecs(t, db.Collection("thread_rooms"))
+	require.Contains(t, specs, "parentMessageId:1", "the conflicting index must still exist for room-service to repair")
+	assert.False(t, specs["parentMessageId:1"], "and it must still be non-unique: nothing was repaired")
+}
+
+func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "message_worker_sub_gate_test") // no seeded index, EnsureIndexes never called
+	store := newThreadStoreMongo(db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	sub := &model.ThreadSubscription{ID: "ts-1", ParentMessageID: "msg-parent", RoomID: "r-1",
+		ThreadRoomID: "tr-1", UserID: "u-1", UserAccount: "alice", SiteID: "site-a", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, store.UpsertThreadSubscription(ctx, sub))
+	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_subscriptions"))["threadRoomId:1,userAccount:1"],
+		"thread_subscriptions (threadRoomId,userAccount) must be unique before the first write")
+
+	dup := *sub
+	dup.ID = "ts-2"
+	err := store.InsertThreadSubscription(ctx, &dup)
+	require.Error(t, err)
+	assert.True(t, mongo.IsDuplicateKeyError(err), "a second document for the same key must be refused, got: %v", err)
 }
 
 func TestThreadStoreMongo_GetThreadRoomByParentMessageID(t *testing.T) {
