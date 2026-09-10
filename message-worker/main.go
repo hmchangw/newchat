@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -119,21 +118,13 @@ func main() {
 	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
 	// Default mode only: teams is a one-time migration path with no standby
-	// stream, so it has no buddy lane and keeps the fail-fast home dial.
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy.OnlyIf(cfg.Mode != "teams"), CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
-	// Lazy with a buddy: a pod that restarts while home NATS is down must still
-	// boot and serve the buddy lane, and join the home lane when it returns.
-	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, sdk.MeterProvider())
+	// stream, so it has no buddy lane and keeps the fail-fast home dial. With a
+	// buddy the dial is lazy, so a pod that restarts while home is down still
+	// boots and serves the buddy lane.
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile, sdk)
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -240,14 +231,6 @@ func main() {
 	}
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID)
-	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		Site:   cfg.SiteID,
-		Stream: streamName, Consumer: consumerCfg.Durable,
-	})
-	consumerMetrics.LoopStopped(ctx)
-
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	var wg sync.WaitGroup
 
 	// Built unconditionally in both modes: the consumer filter already scopes each
 	// pod to its own mode's subject, so a default-mode pod never sees teamsBatchSubj
@@ -270,53 +253,37 @@ func main() {
 			return nil
 		}, domainMetrics)
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
-	process := canonicalProcessor(handler, teamsMigration, teamsBatchSubj)
 
-	// Home lane, bound once the home connection is up — immediately in the
-	// ordinary case, later if the pod booted during an outage. Dev-only stream
-	// bootstrap rides inside for the same reason: it needs the server too.
-	homeLane, err := natsutil.BindWhenConnected(ctx, nc, streamName, func(ctx context.Context) (func(), error) {
-		if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
-			return nil, fmt.Errorf("bootstrap streams: %w", err)
+	// One handler per lane; the migration path is home-only, so the failover
+	// lane's processor carries no teams handler. The buddy lane never fails
+	// startup — on any failure the service runs home-only.
+	lanes, err := failoverlane.BindLanes(ctx, nc, js, dialer, &failoverlane.LanesSpec{
+		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Metrics: sharedMetrics,
+		Bootstrap: cfg.Bootstrap.Enabled,
+		Home: failoverlane.HomeSpec{
+			Stream: stream.Config{Name: streamName}, Consumer: consumerCfg,
+			Bootstrap: func(ctx context.Context, js o11ynats.JetStream) error {
+				return bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled)
+			},
+		},
+		Buddy: &failoverlane.LaneSpec{
+			Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
+			Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
+		},
+	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		if lane == subject.LaneHome {
+			return canonicalProcessor(handler, teamsMigration, teamsBatchSubj), nil
 		}
-		cons, err := js.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
-		if err != nil {
-			return nil, fmt.Errorf("create consumer: %w", err)
-		}
-		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-		if err != nil {
-			return nil, fmt.Errorf("messages: %w", err)
-		}
-		consumerMetrics.LoopStarted(ctx)
-		natsutil.RunPool(iter, sem, &wg, process,
-			natsutil.WithLaneMetrics(consumerMetrics, consumerCfg.MaxDeliver))
-		return func() {
-			consumerMetrics.LoopStopped(context.Background())
-			iter.Stop()
-		}, nil
+		return canonicalProcessor(newLaneHandler(conn, laneJS, lane), nil, ""), nil
 	})
 	if err != nil {
-		slog.Error("bind home lane failed", "error", err)
+		slog.Error("bind lanes failed", "error", err)
 		os.Exit(1)
 	}
 
-	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
-	// the service runs home-only.
-	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Dialer: &dialer,
-		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
-		Sem: sem, WG: &wg, Metrics: sharedMetrics,
-	}
-	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
-		Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
-		Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
-	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
-		return canonicalProcessor(newLaneHandler(conn, laneJS, lane), nil, ""), nil
-	})
-
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
-		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
+		lanes.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -325,19 +292,8 @@ func main() {
 
 	slog.Info("message-worker running", "site", cfg.SiteID)
 
-	shutdown.Wait(ctx, 25*time.Second,
-		// Stop both iterators before draining, so neither lane pulls new work
-		// while the other is still finishing. Both feed one WaitGroup.
-		func(_ context.Context) error {
-			homeLane.Stop()
-			buddyLane.Stop()
-			return nil
-		},
-		func(ctx context.Context) error {
-			return natsutil.WaitPool(ctx, &wg)
-		},
-		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
-		natsutil.DrainBuddy(buddyConn),
+	hooks := append(lanes.StopHooks(), lanes.DrainHooks()...)
+	hooks = append(hooks,
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error {
@@ -350,6 +306,7 @@ func main() {
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
 
 // buildConsumerConfig returns the durable consumer config for the given mode.

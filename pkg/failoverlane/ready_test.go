@@ -91,3 +91,14 @@ func TestRouters_Check(t *testing.T) {
 		assert.NoError(t, routers.Check().Probe(ctx))
 	})
 }
+
+// reserveJetStreamPort hands out a URL nothing listens on and a starter that
+// brings a JetStream server up on it later.
+func reserveJetStreamPort(t *testing.T) (url string, start func()) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+	return fmt.Sprintf("nats://127.0.0.1:%d", port), func() { embeddedJetStream(t, port) }
+}

@@ -222,10 +222,7 @@ func main() {
 	)
 	// Default mode only: a teams pod is a migration path with no standby stream,
 	// so it has no buddy lane and keeps the fail-fast home dial.
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy.OnlyIf(cfg.Mode != "teams"), CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile, sdk)
 	if cfg.Mode == "teams" {
 		// Bound to MESSAGES-TEAMS: message-worker's teams mode persists migrated Teams
 		// history with no .created event on the canonical stream, so this indexes off
@@ -311,16 +308,9 @@ func main() {
 	// Lazy with a buddy: a pod that restarts while home NATS is down must still
 	// boot and index the failover collection, and join the home collections when
 	// home returns.
-	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, nil)
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-	// Local JetStream consumers use the o11y facade so Fetch deliveries carry consumer spans;
-	// the HR domain path below stays raw because the facade has no domain-scoped constructor.
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 

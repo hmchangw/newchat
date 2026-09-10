@@ -228,10 +228,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NATS.CredsFile, sdk)
 	// Lazy with a buddy: a pod that restarts while home NATS is down must still
 	// boot and answer displaced clients on the buddy, and join home when it
 	// returns. The home router's subscriptions are buffered by nats.go until
@@ -304,7 +301,7 @@ func main() {
 	// One handler per lane over the same stores and caches; only the room
 	// client speaks NATS, and it must go out on the connection the lane's
 	// requests arrive on. No home JetStream: this service publishes nothing.
-	routers, err := failoverlane.BindRouters(ctx, nc, nil, &dialer,
+	routers, err := failoverlane.BindRouters(ctx, nc, nil, dialer,
 		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, _ subject.Lane) (*natsrouter.Router, error) {
 			handler := newHandler(store, cachedMongo, usersClient, cache, handlerCfg)
 			handler.room = newRoomClient(conn)

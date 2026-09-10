@@ -123,21 +123,12 @@ func main() {
 	// The bot pipeline has no standby stream, so HasFailover gates the buddy
 	// lane out there; it also keeps the home dial fail-fast, since without a
 	// buddy a pod that cannot reach home has nothing to do.
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy.OnlyIf(wiring.HasFailover()), CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile, sdk)
 	// Lazy with a buddy: a pod that restarts while home NATS is down must still
 	// boot and serve the buddy lane, and join the home lane when it returns.
-	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, nil)
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -200,7 +191,7 @@ func main() {
 	// it sequential like the home loop; the flusher is the serialization point
 	// between the two lanes, and it is mutex-guarded.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Dialer: &dialer,
+		SiteID: cfg.SiteID, Dialer: dialer,
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: pullBatch / 2,
 		Sem: make(chan struct{}, 1), WG: &wg,
 	}

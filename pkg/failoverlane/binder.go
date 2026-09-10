@@ -143,10 +143,44 @@ func (b *Binder) Bind(ctx context.Context, bjs o11ynats.JetStream, spec *LaneSpe
 	if err != nil {
 		return nil, err
 	}
+	loop, err := b.startLoop(ctx, cons, spec.Stream.Name, &spec.Consumer, handle)
+	if err != nil {
+		return nil, err
+	}
+	return loop.lane, nil
+}
+
+// loop is one running pull loop: the lane shutdown stops, and the metrics that
+// record its start and stop.
+type loop struct {
+	lane    *natsutil.Lane
+	metrics *natsmetrics.Consumer
+}
+
+// stop records the loop as stopped and stops its iterator. Nil-safe.
+func (l *loop) stop() {
+	if l == nil {
+		return
+	}
+	l.metrics.LoopStopped(context.Background())
+	l.lane.Stop()
+}
+
+// startLoop drains cons into the binder's pool through handle. It is the one
+// loop start for both lanes: the home lane binds its consumer itself (it owns
+// the stream), the failover lane through BindConsumer (placement asserted).
+func (b *Binder) startLoop(ctx context.Context, cons o11ynats.Consumer, streamName string,
+	consumerCfg *jetstream.ConsumerConfig, handle func(context.Context, jetstream.Msg),
+) (*loop, error) {
 	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*b.MaxWorkers))
 	if err != nil {
-		return nil, fmt.Errorf("bind failover consumer messages on %s: %w", spec.Stream.Name, err)
+		return nil, fmt.Errorf("bind consumer messages on %s: %w", streamName, err)
 	}
+	// A nil Metrics yields a Consumer with no instruments, so the stop path
+	// can record unconditionally.
+	laneMetrics := b.Metrics.Consumer(natsmetrics.ConsumerConfig{
+		Site: b.SiteID, Stream: streamName, Consumer: consumerCfg.Durable,
+	})
 
 	// handle takes a plain jetstream.Msg rather than a *natsmetrics.Message so
 	// the uninstrumented path can pass the raw message straight through. A
@@ -154,17 +188,16 @@ func (b *Binder) Bind(ctx context.Context, bjs o11ynats.JetStream, spec *LaneSpe
 	// disposition, so one is only ever created by the tracking loop itself.
 	if b.Metrics == nil {
 		natsutil.RunPool(iter, b.Sem, b.WG, handle)
-		return natsutil.NewLane(iter, b.WG), nil
+		return &loop{lane: natsutil.NewLane(iter, b.WG), metrics: laneMetrics}, nil
 	}
 
-	laneMetrics := b.Metrics.Consumer(b.MetricsIdentity(spec))
-	natsmetrics.StartInPool(ctx, iter, laneMetrics, b.Sem, spec.Consumer.MaxDeliver, b.WG,
+	natsmetrics.StartInPool(ctx, iter, laneMetrics, b.Sem, consumerCfg.MaxDeliver, b.WG,
 		func(msg jetstream.Msg) natsmetrics.EventType {
 			return natsmetrics.EventTypeFromSubject(msg.Subject())
 		},
 		func(msgCtx context.Context, msg *natsmetrics.Message) { handle(msgCtx, msg) })
 	laneMetrics.LoopStarted(ctx)
-	return natsutil.NewLane(iter, b.WG), nil
+	return &loop{lane: natsutil.NewLane(iter, b.WG), metrics: laneMetrics}, nil
 }
 
 // HandlerFor builds one lane's message handler from the connection that lane

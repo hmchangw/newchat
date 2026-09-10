@@ -205,31 +205,14 @@ func main() {
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
 	// HasFailover gates the bot pipeline out of the buddy lane; it also keeps
 	// the home dial fail-fast there, since without a buddy a pod that cannot
-	// reach home has nothing to do.
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy.OnlyIf(wiring.HasFailover()), CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
-	// Lazy with a buddy: a pod that restarts while home NATS is down must still
-	// boot and serve the buddy lane, and join the home lane when it returns.
-	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, sdk.MeterProvider())
+	// reach home has nothing to do. With a buddy the dial is lazy, so a pod
+	// that restarts while home is down still boots and serves the buddy lane.
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile, sdk)
+	nc, otelJS, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
-
-	otelJS, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
-		os.Exit(1)
-	}
-
-	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated)
-	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		Site:   cfg.SiteID,
-		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
-	})
-	consumerMetrics.LoopStopped(ctx)
 	// laneNATS builds every connection-bound dependency from one connection, so
 	// both lanes are wired the same way and neither can inherit the other's.
 	laneNATS := func(conn *o11ynats.Conn, js o11ynats.JetStream, lane subject.Lane) natsLane {
@@ -299,7 +282,6 @@ func main() {
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 		Metrics:            domainMetrics,
 	}
-	handler := NewHandler(laneNATS(nc, otelJS, subject.LaneHome).bind(&baseDeps))
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
 	invalCtx, invalCancel := context.WithCancel(ctx)
@@ -361,59 +343,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	var wg sync.WaitGroup
-
-	// Home lane, bound once the home connection is up — immediately in the
-	// ordinary case, later if the pod booted during an outage. Dev-only stream
-	// bootstrap rides inside for the same reason: it needs the server too.
-	homeLane, err := natsutil.BindWhenConnected(ctx, nc, wiring.CanonicalStream.Name, func(ctx context.Context) (func(), error) {
-		if err := bootstrapStreams(ctx, otelJS, wiring.CanonicalStream.Name, wiring.CanonicalCreated, wiring.PushStream.Name, wiring.PushInputWildcard, cfg.Bootstrap.Enabled); err != nil {
-			return nil, fmt.Errorf("bootstrap streams: %w", err)
-		}
-		cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-		if err != nil {
-			return nil, fmt.Errorf("create consumer: %w", err)
-		}
-		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-		if err != nil {
-			return nil, fmt.Errorf("messages: %w", err)
-		}
-		consumerMetrics.LoopStarted(ctx)
-		natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
-			func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-			notifyProcessor(handler, domainMetrics))
-		return func() {
-			consumerMetrics.LoopStopped(context.Background())
-			iter.Stop()
-		}, nil
-	})
-	if err != nil {
-		slog.Error("bind home lane failed", "error", err)
-		os.Exit(1)
-	}
-
-	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
-	// the service runs home-only.
-	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Dialer: &dialer,
-		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
-		Sem: sem, WG: &wg, Metrics: sharedMetrics,
-	}
-	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
-		Stream: wiring.CanonicalFailoverStream,
-		// The push standby stream is published to, not consumed: it must exist
-		// before the first failover notification is built.
-		AlsoEnsure: []stream.Config{wiring.PushFailoverStream},
-		Consumer: buildConsumerConfig(cfg.Consumer,
-			cfg.Mode.FailoverConsumerName("notification-worker"), wiring.CanonicalFailoverCreated),
+	// One handler per lane from the lane's own connection, one pool for both.
+	// The buddy lane never fails startup — on any failure the service runs
+	// home-only.
+	lanes, err := failoverlane.BindLanes(ctx, nc, otelJS, dialer, &failoverlane.LanesSpec{
+		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Metrics: sharedMetrics,
+		Bootstrap: cfg.Bootstrap.Enabled,
+		Home: failoverlane.HomeSpec{
+			Stream:   wiring.CanonicalStream,
+			Consumer: buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated),
+			Bootstrap: func(ctx context.Context, js o11ynats.JetStream) error {
+				return bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalCreated, wiring.PushStream.Name, wiring.PushInputWildcard, cfg.Bootstrap.Enabled)
+			},
+		},
+		Buddy: &failoverlane.LaneSpec{
+			Stream: wiring.CanonicalFailoverStream,
+			// The push standby stream is published to, not consumed: it must
+			// exist before the first failover notification is built.
+			AlsoEnsure: []stream.Config{wiring.PushFailoverStream},
+			Consumer: buildConsumerConfig(cfg.Consumer,
+				cfg.Mode.FailoverConsumerName("notification-worker"), wiring.CanonicalFailoverCreated),
+		},
 	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
 		return notifyHandler(NewHandler(laneNATS(conn, laneJS, lane).bind(&baseDeps)), domainMetrics), nil
 	})
+	if err != nil {
+		slog.Error("bind lanes failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
-		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
+		lanes.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -430,17 +391,8 @@ func main() {
 		"user_settings_enabled", cfg.UserSettingsEnabled,
 	)
 
-	shutdown.Wait(ctx, 25*time.Second,
-		// Stop both iterators before draining, so neither lane pulls new work
-		// while the other is still finishing. Both feed one WaitGroup.
-		func(_ context.Context) error {
-			homeLane.Stop()
-			buddyLane.Stop()
-			return nil
-		},
-		func(ctx context.Context) error {
-			return natsutil.WaitPool(ctx, &wg)
-		},
+	hooks := lanes.StopHooks()
+	hooks = append(hooks,
 		func(_ context.Context) error {
 			invalLane.Stop()
 			return nil
@@ -458,13 +410,15 @@ func main() {
 			invalCancel() // always release the context (idempotent)
 			return nil
 		},
-		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
-		natsutil.DrainBuddy(buddyConn),
+	)
+	hooks = append(hooks, lanes.DrainHooks()...)
+	hooks = append(hooks,
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
 
 // notifyProcessor is the per-message body both lanes run, so the home lane and

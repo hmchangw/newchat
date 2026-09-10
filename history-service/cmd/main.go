@@ -129,22 +129,14 @@ func main() {
 
 	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NATS.CredsFile, sdk)
 	// Lazy with a buddy: a pod that restarts while home NATS is down must still
 	// boot and answer displaced clients on the buddy, and join home when it
 	// returns. The home router's subscriptions are buffered by nats.go until
 	// then.
-	nc, err := dialer.ConnectHome(ctx, cfg.NATS.URL, sdk.MeterProvider())
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NATS.URL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -399,7 +391,7 @@ func main() {
 		opts = append(opts, service.WithPreviewWarmer(warmer))
 	}
 	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
-	routers, err := failoverlane.BindRouters(ctx, nc, js, &dialer,
+	routers, err := failoverlane.BindRouters(ctx, nc, js, dialer,
 		func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
 			svc := service.New(cassRepo, subSource, roomSource,
 				publisher.New(laneJS, publisher.WithMetrics(publishMetrics)),
