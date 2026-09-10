@@ -143,30 +143,11 @@ const (
 	OperationPresenceLookup      Operation = "presence_lookup"
 	OperationThreadTCount        Operation = "thread_tcount"
 	OperationTeamsUserUpsert     Operation = "teams_user_upsert"
-	// OperationChannelHistory and OperationThreadOpen are split out of
-	// history_read because SLO-4 and SLO-5 measure them separately, against
-	// different bounds. Their cost models differ — channel load walks
-	// messages_by_room buckets, thread open slices one partition of
-	// thread_messages_by_thread — so one shared label would drag the fast
-	// family's ratio down with walk latency and dilute the slow family's
-	// violations with fast traffic, in opposite directions and at a ratio that
-	// drifts with traffic mix.
-	OperationChannelHistory Operation = "channel_history"
-	OperationThreadOpen     Operation = "thread_open"
-	// OperationHistoryRead keeps every other history route: scroll, jump,
-	// single and batch reads, pinned lists, thread parents, and the
-	// server-to-server thread lanes. None of them is described by an SLO.
-	OperationHistoryRead     Operation = "history_read"
-	OperationHistoryMutation Operation = "history_mutation"
-	OperationRoomRead        Operation = "room_read"
-	OperationRoomMutation    Operation = "room_mutation"
-	OperationMemberRead      Operation = "member_read"
-	OperationMemberMutation  Operation = "member_mutation"
-	OperationTeamsRoom       Operation = "teams_room"
-	OperationRoomPublish     Operation = "room_publish"
-	OperationMemberPublish   Operation = "member_publish"
-	OperationOutboxPublish   Operation = "outbox_publish"
-	OperationUnknown         Operation = "unknown"
+	OperationMemberRead          Operation = "member_read"
+	OperationRoomPublish         Operation = "room_publish"
+	OperationMemberPublish       Operation = "member_publish"
+	OperationOutboxPublish       Operation = "outbox_publish"
+	OperationUnknown             Operation = "unknown"
 )
 
 // Metrics owns the shared instruments. Instrument-creation failures fall back
@@ -283,8 +264,8 @@ type requestKey struct {
 }
 
 type handledRequestKey struct {
-	operation Operation
-	result    RequestResult
+	method RPCMethod
+	result RequestResult
 }
 
 type Consumer struct {
@@ -573,15 +554,15 @@ func (m *Metrics) Publisher(site string) Publisher {
 		// marks a call as having succeeded.
 		request: newOptTable(func(key requestKey) metric.MeasurementOption {
 			if key.outcome == RequestSucceeded {
-				return build(rpcSystemName, rpcMethod(key.operation))
+				return build(rpcSystemName, rpcMethod(string(key.operation)))
 			}
-			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.outcome)))
+			return build(rpcSystemName, rpcMethod(string(key.operation)), errorType(string(key.outcome)))
 		}),
 		handled: newOptTable(func(key handledRequestKey) metric.MeasurementOption {
 			if key.result == RequestSuccess {
-				return build(rpcSystemName, rpcMethod(key.operation))
+				return build(rpcSystemName, rpcMethod(string(key.method)))
 			}
-			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.result)))
+			return build(rpcSystemName, rpcMethod(string(key.method)), errorType(string(key.result)))
 		}),
 	}
 }
@@ -629,11 +610,11 @@ func (p Publisher) Request(ctx context.Context, operation Operation, duration ti
 // HandledRequest records one inbound request/reply handler result as
 // rpc.server.call.duration. Both labels are normalized against closed enums;
 // subjects and error strings are never attributes.
-func (p Publisher) HandledRequest(ctx context.Context, operation Operation, duration time.Duration, result RequestResult) {
+func (p Publisher) HandledRequest(ctx context.Context, method RPCMethod, duration time.Duration, result RequestResult) {
 	if p.metrics == nil {
 		return
 	}
-	opt := p.handled.get(handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)})
+	opt := p.handled.get(handledRequestKey{normalizeRPCMethod(method), normalizeRequestResult(result)})
 	p.metrics.serverCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
@@ -663,14 +644,22 @@ func normalizeOperation(operation Operation) Operation {
 	case OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
 		OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
 		OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
-		OperationChannelHistory, OperationThreadOpen,
-		OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
-		OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
-		OperationMemberPublish, OperationOutboxPublish:
+		OperationMemberRead, OperationRoomPublish, OperationMemberPublish, OperationOutboxPublish:
 		return operation
 	default:
 		return OperationUnknown
 	}
+}
+
+// normalizeRPCMethod bounds the rpc.method label. A method outside the
+// vocabulary — including the zero value, only reachable by passing MethodNone to
+// a request/reply registration — records as MethodOther rather than minting a
+// series from an unbounded value, or vanishing.
+func normalizeRPCMethod(method RPCMethod) RPCMethod {
+	if method.Valid() {
+		return method
+	}
+	return MethodOther
 }
 
 func normalizeRequestResult(result RequestResult) RequestResult {

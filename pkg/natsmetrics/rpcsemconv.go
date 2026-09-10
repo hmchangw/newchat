@@ -70,12 +70,13 @@ var rpcDurationBuckets = o11y.DefaultLatencyBuckets()
 // rpcSystemName is constant for the process; the attribute is built once.
 var rpcSystemName = attribute.String(rpcSystemNameKey, rpcSystemNATS)
 
-// rpcMethod carries the bounded operation. The convention describes rpc.method
-// as the logical method name, which for a subject-routed RPC is the operation
-// the subject resolves to — never the subject itself, which carries room and
-// account identifiers.
-func rpcMethod(operation Operation) attribute.KeyValue {
-	return attribute.String(rpcMethodKey, string(operation))
+// rpcMethod carries the bounded method name. The convention describes
+// rpc.method as the logical method name — never the subject, which carries room
+// and account identifiers. The server lane passes an RPCMethod declared at
+// registration; the client lane still passes an Operation, so this takes the
+// string both already are.
+func rpcMethod(method string) attribute.KeyValue {
+	return attribute.String(rpcMethodKey, method)
 }
 
 func errorType(class string) attribute.KeyValue {

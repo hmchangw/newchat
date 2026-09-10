@@ -706,7 +706,7 @@ instrument name** you grep for in source underneath where the two differ.
 | `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
 | `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | the 14 services that wire a `natsmetrics.Publisher` — **not** every publisher; see below | on first failure | none — the broker has no record of a publish that never arrived | campaign |
 | `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
-| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="channel_history"`) and **SLO-5** (`le="0.25"`, `rpc_method="thread_open"`) — the denominator filters `error_type` to the eligible set, never `_count` as a whole; see `sli-slo.md` §3 and the `rpc.method` coverage note below |
+| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="list_channel_messages"`) and **SLO-5** (`le="0.25"`, `rpc_method="list_thread_messages"`) — the denominator filters `error_type` to the eligible set, never `_count` as a whole; see `sli-slo.md` §3 and the `rpc.method` coverage note below |
 
 These two are the only families here that do not carry the `chat_` prefix, and
 the exception is deliberate: they implement the OpenTelemetry RPC semantic
@@ -725,49 +725,58 @@ histogram **and** a counter (`chat.nats.requests`, `chat.nats.request.handled`):
 a histogram already publishes `_count`, so the counters were the same numbers on
 a second series built from a second attribute set.
 
-**`rpc.method` coverage is partial.** All ten `natsrouter` services emit the
-histogram, but the label is derived by
-`natsmetrics.RequestOperationFromSubject`, whose operation vocabulary covers
-room-service and history-service only. The other eight (user-service,
-search-service, media-service, room-worker, bot-message-handler,
-bot-room-service, translation-service, user-presence-service) record
-`rpc_method="unknown"` on every route — their latency and `error.type` are still real — so SLO-4/5 can
-slice by method for room-service and history-service and nowhere else. Extending
-the vocabulary to the other seven is deliberately a separate change: it is a
-decision about how fine `rpc.method` should be and what that costs in
-cardinality, not a rename.
+**`rpc.method` is declared at route registration.** It used to be derived by
+`natsmetrics.RequestOperationFromSubject`, whose suffix rules were gated on the
+subject's family token being `room` or `orgs`. Everything else fell to the
+default arm, so **51 of the fleet's 96 routes recorded as `rpc_method="unknown"`**
+across seven services — user-service all 29 of its routes, user-presence-service
+all 7, bot-room-service and search-service 5 each, bot-message-handler and
+media-service 2 each, translation-service its 1. Only ten distinct values were
+reachable, and `unknown` was over half the fleet.
 
-**Where the vocabulary is fine, it is fine for a reason.** Most operations are
-coarse categories, but `channel_history` and `thread_open` are single routes,
-because each is the entire numerator and denominator of an SLO:
+`natsrouter.Register`, `RegisterNoBody` and `RegisterOptionalBody` now take a
+`natsmetrics.RPCMethod` from a closed 92-constant vocabulary, so a route that
+declares none does not compile, and the label is resolved once at registration
+instead of parsed from `m.Subject` on every dispatch — a parse that ran even with
+metrics disabled. `RequestOperationFromSubject` and its four helpers are deleted;
+`pkg/natsmetrics/enums_test.go` asserts no subject-derived replacement returns.
 
-| `rpc.method` | Route | Reads |
-|---|---|---|
-| `channel_history` | `.msg.history` → `LoadHistory` | **SLO-4** — 95% within 500 ms |
-| `thread_open` | `.msg.thread` → `GetThreadMessages` | **SLO-5** — 95% within 250 ms |
+One route class deliberately records nothing: `RegisterVoid` declares no method
+and emits no `rpc.server.call.duration` sample. Its four routes are
+user-presence-service's heartbeat lane (`hello`, `ping`, `activity`, `bye`),
+which sends no reply — there is no round trip to time, and recording local
+handler cost under a call-duration histogram would misreport what the metric
+means. They previously recorded as `unknown`; they now record nothing at all.
 
-They were split out of `history_read` because sharing one label made both SLOs
-unmeasurable, in opposite directions: channel load walks `messages_by_room`
-buckets while thread open slices one partition, so the shared series dragged
-thread open's ratio down with walk latency and diluted channel load's violations
-with fast thread traffic — at a ratio that drifts with traffic mix, so not even a
-fixed correction was available.
+**Names are verb-first snake_case**, one per route, following AIP-131/132/190:
+`get_` is one logical resource, `list_` a collection, `batch_get_` several
+resources by caller-supplied keys, `search_` a query. A method names what the
+handler does rather than what its subject spells — `mark_room_read` advances a
+room read position and carries no message id, despite a `.message.` subject. The
+rule is in `pkg/natsmetrics/rpcmethod.go`, because no test can check it.
 
-`history_read` keeps everything the SLOs do not describe: `.msg.next` (scroll),
-`.msg.surrounding` (jump), `.msg.get`, `.msg.get.ids`, `.msg.pinned.list`,
-`.msg.thread.parent`, and the server-to-server thread lanes. Two consequences
-worth stating: `.msg.thread.parent` is a second handler and not part of the
-verified "Enter thread" path, so it stays out of SLO-5; and `.msg.next` is
-user-triggered scrolling with a different cost model from an initial load, so it
-remains residual contamination in any channel-load view built from
-`history_read`. Splitting it out is the obvious next step if SLO-4 calibration
-comes back noisy.
+**SLO-4 and SLO-5 change label values.** They previously read the coarse
+`channel_history` and `thread_open`, which existed as single-route splits out of
+`history_read` precisely because sharing a label made both unmeasurable. With one
+method per route that split is no longer special-cased:
 
-Until then the classifier is anchored on the subject's family token, so an
-unclassified subject stays honestly `unknown` instead of borrowing another
-service's label. It did borrow one: user-service's
-`chat.user.{account}.request.user.{site}.chatlist.section.create` ends in
-`.create` and was recorded as `rpc_method="room_mutation"`.
+| SLO | Route | Was | Now |
+|---|---|---|---|
+| **SLO-4** — 95% within 500 ms | `.msg.history` → `LoadHistory` | `channel_history` | `list_channel_messages` |
+| **SLO-5** — 95% within 250 ms | `.msg.thread` → `GetThreadMessages` | `thread_open` | `list_thread_messages` |
+
+Neither SLO is measured or alerting yet, so this is a rename with no cutover
+window; `sli-slo.md` §3 carries the updated expressions. The same change resolves
+what that section listed as residual contamination: `.msg.next` (scroll),
+`.msg.surrounding` (jump) and `.msg.thread.parent` each now carry their own
+method — `list_next_messages`, `list_surrounding_messages`,
+`list_thread_parent_messages` — rather than sharing `history_read` with the
+routes an SLO describes.
+
+It also removes a real misclassification the old anchor produced:
+user-service's `chat.user.{account}.request.user.{site}.chatlist.section.create`
+ends in `.create` and was recorded as `rpc_method="room_mutation"`, borrowing
+room-service's label.
 
 The five JetStream consumers are `message-gatekeeper`, `message-worker`,
 `broadcast-worker`, `notification-worker`, and `room-worker`. `room-service` and

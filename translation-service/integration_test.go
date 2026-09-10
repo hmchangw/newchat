@@ -35,7 +35,9 @@ func TestTranslate_EndToEnd(t *testing.T) {
 
 	const siteID = "site-a"
 	router := natsrouter.Default(nc, "translation-service")
-	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), NewHandler(mockTranslator{}).Translate)
+	// Through registerRoutes, not a second copy of it: the service has exactly
+	// one registration table, and routes_test.go pins it to a golden file.
+	registerRoutes(router, NewHandler(mockTranslator{}), siteID)
 	t.Cleanup(func() { require.NoError(t, router.Shutdown(context.Background())) })
 
 	reqSubject := subject.TranslateRequest("alice", siteID)

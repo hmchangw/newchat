@@ -23,7 +23,7 @@ router := natsrouter.Default(nc, "my-service")
 // Add HandlerTimeout explicitly — duration varies per service.
 router.Use(natsrouter.HandlerTimeout(5 * time.Second))
 
-natsrouter.Register(router, "chat.user.{account}.msg.send", svc.SendMessage)
+natsrouter.Register(router, "chat.user.{account}.msg.send", natsmetrics.MethodSendRoomMessage, svc.SendMessage)
 
 // On shutdown:
 router.Shutdown(ctx)
@@ -172,13 +172,15 @@ All accept a `Registrar` (currently `*Router`). They are free functions, not `*R
 func Register[Req, Resp any](
     r Registrar,
     pattern string,
+    method natsmetrics.RPCMethod,
     fn func(c *Context, req Req) (*Resp, error),
 )
 
-// No request body, JSON response. For GET-style lookups where all data is in the subject.
+// No request body, JSON response. For handlers whose inputs come entirely from the subject.
 func RegisterNoBody[Resp any](
     r Registrar,
     pattern string,
+    method natsmetrics.RPCMethod,
     fn func(c *Context) (*Resp, error),
 )
 
@@ -190,6 +192,25 @@ func RegisterVoid[Req any](
     fn func(c *Context, req Req) error,
 )
 ```
+
+`method` is the `rpc.method` label the route's `rpc_server_call_duration_seconds`
+samples carry. It comes from the closed vocabulary in
+`pkg/natsmetrics/rpcmethod.go` — one constant per route — so a route that
+*omits* it does not compile. The compiler cannot require a *meaningful* value,
+so the two ways to supply a meaningless one are both bounded rather than silent:
+`natsmetrics.RPCMethod("…")` written deliberately, and `natsmetrics.MethodNone`
+(the `RegisterVoid` marker, which is also the zero value) both record as
+semconv's `_OTHER`. Nothing panics, and nothing silently stops recording —
+metrics are opt-in, so a telemetry defect should neither stop a service nor
+quietly delete a series.
+
+Whether a route records at all is decided by which function registered it, never
+by the method value: `Register`, `RegisterNoBody` and `RegisterOptionalBody`
+always record, and only `RegisterVoid` opts out.
+
+`RegisterVoid` takes no `method` and records no sample: with no reply subject
+there is no round trip to time, and timing local handler cost under a
+call-duration histogram would misreport what the metric measures.
 
 All three **panic** if the NATS subscription fails. This is intentional — registration happens at startup, and a failed subscription means the service cannot function (same pattern as `http.HandleFunc`).
 
@@ -353,23 +374,27 @@ Three handler shapes for three use cases:
 | Function | Request Body | Response | Use Case |
 |----------|-------------|----------|----------|
 | `Register[Req, Resp]` | Yes | Yes | Standard request/reply (most endpoints) |
-| `RegisterNoBody[Resp]` | No | Yes | GET-style lookups where subject has all info |
-| `RegisterVoid[Req]` | Yes | No | Fire-and-forget events (under `WithMaxConcurrency` saturation: dropped with a Warn log; under unbounded default: always spawns) |
+| `RegisterNoBody[Resp]` | No | Yes | Handlers whose inputs come entirely from the subject — reads (`list_members`) and mutations alike (`open_room`, `toggle_mute`, `mark_room_read`) |
+| `RegisterVoid[Req]` | Yes | No | Fire-and-forget events (under `WithMaxConcurrency` saturation: dropped with a Warn log; under unbounded default: always spawns). Takes no `method` and records no `rpc.server.call.duration` sample. |
 
 ```go
 // Request/reply — the most common pattern.
-natsrouter.Register(router, "chat.user.{account}.msg.send",
+natsrouter.Register(router, "chat.user.{account}.msg.send", natsmetrics.MethodSendRoomMessage,
     func(c *natsrouter.Context, req SendRequest) (*SendResponse, error) {
         account := c.Param("account")
         // ... business logic ...
         return &SendResponse{ID: msg.ID}, nil
     })
 
-// GET-style — no request body needed.
-natsrouter.RegisterNoBody(router, "chat.user.{account}.rooms.get.{roomID}",
-    func(c *natsrouter.Context) (*Room, error) {
-        return store.FindRoom(c, c.Param("roomID"))
-    })
+// No request body — all inputs come from subject parameters. Only {account} and
+// {roomID} stay as placeholders; the site is a literal the service supplies at
+// registration.
+natsrouter.RegisterNoBody(
+    router,
+    "chat.user.{account}.request.room.{roomID}.site-a.open",
+    natsmetrics.MethodOpenRoom,
+    service.OpenRoom,
+)
 
 // Fire-and-forget — no response sent. Dropped with a Warn log on saturation.
 natsrouter.RegisterVoid(router, "chat.user.{account}.event.typing",
@@ -687,7 +712,7 @@ These concerns don't belong in a request/reply router. If you need a typed handl
 See `example_test.go` for runnable examples:
 - `Example_basicUsage` — register a handler with params
 - `Example_withMiddleware` — canonical `Default()` + `HandlerTimeout` setup
-- `Example_noBodyHandler` — GET-style endpoint
+- `Example_noBodyHandler` — a handler whose inputs come entirely from the subject
 - `Example_errorHandling` — user-facing vs internal errors
 - `Example_fireAndForget` — RegisterVoid for events
 - `Example_customMiddleware` — write your own middleware
