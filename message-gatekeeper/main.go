@@ -112,14 +112,17 @@ func main() {
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newGatekeeperMetrics(sdk.MeterProvider().Meter("message-gatekeeper"))
 
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
-	if err != nil {
-		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
 	dialer := natsutil.BuddyDialer{
 		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
 		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and validate displaced clients' sends on the buddy, and join the
+	// home lane when it returns.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, sdk.MeterProvider())
+	if err != nil {
+		slog.Error("nats connect failed", "error", err)
+		os.Exit(1)
 	}
 	js, err := nc.JetStream()
 	if err != nil {
@@ -199,11 +202,6 @@ func main() {
 	}
 	handler := laneHandler(nc, js, subject.LaneHome)
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
-		os.Exit(1)
-	}
-
 	messagesCfg := stream.Messages(cfg.SiteID)
 	consumerCfg := buildConsumerConfig(cfg.Consumer)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
@@ -211,27 +209,40 @@ func main() {
 		Stream: messagesCfg.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("bind MESSAGES lane failed", "error", err)
-		os.Exit(1)
-	}
-	consumerMetrics.LoopStarted(ctx)
 
 	var wg sync.WaitGroup
 	// One pool shared by both lanes, so a bound buddy lane does not double this
 	// service's in-flight validations against MongoDB.
 	sem := make(chan struct{}, cfg.MaxWorkers)
 
-	natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
-		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		gatekeeperProcessor(handler))
+	// Home lane, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage. Dev-only stream
+	// bootstrap rides inside for the same reason: it needs the server too.
+	homeLane, err := natsutil.BindWhenConnected(ctx, nc, messagesCfg.Name, func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("messages: %w", err)
+		}
+		consumerMetrics.LoopStarted(ctx)
+		natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
+			func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+			gatekeeperProcessor(handler))
+		return func() {
+			consumerMetrics.LoopStopped(context.Background())
+			iter.Stop()
+		}, nil
+	})
+	if err != nil {
+		slog.Error("bind home lane failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
 	// the service runs home-only.
@@ -252,6 +263,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -263,9 +275,8 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		// Stop both iterators before draining either, so neither lane pulls
 		// new work while the other is still finishing.
-		func(ctx context.Context) error {
-			consumerMetrics.LoopStopped(ctx)
-			iter.Stop()
+		func(_ context.Context) error {
+			homeLane.Stop()
 			buddyLane.Stop()
 			return nil
 		},
