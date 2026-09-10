@@ -89,7 +89,10 @@ const (
 	MethodMoveChat                     RPCMethod = "move_chat"
 	MethodOpenRoom                     RPCMethod = "open_room"
 	MethodPinMessage                   RPCMethod = "pin_message"
-	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	// An rpc.method label value naming the route that refreshes or sets a token,
+	// exported to Prometheus as a metric dimension. Not a credential.
+	// #nosec G101 -- see above
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	MethodRefreshSSOToken            RPCMethod = "refresh_sso_token"
 	MethodRemoveBotRoomMembers       RPCMethod = "remove_bot_room_members"
 	MethodRemoveMember               RPCMethod = "remove_member"
@@ -109,7 +112,10 @@ const (
 	MethodSetManualPresence          RPCMethod = "set_manual_presence"
 	MethodSetRoomRestricted          RPCMethod = "set_room_restricted"
 	MethodSetSettings                RPCMethod = "set_settings"
-	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	// An rpc.method label value naming the route that refreshes or sets a token,
+	// exported to Prometheus as a metric dimension. Not a credential.
+	// #nosec G101 -- see above
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	MethodSetSSOToken           RPCMethod = "set_sso_token"
 	MethodSetUserStatus         RPCMethod = "set_user_status"
 	MethodStartTeamsRoomCall    RPCMethod = "start_teams_room_call"
@@ -204,7 +210,10 @@ var rpcMethodVocabulary = map[RPCMethod]struct{}{
 	MethodMoveChat:                     {},
 	MethodOpenRoom:                     {},
 	MethodPinMessage:                   {},
-	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	// An rpc.method label value naming the route that refreshes or sets a token,
+	// exported to Prometheus as a metric dimension. Not a credential.
+	// #nosec G101 -- see above
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	MethodRefreshSSOToken:            {},
 	MethodRemoveBotRoomMembers:       {},
 	MethodRemoveMember:               {},
@@ -224,7 +233,10 @@ var rpcMethodVocabulary = map[RPCMethod]struct{}{
 	MethodSetManualPresence:          {},
 	MethodSetRoomRestricted:          {},
 	MethodSetSettings:                {},
-	// #nosec G101 -- an rpc.method label value, not a credential: it names the route that refreshes or sets a token, and is exported to Prometheus as a metric dimension
+	// An rpc.method label value naming the route that refreshes or sets a token,
+	// exported to Prometheus as a metric dimension. Not a credential.
+	// #nosec G101 -- see above
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	MethodSetSSOToken:           {},
 	MethodSetUserStatus:         {},
 	MethodStartTeamsRoomCall:    {},
