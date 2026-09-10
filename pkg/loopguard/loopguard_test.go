@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,6 +18,15 @@ import (
 )
 
 var errLoopDied = errors.New("iterator closed unexpectedly")
+
+// SIGTERM cannot be delivered to self on Windows; the stubbed-failure tests
+// above stay portable because they never signal.
+func skipOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("signal delivery test is Unix-only")
+	}
+}
 
 // A guard whose loop has not exited must report ready, or every pod would
 // start its life failing readiness.
@@ -240,6 +250,7 @@ func TestSelfShutdown_ExitsNonZeroWhenSignalFails(t *testing.T) {
 // A delivered signal must NOT exit: the whole point is to let shutdown.WaitOn
 // run the graceful teardown and drain in-flight work.
 func TestSelfShutdown_DoesNotExitWhenSignalSucceeds(t *testing.T) {
+	skipOnWindows(t)
 	restoreExit := exitProcess
 	t.Cleanup(func() { exitProcess = restoreExit })
 	exited := make(chan int, 1)

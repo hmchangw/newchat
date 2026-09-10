@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
@@ -162,10 +163,13 @@ func signalSelf(t *testing.T) {
 // worker can arm it BEFORE starting a loop able to raise SIGTERM on itself: an
 // early signal is latched in the buffer instead of killing the process.
 func TestSignals_LatchesASignalRaisedBeforeWaitOn(t *testing.T) {
+	skipOnWindows(t)
 	sig := shutdown.Signals()
 	defer signal.Stop(sig)
 
-	assert.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	p, err := os.FindProcess(os.Getpid())
+	require.NoError(t, err, "find self")
+	assert.NoError(t, p.Signal(syscall.SIGTERM))
 
 	select {
 	case got := <-sig:

@@ -43,7 +43,10 @@ routed off it.
 The NATS readiness check is `natsutil.HealthCheck(nc)`. JetStream workers add
 one `loopguard.Guard.Check()` per consume loop (named `consume-loop`, or per lane
 in multi-lane workers such as `outbox-ordered-{site}`), which fails with the
-terminal iterator error once that loop has exited.
+terminal consume-loop error once that loop has exited. A pull iterator reports
+the error `Next` returned, such as `nats: consumer deleted`; a callback
+`Consume` lane only learns of its death through a closed channel, so it reports
+`loopguard.ErrConsumeClosed` instead.
 
 ## Liveness
 
