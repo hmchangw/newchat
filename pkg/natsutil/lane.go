@@ -131,6 +131,10 @@ type Lane struct {
 // the shorthand for the ordinary bounded-pool case.
 func NewLane(iter MsgIterator, wg *sync.WaitGroup) *Lane { return &Lane{iter: iter, wg: wg} }
 
+// Bound reports whether the lane came up. A nil Lane is one that never did, so
+// a readiness check can ask without a nil guard of its own.
+func (l *Lane) Bound() bool { return l != nil }
+
 // StartLane binds cons and drains it across a pool of maxWorkers that the lane
 // owns. Use it for a service's only lane; a service running a home lane and a
 // buddy lane wants StartLaneInPool so the two share one budget.

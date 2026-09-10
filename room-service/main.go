@@ -229,14 +229,18 @@ func main() {
 
 	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
-	if err != nil {
-		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
 	dialer := natsutil.BuddyDialer{
 		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
 		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and answer displaced clients on the buddy, and join home when it
+	// returns. The home router's subscriptions are buffered by nats.go until
+	// then.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, sdk.MeterProvider())
+	if err != nil {
+		slog.Error("nats connect failed", "error", err)
+		os.Exit(1)
 	}
 	js, err := nc.JetStream()
 	if err != nil {
@@ -272,7 +276,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	// Dev-only stream bootstrap needs the home server, so it waits for the
+	// connection like a lane would; there is nothing of its own to stop.
+	if _, err := natsutil.BindWhenConnected(ctx, nc, "bootstrap", func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		return func() {}, nil
+	}); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
@@ -384,7 +395,9 @@ func main() {
 			natsutil.JetStreamPublishFunc(pjs, publishMetrics),
 			natsutil.CorePublishFunc(pnc, publishMetrics),
 			cfg.LegacyRoomOrigins.byID,
-			nc.NatsConn().MaxPayload(),
+			// The lane's own broker bounds its replies; the server default
+			// stands in while a lazily dialed home has not reported yet.
+			natsutil.MaxPayload(pnc),
 			routes,
 		)
 		h.dekProvisioner = dekProvisioner
@@ -405,7 +418,7 @@ func main() {
 	// speaks NATS may be shared between them. The restore tracker drives the
 	// home lane's dual-publish window after recovery; the router ignores it on
 	// the failover lane, which always routes global.
-	homeRestores := natsutil.TrackRestores(ctx, nc)
+	homeRestores := natsutil.TrackRestores(ctx, nc, cfg.Buddy.Enabled())
 	var handler *Handler
 	routers, err := failoverlane.BindRouters(ctx, nc, js, &dialer,
 		func(ctx context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
@@ -438,6 +451,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		routers.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

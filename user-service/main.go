@@ -117,15 +117,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
-	if err != nil {
-		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-
 	dialer := natsutil.BuddyDialer{
 		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
 		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and answer displaced clients on the buddy, and join home when it
+	// returns. The home router's subscriptions are buffered by nats.go until
+	// then.
+	nc, err := dialer.ConnectHome(ctx, cfg.NATS.URL, sdk.MeterProvider())
+	if err != nil {
+		slog.Error("nats connect failed", "error", err)
+		os.Exit(1)
 	}
 	js, err := nc.JetStream()
 	if err != nil {
@@ -219,11 +222,16 @@ func main() {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
+	// Per lane, from that lane's connection: a reply leaves on the connection
+	// the request arrived on, so it is that broker's max_payload that bounds it.
 	// A zero Budget disables trimming, so the toggle needs no handler branch.
-	pageBudget := pagefit.Budget{}
-	if cfg.PageTrimming {
-		pageBudget = pagefit.Resolve(cfg.MaxResponseBytes, nc.NatsConn().MaxPayload(), pagefit.DefaultReserve)
-	} else {
+	pageBudgetFor := func(conn *o11ynats.Conn) pagefit.Budget {
+		if !cfg.PageTrimming {
+			return pagefit.Budget{}
+		}
+		return pagefit.Resolve(cfg.MaxResponseBytes, natsutil.MaxPayload(conn), pagefit.DefaultReserve)
+	}
+	if !cfg.PageTrimming {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
 	// One service per lane; see failoverlane.RouterFor for why nothing that
@@ -234,7 +242,7 @@ func main() {
 		return service.New(subRepo, userRepo, appRepo, threadSubRepo,
 			roomclient.New(conn, cfg.SiteID), historyclient.New(conn), presenceclient.New(conn),
 			publisher.New(laneJS), publisher.NewCore(conn),
-			badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg, service.WithPageBudget(pageBudget))
+			badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg, service.WithPageBudget(pageBudgetFor(conn)))
 	}
 
 	// A second service instance over the HTTP-only Mongo pool. Everything else --
@@ -288,6 +296,7 @@ func main() {
 	var draining atomic.Bool
 	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second,
 		natsutil.HealthCheck(nc),
+		routers.Check(),
 		drainingCheck(&draining),
 	)
 	if err != nil {

@@ -53,7 +53,17 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
+	// HasFailover gates the bot pipeline out of the buddy lane; it also keeps
+	// the home dial fail-fast there, since without a buddy a pod that cannot
+	// reach home has nothing to do.
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy.OnlyIf(wiring.HasFailover()), CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and serve the buddy lane, and join the home lane when it returns.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
@@ -64,34 +74,37 @@ func run() error {
 
 	h := newHandler(LogDispatcher{})
 
-	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name,
-		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("push-notification-service"),
-			wiring.PushInputWildcard))
-	if err != nil {
-		return fmt.Errorf("create consumer: %w", err)
-	}
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		return fmt.Errorf("messages iter: %w", err)
-	}
-
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
-	natsutil.RunPool(iter, sem, &wg, h.HandleJetStreamMsg)
+
+	// Home lane, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage.
+	homeLane, err := natsutil.BindWhenConnected(ctx, nc, wiring.PushStream.Name, func(ctx context.Context) (func(), error) {
+		cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name,
+			buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("push-notification-service"),
+				wiring.PushInputWildcard))
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("messages iter: %w", err)
+		}
+		natsutil.RunPool(iter, sem, &wg, h.HandleJetStreamMsg)
+		return iter.Stop, nil
+	})
+	if err != nil {
+		return err
+	}
 
 	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
-	// the service runs home-only. HasFailover gates the bot pipeline out.
+	// the service runs home-only.
 	//
 	// APNs and FCM are external and unaffected by a site's NATS outage, so the
 	// one handler serves both lanes: nothing in it speaks NATS.
 	binder := failoverlane.Binder{
 		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
-		Dialer: &natsutil.BuddyDialer{
-			Config: cfg.Buddy.OnlyIf(wiring.HasFailover()), CredsFile: cfg.NatsCredsFile,
-			TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-		},
+		Dialer: &dialer,
 	}
 	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
 		Stream: wiring.PushFailoverStream,
@@ -107,6 +120,7 @@ func run() error {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
 	)
 	if err != nil {
 		return fmt.Errorf("health server: %w", err)
@@ -117,7 +131,7 @@ func run() error {
 		// Stop both iterators before draining, so neither lane pulls new work
 		// while the other is still finishing. Both feed one WaitGroup.
 		func(_ context.Context) error {
-			iter.Stop()
+			homeLane.Stop()
 			buddyLane.Stop()
 			return nil
 		},

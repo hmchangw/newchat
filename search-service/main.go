@@ -228,7 +228,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and answer displaced clients on the buddy, and join home when it
+	// returns. The home router's subscriptions are buffered by nats.go until
+	// then.
+	nc, err := dialer.ConnectHome(ctx, cfg.NATS.URL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -296,10 +304,6 @@ func main() {
 	// One handler per lane over the same stores and caches; only the room
 	// client speaks NATS, and it must go out on the connection the lane's
 	// requests arrive on. No home JetStream: this service publishes nothing.
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
 	routers, err := failoverlane.BindRouters(ctx, nc, nil, &dialer,
 		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, _ subject.Lane) (*natsrouter.Router, error) {
 			handler := newHandler(store, cachedMongo, usersClient, cache, handlerCfg)
@@ -330,6 +334,7 @@ func main() {
 	healthMux := http.NewServeMux()
 	health.Register(healthMux, 5*time.Second,
 		natsutil.HealthCheck(nc),
+		routers.Check(),
 	)
 	healthServer := &http.Server{
 		Handler:           healthMux,

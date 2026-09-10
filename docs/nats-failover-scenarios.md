@@ -218,6 +218,7 @@ was introduced to capture.
 | Federation events *in* from other sites | ✅ Works — redirected to a standby inbox |
 | Editing, deleting, pinning, reacting | ✅ Works |
 | Reading history and chat lists from the buddy | ✅ Works |
+| Pods restarting mid-outage (rollouts, evictions, crashes) | ✅ Boot from the buddy; join home when it returns |
 | Creating rooms, inviting members, renaming | ❌ Fails until recovery |
 | Search index updates for federation events | ❌ Stalls until recovery |
 | The HTTP API's outbound RPCs (`user-service`) | ❌ Fail until recovery |
@@ -247,6 +248,15 @@ piled up drains on its own alongside the failover traffic.
 Users drift home gradually, each on their own retry timer, so they trickle back
 rather than stampeding.
 
+Pods can come and go during the outage too. A service with a buddy configured
+does not insist on reaching home before it starts: if home is down, it boots,
+serves the buddy lane, and keeps dialing home in the background; the home lane
+binds itself the moment the cluster is back. So a rollout, an eviction or a
+crash mid-outage costs nothing but the pod. Readiness reflects this honestly —
+a pod is ready when at least one of its lanes is serving, and not before.
+Without a buddy configured, none of this applies: a single-site service with no
+bus has nothing to do, and failing fast is the right signal.
+
 One deliberate accommodation: for a while after home recovers, room events are
 published to **both** the local and global addresses. Servers recover in
 seconds, users take up to five minutes to notice, and during that gap some users
@@ -260,6 +270,14 @@ knobs**: the window exists only to outlast the client backoff. Raising the
 client cap without raising the window reopens exactly the silent gap the
 dual-publishing was added to close — and the symptom would be a handful of users
 receiving nothing for a few minutes, with no error logged anywhere.
+
+The window survives restarts. A publisher that booted during the outage sees
+home *arrive* rather than come back, and treats that arrival as the recovery it
+is. A publisher that restarts after home has already recovered sees no reconnect
+at all — so with a buddy configured it assumes it just missed one and opens the
+window anyway. The cost is one grace period of dual publishing per restart,
+which is cheap; the alternative was a fresh pod narrowing delivery while users
+were still on partner sites.
 
 During recovery, messages may briefly arrive slightly out of order, because two
 lanes are draining at once. **Stored history is unaffected** — it's ordered by

@@ -51,8 +51,17 @@ func (t *RestoreTracker) RestoredAt() time.Time {
 	return time.Unix(0, n).UTC()
 }
 
-// TrackRestores watches conn and stamps a tracker every time it returns to
-// CONNECTED after a drop.
+// TrackRestores watches conn and stamps a tracker every time it reaches
+// CONNECTED after not being connected: a reconnect after a drop, and — on a
+// lazily dialed home (BuddyDialer.ConnectHome) — the first connect of a pod
+// that booted during the outage, which IS the recovery from where it stands.
+//
+// assumeOutage stamps the tracker at startup as well. A publisher that restarts
+// after home has already recovered sees no reconnect, but clients can still be
+// on peers for up to their probe backoff; with a buddy configured a restart is
+// indistinguishable from a recovery, so it opens the window rather than
+// narrowing delivery. The cost is one grace period of dual publishing per
+// restart, which is cheap; the alternative was silent same-site events.
 //
 // StatusChanged rather than nats.ReconnectHandler: Connect already installs a
 // ReconnectHandler for logging, and same-kind nats.Options overwrite rather than
@@ -61,8 +70,11 @@ func (t *RestoreTracker) RestoredAt() time.Time {
 //
 // The watcher goroutine exits when ctx is cancelled. A nil conn yields an inert
 // tracker, so a caller with no connection needs no nil check of its own.
-func TrackRestores(ctx context.Context, conn *o11ynats.Conn) *RestoreTracker {
+func TrackRestores(ctx context.Context, conn *o11ynats.Conn, assumeOutage bool) *RestoreTracker {
 	tr := &RestoreTracker{}
+	if assumeOutage {
+		tr.MarkRestored(time.Now().UTC())
+	}
 	if conn == nil {
 		return tr
 	}

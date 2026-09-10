@@ -926,7 +926,13 @@ func main() {
 	}
 	store.ensureIndexes(ctx)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and serve the buddy lane, and join the home lane when it returns.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -938,19 +944,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
-		os.Exit(1)
-	}
-
 	inboxCfg := stream.Inbox(cfg.SiteID)
-
-	// Internal lane is reserved for search-sync-worker; scope to external.> only.
-	cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
 
 	// Empty VALKEY_ADDRS disables the badge cache and the subauthcache L2 bust
 	// — both become no-ops (nil-checked in handler.go).
@@ -1017,7 +1011,24 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	homeLane, err := startInboxLane(ctx, cons, &cfg, handler, sem, &wg)
+	// Home lane, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage. Dev-only stream
+	// bootstrap rides inside for the same reason: it needs the server too.
+	homeLane, err := natsutil.BindWhenConnected(ctx, nc, inboxCfg.Name, func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		// Internal lane is reserved for search-sync-worker; scope to external.> only.
+		cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		lane, err := startInboxLane(ctx, cons, &cfg, handler, sem, &wg)
+		if err != nil {
+			return nil, err
+		}
+		return lane.Stop, nil
+	})
 	if err != nil {
 		slog.Error("bind INBOX lane failed", "error", err)
 		os.Exit(1)
@@ -1028,11 +1039,7 @@ func main() {
 	// peer cluster we only need during an outage.
 	var buddyLane *natsutil.Lane
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID,
-		Dialer: &natsutil.BuddyDialer{
-			Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
-			TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-		},
+		SiteID: cfg.SiteID, Dialer: &dialer,
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
 	buddyConn := binder.Dialer.Bind(ctx,
@@ -1044,6 +1051,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -1060,12 +1068,8 @@ func main() {
 			buddyLane.Stop()
 			return nil
 		},
-		func(ctx context.Context) error {
-			if err := homeLane.Wait(ctx); err != nil {
-				return err
-			}
-			return buddyLane.Wait(ctx)
-		},
+		// Both lanes feed one WaitGroup, so waiting on it drains both.
+		func(ctx context.Context) error { return natsutil.WaitPool(ctx, &wg) },
 		// Unsubscribe before the drain so no refresh arrives after the store closes.
 		func(_ context.Context) error { return activitySub.Unsubscribe() },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },

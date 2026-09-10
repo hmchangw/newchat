@@ -318,26 +318,24 @@ func main() {
 		keyStore = roomkeystore.NewMongoStore(roomsForKeys, cfg.RoomKeyGracePeriod)
 	}
 
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
+	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
+	// HasFailover gates the bot pipeline out of the buddy lane; it also keeps
+	// the home dial fail-fast there, since without a buddy a pod that cannot
+	// reach home has nothing to do.
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy.OnlyIf(wiring.HasFailover()), CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and serve the buddy lane, and join the home lane when it returns.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
-
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
-		os.Exit(1)
-	}
-
-	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
-
-	if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -347,11 +345,6 @@ func main() {
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
 
 	// The cross-site room-position announce. It used to ride the rooms.lastMsgAt
 	// flush; that write is roomlist-worker's now, so it fires from the fan-out path
@@ -415,7 +408,7 @@ func main() {
 		sealer: sealer, previews: previews,
 		domainMetrics: domainMetrics, publishMetrics: publishMetrics,
 		activityPeers: activityPeers, routeMode: roomRouteMode, cfg: &cfg,
-		restoredAt: natsutil.TrackRestores(ctx, nc).RestoredAt,
+		restoredAt: natsutil.TrackRestores(ctx, nc, cfg.Buddy.Enabled()).RestoredAt,
 	}
 	handler := shared.newLaneHandler(nc, js, subject.LaneHome)
 
@@ -434,26 +427,45 @@ func main() {
 		os.Exit(1)
 	}
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-	consumerMetrics.LoopStarted(ctx)
-
 	var wg sync.WaitGroup
 	// One pool shared by both lanes: a buddy lane with its own semaphore would
 	// take this service to 2xMAX_WORKERS in-flight handlers against the same
 	// MongoDB and Valkey, even though the two lanes carry the same site's work.
 	sem := make(chan struct{}, cfg.MaxWorkers)
-	natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
-		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		guardedProcessor(broadcastProcessor(handler)))
+
+	// Home lane, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage. Dev-only stream
+	// bootstrap rides inside for the same reason: it needs the server too.
+	homeLane, err := natsutil.BindWhenConnected(ctx, nc, wiring.CanonicalStream.Name, func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("messages: %w", err)
+		}
+		consumerMetrics.LoopStarted(ctx)
+		natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
+			func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+			guardedProcessor(broadcastProcessor(handler)))
+		return func() {
+			consumerMetrics.LoopStopped(context.Background())
+			iter.Stop()
+		}, nil
+	})
+	if err != nil {
+		slog.Error("bind home lane failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
-	// the service runs home-only. HasFailover gates the bot pipeline out.
+	// the service runs home-only.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(wiring.HasFailover()),
+		SiteID: cfg.SiteID, Dialer: &dialer,
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
 		Sem: sem, WG: &wg, Metrics: sharedMetrics,
 	}
@@ -475,6 +487,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -495,9 +508,8 @@ func main() {
 		},
 		// Stop both iterators before draining, so neither lane pulls new work
 		// while the other is still finishing. Both feed one WaitGroup.
-		func(ctx context.Context) error {
-			consumerMetrics.LoopStopped(ctx)
-			iter.Stop()
+		func(_ context.Context) error {
+			homeLane.Stop()
 			buddyLane.Stop()
 			return nil
 		},

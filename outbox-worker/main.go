@@ -67,34 +67,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
-	if err != nil {
-		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
-		os.Exit(1)
-	}
-
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
-		os.Exit(1)
-	}
-
-	outboxCfg := stream.Outbox(cfg.SiteID)
-
-	process := newLaneProcess(js)
-
-	// Shared bounded worker pool: every relay event is idempotent (dedup via
-	// DedupID + the destination inbox-worker's high-water-mark guards), so
-	// concurrent forwarding is order-safe. The pool caps total in-flight work
-	// across every per-destination concurrent lane.
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	var wg sync.WaitGroup
-
 	// Both lanes are per remote peer (from ALL_SITE_IDS). Per destination, not a
 	// single shared consumer, so a down peer's parked forwards (MaxDeliver=-1,
 	// never Ack) fill only their own consumer's ack-pending budget instead of
@@ -106,56 +78,108 @@ func main() {
 		slog.Warn("no remote peers in ALL_SITE_IDS — federation events published to OUTBOX would sit unconsumed",
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
-	iters := make([]o11ynats.MessagesContext, 0, len(peers))
-	orderedCtxs := make([]o11ynats.ConsumeContext, 0, len(peers))
-	for _, dest := range peers {
-		ccons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create concurrent consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-		if err != nil {
-			slog.Error("concurrent messages failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		iters = append(iters, iter)
-		drainPool(ctx, iter, sem, &wg, process)
 
-		ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create ordered consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		cc, err := ocons.Consume(ctx, process)
-		if err != nil {
-			slog.Error("ordered consume failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		orderedCtxs = append(orderedCtxs, cc)
-	}
-
-	// Buddy lane: keeps this site federating OUTWARD while its own NATS is down.
-	// The buddy dial never fails startup — on any failure no failover lane is added
-	// and the home lanes carry on. With no peers there is nothing to forward, so
-	// the lane is gated out entirely.
+	// With no peers there is nothing to forward, so the buddy lane is gated out
+	// entirely — and the home dial stays fail-fast, since without a buddy a pod
+	// that cannot reach home has nothing to do.
 	dialer := natsutil.BuddyDialer{
 		Config: cfg.Buddy.OnlyIf(len(peers) > 0), CredsFile: cfg.NatsCredsFile,
 		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
 	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and keep federating outward through the buddy, and join the home
+	// lanes when home returns.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, nil)
+	if err != nil {
+		slog.Error("nats connect failed", "error", err)
+		os.Exit(1)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		slog.Error("jetstream init failed", "error", err)
+		os.Exit(1)
+	}
+
+	outboxCfg := stream.Outbox(cfg.SiteID)
+
+	// Shared bounded worker pool: every relay event is idempotent (dedup via
+	// DedupID + the destination inbox-worker's high-water-mark guards), so
+	// concurrent forwarding is order-safe. The pool caps total in-flight work
+	// across every per-destination concurrent lane.
+	sem := make(chan struct{}, cfg.MaxWorkers)
+	var wg sync.WaitGroup
+
+	// Home lanes, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage. Dev-only stream
+	// bootstrap rides inside for the same reason: it needs the server too. The
+	// per-peer consumers are the bind's own, so its stop closes exactly them.
+	homeLanes, err := natsutil.BindWhenConnected(ctx, nc, outboxCfg.Name, func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		process := newLaneProcess(js)
+		iters := make([]o11ynats.MessagesContext, 0, len(peers))
+		orderedCtxs := make([]o11ynats.ConsumeContext, 0, len(peers))
+		stop := func() {
+			for _, it := range iters {
+				it.Stop()
+			}
+			for _, cc := range orderedCtxs {
+				cc.Stop()
+			}
+		}
+		for _, dest := range peers {
+			ccons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
+			if err != nil {
+				stop()
+				return nil, fmt.Errorf("create concurrent consumer for %s: %w", dest, err)
+			}
+			iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+			if err != nil {
+				stop()
+				return nil, fmt.Errorf("concurrent messages for %s: %w", dest, err)
+			}
+			iters = append(iters, iter)
+			drainPool(ctx, iter, sem, &wg, process)
+
+			ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
+			if err != nil {
+				stop()
+				return nil, fmt.Errorf("create ordered consumer for %s: %w", dest, err)
+			}
+			cc, err := ocons.Consume(ctx, process)
+			if err != nil {
+				stop()
+				return nil, fmt.Errorf("ordered consume for %s: %w", dest, err)
+			}
+			orderedCtxs = append(orderedCtxs, cc)
+		}
+		return stop, nil
+	})
+	if err != nil {
+		slog.Error("bind home lanes failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Buddy lane: keeps this site federating OUTWARD while its own NATS is down.
+	// The buddy dial never fails startup — on any failure no failover lane is added
+	// and the home lanes carry on.
+	var buddyIters []o11ynats.MessagesContext
+	var buddyOrdered []o11ynats.ConsumeContext
 	buddyConn := dialer.Bind(ctx, func(ctx context.Context, _ *o11ynats.Conn, bjs o11ynats.JetStream) error {
 		// Its own process, forwarding through the buddy connection.
 		fIters, fOrdered, fErr := startFailoverLanes(ctx, bjs, &cfg, peers, sem, &wg, newLaneProcess(bjs))
 		if fErr != nil {
 			return fErr
 		}
-		iters = append(iters, fIters...)
-		orderedCtxs = append(orderedCtxs, fOrdered...)
+		buddyIters, buddyOrdered = fIters, fOrdered
 		return nil
 	})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLanes.Ready, func() bool { return len(buddyIters) > 0 }),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -165,11 +189,12 @@ func main() {
 	slog.Info("outbox-worker running", "site", cfg.SiteID, "federation_peers", peers)
 
 	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error {
-			for _, it := range iters {
+		func(context.Context) error {
+			homeLanes.Stop()
+			for _, it := range buddyIters {
 				it.Stop()
 			}
-			for _, cc := range orderedCtxs {
+			for _, cc := range buddyOrdered {
 				cc.Stop()
 			}
 			return nil

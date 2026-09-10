@@ -129,15 +129,18 @@ func main() {
 
 	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
-	if err != nil {
-		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-
 	dialer := natsutil.BuddyDialer{
 		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
 		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and answer displaced clients on the buddy, and join home when it
+	// returns. The home router's subscriptions are buffered by nats.go until
+	// then.
+	nc, err := dialer.ConnectHome(ctx, cfg.NATS.URL, sdk.MeterProvider())
+	if err != nil {
+		slog.Error("nats connect failed", "error", err)
+		os.Exit(1)
 	}
 	js, err := nc.JetStream()
 	if err != nil {
@@ -363,17 +366,21 @@ func main() {
 		slog.Info("preview cache enabled", "size", cfg.PreviewCacheSize, "ttl", cfg.PreviewCacheTTL)
 	}
 
+	// Per lane, from that lane's connection: a reply leaves on the connection
+	// the request arrived on, so it is that broker's max_payload that bounds it.
 	// A zero Budget disables trimming, so the toggle needs no handler branch.
-	pageBudget := pagefit.Budget{}
-	if cfg.PageTrimming {
-		pageBudget = pagefit.Resolve(cfg.MaxResponseBytes, nc.NatsConn().MaxPayload(), pagefit.DefaultReserve)
-	} else {
+	pageBudgetFor := func(conn *o11ynats.Conn) pagefit.Budget {
+		if !cfg.PageTrimming {
+			return pagefit.Budget{}
+		}
+		return pagefit.Resolve(cfg.MaxResponseBytes, natsutil.MaxPayload(conn), pagefit.DefaultReserve)
+	}
+	if !cfg.PageTrimming {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
 	if !cfg.PreviewWarmBackEnabled {
 		slog.Warn("preview warm-back DISABLED — rooms without a stored preview re-walk Cassandra once per preview-cache TTL")
 	}
-	opts = append(opts, service.WithPageBudget(pageBudget))
 
 	// The service reads the tier on the degraded path; the seeder above writes it.
 	if roomTimes != nil {
@@ -397,7 +404,7 @@ func main() {
 			svc := service.New(cassRepo, subSource, roomSource,
 				publisher.New(laneJS, publisher.WithMetrics(publishMetrics)),
 				threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg,
-				append(slices.Clone(opts), service.WithLane(lane))...)
+				append(slices.Clone(opts), service.WithLane(lane), service.WithPageBudget(pageBudgetFor(conn)))...)
 			// Default middleware chain plus the guard's admission cap and
 			// per-request timeout, so a burst or a slow dependency cannot
 			// saturate the Mongo pool.
@@ -412,6 +419,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		routers.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

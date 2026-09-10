@@ -118,14 +118,18 @@ func main() {
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
+	// Default mode only: teams is a one-time migration path with no standby
+	// stream, so it has no buddy lane and keeps the fail-fast home dial.
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy.OnlyIf(cfg.Mode != "teams"), CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and serve the buddy lane, and join the home lane when it returns.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
-	}
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
 	}
 	js, err := nc.JetStream()
 	if err != nil {
@@ -230,11 +234,6 @@ func main() {
 	}
 	handler := newLaneHandler(nc, js, subject.LaneHome)
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
-		os.Exit(1)
-	}
-
 	streamName := stream.MessagesCanonical(cfg.SiteID).Name
 	if cfg.Mode == "teams" {
 		streamName = stream.MessagesTeams(cfg.SiteID).Name
@@ -246,18 +245,6 @@ func main() {
 		Stream: streamName, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-	consumerMetrics.LoopStarted(ctx)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
@@ -285,14 +272,38 @@ func main() {
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
 	process := canonicalProcessor(handler, teamsMigration, teamsBatchSubj)
 
-	natsutil.RunPool(iter, sem, &wg, process,
-		natsutil.WithLaneMetrics(consumerMetrics, consumerCfg.MaxDeliver))
+	// Home lane, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage. Dev-only stream
+	// bootstrap rides inside for the same reason: it needs the server too.
+	homeLane, err := natsutil.BindWhenConnected(ctx, nc, streamName, func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		cons, err := js.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("messages: %w", err)
+		}
+		consumerMetrics.LoopStarted(ctx)
+		natsutil.RunPool(iter, sem, &wg, process,
+			natsutil.WithLaneMetrics(consumerMetrics, consumerCfg.MaxDeliver))
+		return func() {
+			consumerMetrics.LoopStopped(context.Background())
+			iter.Stop()
+		}, nil
+	})
+	if err != nil {
+		slog.Error("bind home lane failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
-	// the service runs home-only. Default mode only: teams is a one-time
-	// migration path with no standby stream, so the lane never runs it.
+	// the service runs home-only.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(cfg.Mode != "teams"),
+		SiteID: cfg.SiteID, Dialer: &dialer,
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
 		Sem: sem, WG: &wg, Metrics: sharedMetrics,
 	}
@@ -305,6 +316,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -316,9 +328,8 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		// Stop both iterators before draining, so neither lane pulls new work
 		// while the other is still finishing. Both feed one WaitGroup.
-		func(ctx context.Context) error {
-			consumerMetrics.LoopStopped(ctx)
-			iter.Stop()
+		func(_ context.Context) error {
+			homeLane.Stop()
 			buddyLane.Stop()
 			return nil
 		},

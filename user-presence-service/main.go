@@ -150,7 +150,15 @@ func main() {
 	}
 	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and answer displaced clients on the buddy, and join home when it
+	// returns. The home router's subscriptions are buffered by nats.go until
+	// then.
+	nc, err := dialer.ConnectHome(ctx, cfg.NATS.URL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -172,10 +180,6 @@ func main() {
 	// One handler per lane over the same store and user cache: the presence
 	// broadcast and the peer-site query both speak NATS and must go out on the
 	// connection the lane's requests arrive on.
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
 	routers, err := failoverlane.BindRouters(ctx, nc, nil, &dialer,
 		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, _ subject.Lane) (*natsrouter.Router, error) {
 			peer := NewNATSPeerPresenceClient(conn.NatsConn(), cfg.Presence.PeerTimeout)

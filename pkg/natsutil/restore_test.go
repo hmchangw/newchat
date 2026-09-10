@@ -67,7 +67,7 @@ func TestRestoreTracker_ConcurrentAccess(t *testing.T) {
 }
 
 func TestTrackRestores_NilConnYieldsAnInertTracker(t *testing.T) {
-	tr := natsutil.TrackRestores(context.Background(), nil)
+	tr := natsutil.TrackRestores(context.Background(), nil, false)
 	require.NotNil(t, tr)
 	assert.True(t, tr.RestoredAt().IsZero())
 }
@@ -82,7 +82,7 @@ func TestTrackRestores_StopsOnContextCancel(t *testing.T) {
 	t.Cleanup(func() { conn.NatsConn().Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tr := natsutil.TrackRestores(ctx, conn)
+	tr := natsutil.TrackRestores(ctx, conn, false)
 	require.NotNil(t, tr)
 	assert.True(t, tr.RestoredAt().IsZero(), "a connection that never dropped is not restored")
 
@@ -103,7 +103,7 @@ func TestTrackRestores_StampsAReconnect(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	tr := natsutil.TrackRestores(ctx, conn)
+	tr := natsutil.TrackRestores(ctx, conn, false)
 	require.True(t, tr.RestoredAt().IsZero())
 
 	ns.restart(t)
@@ -149,4 +149,33 @@ func (n *restartableNATS) restart(t *testing.T) {
 	n.srv.Shutdown()
 	n.srv.WaitForShutdown()
 	n.start(t)
+}
+
+// A publisher that restarts after home has already recovered sees no reconnect,
+// so it would skip the grace window while clients are still on peers for up to
+// five minutes. With a buddy configured a restart is indistinguishable from a
+// recovery, so the window opens at startup.
+func TestTrackRestores_AssumeOutageOpensTheWindowAtStartup(t *testing.T) {
+	tr := natsutil.TrackRestores(context.Background(), nil, true)
+	assert.False(t, tr.RestoredAt().IsZero())
+	assert.WithinDuration(t, time.Now(), tr.RestoredAt(), 5*time.Second)
+}
+
+// A pod that boots during the outage sees its home connection arrive for the
+// FIRST time rather than come back — and that arrival is the recovery, so it
+// must open the window too.
+func TestTrackRestores_FirstConnectOnALazyDialOpensTheWindow(t *testing.T) {
+	url, start := reservePort(t)
+	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.NatsConn().Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	tr := natsutil.TrackRestores(ctx, conn, false)
+	require.True(t, tr.RestoredAt().IsZero())
+
+	start()
+	require.Eventually(t, func() bool { return !tr.RestoredAt().IsZero() },
+		20*time.Second, 50*time.Millisecond, "home arriving after boot is a recovery")
 }

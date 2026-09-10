@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -68,7 +69,7 @@ type Handler struct {
 	// stream. Nil unless a buddy connection was established; set via
 	// SetFailoverPublisher rather than the constructor, whose signature is
 	// already long enough that a 15th positional param would be a liability.
-	publishToFailoverStream  func(ctx context.Context, subj string, data []byte, msgID string) error
+	publishToFailoverStream  atomic.Pointer[outboxPublishFunc]
 	publishCore              func(ctx context.Context, subj string, data []byte) error
 	restrictedRoomMinMembers int
 	legacyRoomOrigins        map[string]string
@@ -900,15 +901,24 @@ func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action
 // outbox.
 func (h *Handler) federateOne(ctx context.Context, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupSeed string, ts int64) error {
 	dedupID := natsutil.InboxDedupID(ctx, destSiteID, dedupSeed)
-	return outbox.PublishWithFailover(ctx, h.publishToStream, h.publishToFailoverStream,
+	var failover outboxPublishFunc
+	if fn := h.publishToFailoverStream.Load(); fn != nil {
+		failover = *fn
+	}
+	return outbox.PublishWithFailover(ctx, h.publishToStream, failover,
 		h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }
 
+// outboxPublishFunc is the shape of a publish onto an OUTBOX lane.
+type outboxPublishFunc = func(ctx context.Context, subj string, data []byte, msgID string) error
+
 // SetFailoverPublisher installs the buddy-lane publisher. Called from main once
-// the buddy connection is established; leaving it nil keeps federateOne on the
-// live lane only, which is the correct behaviour for a single-site deployment.
-func (h *Handler) SetFailoverPublisher(fn func(ctx context.Context, subj string, data []byte, msgID string) error) {
-	h.publishToFailoverStream = fn
+// the buddy connection is established — after the home router is already
+// answering requests, hence the atomic: a home request can be inside
+// federateOne at that moment. Leaving it unset keeps federateOne on the live
+// lane only, which is the correct behaviour for a single-site deployment.
+func (h *Handler) SetFailoverPublisher(fn outboxPublishFunc) {
+	h.publishToFailoverStream.Store(&fn)
 }
 
 func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest) (*model.StatusReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
