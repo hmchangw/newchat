@@ -108,8 +108,7 @@ func run() error {
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	store := newStoreMongo(mc.Database(cfg.MongoDB))
-	// Bounded timeout so a hung createIndexes surfaces at startup.
-	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
 	defer ensureCancel()
 	if err := store.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure store indexes failed; continuing (indexes are best-effort)", "error", err)

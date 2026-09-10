@@ -4,6 +4,9 @@ package mongoutil
 
 import (
 	"context"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -84,4 +87,138 @@ func TestEnsureIndexWithRepair_DirtyDataRestoresOldIndex(t *testing.T) {
 	require.Equal(t, "account_1", restored.name, "the old account index must be restored, not left dropped")
 	u, _ := restored.spec["unique"].(bool)
 	assert.False(t, u, "the restored index must faithfully preserve the old (non-unique) spec")
+}
+
+func TestListIndexUniqueness_ReportsUniqueFlagPerIndex(t *testing.T) {
+	ctx := context.Background()
+	coll := testutil.MongoDB(t, "mongoutil_idx_uniq").Collection("docs")
+
+	_, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "plain", Value: 1}},
+	})
+	require.NoError(t, err)
+	_, err = coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "strict", Value: 1}}, Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+
+	have, err := listIndexUniqueness(ctx, coll)
+	require.NoError(t, err)
+
+	// A same-named index that lost its constraint must read as present-but-not-unique,
+	// never as unique: that is the whole reason this exists beside WarnMissingIndexes.
+	assert.False(t, have["plain_1"], "plain_1 must be listed as non-unique")
+	assert.True(t, have["strict_1"], "strict_1 must be listed as unique")
+	assert.Contains(t, have, "_id_")
+}
+
+// recordHandler captures each slog message with its index attribute so a test
+// can assert which warning named which index.
+type recordHandler struct {
+	mu      sync.Mutex
+	entries []struct{ msg, index string }
+}
+
+func (h *recordHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordHandler) Handle(_ context.Context, r slog.Record) error { //nolint:gocritic // slog.Handler's signature
+	var index string
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "index" {
+			index = a.Value.String()
+		}
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.entries = append(h.entries, struct{ msg, index string }{r.Message, index})
+	return nil
+}
+func (h *recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordHandler) WithGroup(string) slog.Handler      { return h }
+
+// captureLogs installs a recordHandler as the default logger for the test.
+func captureLogs(t *testing.T) *recordHandler {
+	t.Helper()
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	h := &recordHandler{}
+	slog.SetDefault(slog.New(h))
+	return h
+}
+
+// indexesWarned returns, per warning message fragment, the index names it named.
+func (h *recordHandler) indexesWarned() map[string][]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string][]string{}
+	for _, e := range h.entries {
+		switch {
+		case strings.Contains(e.msg, "missing"):
+			out["missing"] = append(out["missing"], e.index)
+		case strings.Contains(e.msg, "not unique"):
+			out["not unique"] = append(out["not unique"], e.index)
+		}
+	}
+	return out
+}
+
+// WarnMissingUniqueIndexes must tell apart an absent index from one that exists
+// under the expected name but lost its unique option — the case the name-only
+// WarnMissingIndexes passes silently — and stay quiet for a unique one.
+func TestWarnMissingUniqueIndexes_DistinguishesAbsentFromNonUnique(t *testing.T) {
+	ctx := context.Background()
+	coll := testutil.MongoDB(t, "mongoutil_warn_unique_test").Collection("things")
+	_, err := coll.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "ok", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "loose", Value: 1}}},
+	})
+	require.NoError(t, err)
+
+	h := captureLogs(t)
+
+	WarnMissingUniqueIndexes(ctx, coll, "ok_1", "loose_1", "absent_1")
+
+	got := h.indexesWarned()
+	assert.Equal(t, []string{"absent_1"}, got["missing"])
+	assert.Equal(t, []string{"loose_1"}, got["not unique"])
+}
+
+// WarnMissingIndexes shares the listing with the unique variant, so an
+// unlistable collection yields one "cannot list" warning, never a misleading
+// "missing" per name.
+func TestWarnMissingIndexes_ReportsOnlyAbsentNames(t *testing.T) {
+	ctx := context.Background()
+	coll := testutil.MongoDB(t, "mongoutil_warn_missing_test").Collection("things")
+	_, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "loose", Value: 1}}})
+	require.NoError(t, err)
+
+	h := captureLogs(t)
+
+	WarnMissingIndexes(ctx, coll, "loose_1", "absent_1")
+
+	got := h.indexesWarned()
+	assert.Equal(t, []string{"absent_1"}, got["missing"])
+	assert.Empty(t, got["not unique"], "the name-only variant never judges uniqueness")
+}
+
+// EnsureIndex is the non-destructive sibling of EnsureIndexWithRepair: it
+// creates an absent index, is a no-op on an identical one, and refuses to touch
+// a same-keys index with a different spec — that repair belongs to the owner.
+func TestEnsureIndex_CreatesAbsentAndRefusesToRepair(t *testing.T) {
+	ctx := context.Background()
+	unique := mongo.IndexModel{Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true)}
+
+	fresh := repairTestColl(t, "mongoutil_ensure_index_fresh_test")
+	require.NoError(t, EnsureIndex(ctx, fresh, unique))
+	assert.True(t, testutil.IndexSpecs(t, fresh)["account:1"], "created unique on an index-less collection")
+	require.NoError(t, EnsureIndex(ctx, fresh, unique), "identical spec is a no-op")
+
+	dirty := repairTestColl(t, "mongoutil_ensure_index_dirty_test")
+	_, err := dirty.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "account", Value: 1}}})
+	require.NoError(t, err)
+	err = EnsureIndex(ctx, dirty, unique)
+	require.ErrorIs(t, err, ErrIndexSpecConflict)
+	specs := testutil.IndexSpecs(t, dirty)
+	require.Contains(t, specs, "account:1", "the conflicting index must still exist for the owner to repair")
+	assert.False(t, specs["account:1"], "and it must still be non-unique: nothing was repaired")
 }
