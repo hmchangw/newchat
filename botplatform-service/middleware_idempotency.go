@@ -70,12 +70,16 @@ func botIdempotency(
 		key := "idem:" + opID
 
 		acquired, err := client.SetNX(ctx, key, "processing", sentinelTTL)
-		if err != nil {
-			errhttp.Write(ctx, c, errcode.Internal("bot idempotency: acquire", errcode.WithCause(err)))
-			c.Abort()
+		switch {
+		case err != nil:
+			// Admit without a sentinel, and skip the release below since nothing
+			// was acquired. The sentinel only ever guarded overlapping retries —
+			// it releases on non-5xx and re-keys each 60s bucket — so failing
+			// open widens an already-open window rather than dropping dedup.
+			bypassControl(ctx, "idempotency", controlIdempotency, err, "endpoint", endpoint)
+			c.Next()
 			return
-		}
-		if !acquired {
+		case !acquired:
 			c.Header("Retry-After", "1")
 			errhttp.Write(ctx, c, errBotInFlight)
 			c.Abort()

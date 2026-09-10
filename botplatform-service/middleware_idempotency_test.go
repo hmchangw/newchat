@@ -196,7 +196,11 @@ func TestBotIdempotency(t *testing.T) {
 			"5xx must NOT release the sentinel — let it expire so the original handler is not raced")
 	})
 
-	t.Run("valkey error on SetNX surfaces as 500", func(t *testing.T) {
+	// Bots are critical: an unreachable sentinel must admit rather than reject.
+	// The guard only ever covered overlapping retries — it releases on non-5xx
+	// and re-keys every 60s bucket — so failing open widens a window that is
+	// already open in healthy operation rather than dropping durable dedup.
+	t.Run("SetNX error fails open and admits the request", func(t *testing.T) {
 		client := newFakeSentinel()
 		client.setNXErr = errors.New("boom")
 		tp := &stubTime{ns: time.Second.Nanoseconds()}
@@ -204,8 +208,10 @@ func TestBotIdempotency(t *testing.T) {
 
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, idemPost("/api/v1/rooms/r1/messages", []byte(`{"content":"hi"}`)))
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-		assert.Equal(t, int32(0), *calls, "handler must not run when sentinel acquire fails")
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, int32(1), *calls, "handler must run when the sentinel is unavailable")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&client.delCalls),
+			"must not release a sentinel it never acquired")
 	})
 
 	t.Run("body available to downstream handler after middleware", func(t *testing.T) {
