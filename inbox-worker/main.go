@@ -934,7 +934,10 @@ func main() {
 	}
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
-	membershipCh := make(chan laneMsg, cfg.MaxWorkers)
+	// Sized from the delivery budget, not MaxWorkers, so the dispatcher can
+	// never park on a full lane and starve the concurrent one — see
+	// membershipLaneCap.
+	membershipCh := make(chan laneMsg, membershipLaneCap(cfg.Consumer.MaxAckPending))
 	var wg sync.WaitGroup
 
 	process := func(m laneMsg) {
@@ -959,29 +962,9 @@ func main() {
 		}
 	}()
 
-	go func() {
-		defer close(membershipCh)
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				return
-			}
-			m := laneMsg{ctx: msgCtx, msg: msg}
-			if isMembershipSubject(msg.Subject(), cfg.SiteID) {
-				membershipCh <- m
-				continue
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func() {
-				defer func() {
-					<-sem
-					wg.Done()
-				}()
-				process(m)
-			}()
-		}
-	}()
+	go dispatchLanes(iter,
+		func(subj string) bool { return isMembershipSubject(subj, cfg.SiteID) },
+		membershipCh, sem, &wg, process)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
