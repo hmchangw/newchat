@@ -36,7 +36,7 @@ func TestFailureLedger_ExpireRetiresAtMostOneBatchPerSweep(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 25, finalized)
-	assert.Len(t, ledger.active, 75)
+	assert.Equal(t, 75, ledger.Snapshot().Active)
 }
 
 func TestFailureLedger_ExpireDrainsTheBacklogOverSuccessiveSweeps(t *testing.T) {
@@ -56,7 +56,7 @@ func TestFailureLedger_ExpireDrainsTheBacklogOverSuccessiveSweeps(t *testing.T) 
 	}
 
 	assert.Equal(t, 100, total)
-	assert.Empty(t, ledger.active)
+	assert.Zero(t, ledger.Snapshot().Active)
 }
 
 func TestFailureLedger_ExpireIsUnboundedWhenNoBatchIsConfigured(t *testing.T) {

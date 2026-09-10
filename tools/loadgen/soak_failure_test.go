@@ -83,14 +83,15 @@ func TestSoakFailureExpiryLoop_FinalizesPastDeadline(t *testing.T) {
 
 func TestSoakFailureExpiryLoop_ReportsPersistenceFailureAndStopsOnCancel(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	journal := &failingFailureJournal{err: errors.New("disk full")}
+	journal := &armedFailingFailureJournal{err: errors.New("disk full")}
 	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1,
+		Journal:  journal,
 		Now:      func() time.Time { return now },
 	})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(testFailureOperation("message-1", now)))
-	ledger.journal = journal
+	journal.armed = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ticks := make(chan time.Time, 1)
@@ -104,6 +105,19 @@ func TestSoakFailureExpiryLoop_ReportsPersistenceFailureAndStopsOnCancel(t *test
 	require.ErrorContains(t, <-errorsSeen, "expire failure operations")
 	cancel()
 	<-done
+}
+
+type armedFailingFailureJournal struct {
+	memoryFailureJournal
+	err   error
+	armed bool
+}
+
+func (j *armedFailingFailureJournal) Append(event *failureLedgerEvent) error {
+	if j.armed {
+		return j.err
+	}
+	return j.memoryFailureJournal.Append(event)
 }
 
 func TestSoakFailureTracker_ForgetsRecipientExpectationWhenLedgerRejectsStart(t *testing.T) {

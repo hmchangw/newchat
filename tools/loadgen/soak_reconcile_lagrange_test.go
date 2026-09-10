@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	failuremodel "github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
 // Reconcile lag is read against SOAK_RECONCILE_DEADLINE — the validity rule is
@@ -124,6 +126,5 @@ func TestWarnSoakReconcileConfig_ReportsNothingForAConfigurationThatFits(t *test
 // The reason has to be in the bounded registry, or a run recovering the same
 // invalidation from its journal would record it as "other" and lose the cause.
 func TestFailureInvalidationRegistry_KnowsTheReconcileLagRangeReason(t *testing.T) {
-	_, known := failureInvalidationReasonRegistry[invalidReasonReconcileLagRange]
-	assert.True(t, known)
+	assert.True(t, failuremodel.ValidInvalidationReason(invalidReasonReconcileLagRange))
 }

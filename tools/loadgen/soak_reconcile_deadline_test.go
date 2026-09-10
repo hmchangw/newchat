@@ -137,9 +137,9 @@ func TestSoakFailureReconciler_AnUnansweredProbeRetriesFlatNotBackedOff(t *testi
 	_, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 
-	operation := ledger.active[pending.MessageID]
-	require.NotNil(t, operation)
-	assert.Equal(t, now.Add(retry), operation.nextVerifyAt,
+	operation, active := ledger.Active(pending.MessageID)
+	require.True(t, active)
+	assert.Equal(t, now.Add(retry), operation.NextVerifyAt(),
 		"an unanswered probe retries the call, and a failed call keeps the flat interval")
 }
 

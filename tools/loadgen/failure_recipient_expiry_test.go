@@ -191,7 +191,7 @@ func TestRunSoakFailureExpiry_KeepsEvidenceWhenLedgerExpiryFails(t *testing.T) {
 // LEDGER_CAPACITY and this had nothing.
 func TestRecipientEvidence_RefusesToGrowPastItsCapacity(t *testing.T) {
 	evidence := newRecipientEvidence(false)
-	evidence.capacity = 2
+	evidence.SetCapacity(2)
 	for _, id := range []string{"op-1", "op-2"} {
 		require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
 			OperationID: id, Recipients: []string{"a"}, Complete: true,
@@ -246,9 +246,9 @@ func TestFailureRecipientObserver_EvidenceCarriesHeadroomOverTheLedger(t *testin
 	observer := newFailureRecipientObserver(nil, nil, 1, nil,
 		withFailureRecipientEvidenceCapacity(10))
 
-	require.Greater(t, observer.evidence.capacity, 10,
+	require.Greater(t, observer.evidence.Capacity(), 10,
 		"an evidence map sized exactly like the ledger rejects during the cleanup lag")
-	assert.Equal(t, 20, observer.evidence.capacity)
+	assert.Equal(t, 20, observer.evidence.Capacity())
 }
 
 // finalizeLocked removes the operation from l.active and compacts afterwards,
@@ -269,8 +269,8 @@ func TestFailureLedger_ExpireReportsAnOperationRetiredBeforeTheFailure(t *testin
 	expired, err := ledger.Expire(at.Add(2 * time.Minute))
 
 	require.Error(t, err, "a failed compaction must still surface")
-	assert.NotContains(t, ledger.active, "op",
-		"the operation was retired before the compaction failed")
+	_, active := ledger.Active("op")
+	assert.False(t, active, "the operation was retired before the compaction failed")
 	assert.Equal(t, []string{"op"}, expired,
 		"an operation that left the ledger must be reported or its evidence is stranded")
 }
@@ -322,8 +322,8 @@ func TestSoakFailureTracker_AbandonUnsentReleasesTheExpectationItRetired(t *test
 	err = tracker.AbandonUnsent(pending)
 
 	require.Error(t, err, "the compaction failure must still be propagated")
-	assert.NotContains(t, ledger.active, pending.MessageID,
-		"the operation was retired before the compaction failed")
+	_, active := ledger.Active(pending.MessageID)
+	assert.False(t, active, "the operation was retired before the compaction failed")
 	assert.Zero(t, observer.evidence.Len(),
 		"an expectation the ledger has retired must be released, error or not")
 }

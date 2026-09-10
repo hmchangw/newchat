@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	failuremodel "github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
 type failureRecipientSubscription interface {
@@ -304,464 +305,9 @@ func startFailureRecipientSubscriptions(
 	now := observer.now().UTC()
 	observer.health.Set(true, now, "subscribed")
 	if observer.metrics != nil {
-		observer.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(1)
+		observer.metrics.SetObserverUp(failureObserverRecipient, true)
 	}
 	return result, nil
-}
-
-type recipientEvidenceResult struct {
-	Observation    failureObservation `json:"observation"`
-	Missing        []string           `json:"missing,omitempty"`
-	Unexpected     []string           `json:"unexpected,omitempty"`
-	Duplicates     []string           `json:"duplicates,omitempty"`
-	Mismatches     []string           `json:"mismatches,omitempty"`
-	durableRecords map[string]map[string]struct{}
-}
-
-type recipientDeliveryRoute string
-
-const (
-	recipientDeliveryRouteUnknown    recipientDeliveryRoute = "unknown"
-	recipientDeliveryRouteRoomGlobal recipientDeliveryRoute = "room_global"
-	recipientDeliveryRouteRoomLocal  recipientDeliveryRoute = "room_local"
-	recipientDeliveryRouteUser       recipientDeliveryRoute = "user"
-)
-
-type recipientExpectationConfig struct {
-	OperationID string
-	Recipients  []string
-	RoomID      string
-	EventType   model.RoomEventType
-	Route       recipientExpectedRoute
-	Source      recipientSetSource
-	Complete    bool
-}
-
-type recipientExpectation struct {
-	expected          map[string]struct{}
-	observed          map[string]map[recipientDeliveryRoute]int
-	mismatches        map[string]struct{}
-	roomID            string
-	eventType         model.RoomEventType
-	route             recipientExpectedRoute
-	source            recipientSetSource
-	complete          bool
-	durableMissing    map[string]struct{}
-	durableUnexpected map[string]struct{}
-	durableDuplicates map[string]struct{}
-	durableMismatches map[string]struct{}
-}
-
-type recipientEvidence struct {
-	mu              sync.Mutex
-	allowDuplicates bool
-	operations      map[string]*recipientExpectation
-	// capacity bounds the map when expiry cannot run — a ledger that keeps
-	// failing to expire would otherwise reinstate the growth this file exists
-	// to stop. Zero means unbounded.
-	capacity int
-}
-
-type recipientEvidenceDisposition string
-
-const (
-	recipientEvidenceUntracked  recipientEvidenceDisposition = "untracked"
-	recipientEvidenceExpected   recipientEvidenceDisposition = "expected"
-	recipientEvidenceDuplicate  recipientEvidenceDisposition = "duplicate"
-	recipientEvidenceUnexpected recipientEvidenceDisposition = "unexpected"
-	recipientEvidenceMismatch   recipientEvidenceDisposition = "mismatch"
-)
-
-func newRecipientEvidence(allowDuplicates bool) *recipientEvidence {
-	return &recipientEvidence{
-		allowDuplicates: allowDuplicates,
-		operations:      make(map[string]*recipientExpectation),
-	}
-}
-
-func (r *recipientEvidence) Expect(operationID string, recipients []string) error {
-	return r.ExpectDelivery(&recipientExpectationConfig{
-		OperationID: operationID, Recipients: recipients,
-		Route: recipientExpectedRouteAny, Source: recipientSetSourceLegacy, Complete: true,
-	})
-}
-
-func (r *recipientEvidence) ExpectEvent(
-	operationID string,
-	recipients []string,
-	roomID string,
-	eventType model.RoomEventType,
-) error {
-	return r.ExpectDelivery(&recipientExpectationConfig{
-		OperationID: operationID, Recipients: recipients, RoomID: roomID, EventType: eventType,
-		Route: recipientExpectedRouteAny, Source: recipientSetSourceLegacy, Complete: true,
-	})
-}
-
-func (r *recipientEvidence) ExpectDelivery(config *recipientExpectationConfig) error {
-	if r == nil || config == nil || config.OperationID == "" || len(config.Recipients) == 0 {
-		return fmt.Errorf("recipient expectation requires operation and recipients")
-	}
-	if (config.RoomID == "") != (config.EventType == "") {
-		return fmt.Errorf("recipient expectation room and event type must be provided together")
-	}
-	if config.Route == "" {
-		config.Route = recipientExpectedRouteAny
-	}
-	if config.Source == "" {
-		config.Source = recipientSetSourceLegacy
-	}
-	if config.Route != recipientExpectedRouteAny && config.Route != recipientExpectedRouteRoom && config.Route != recipientExpectedRouteUser {
-		return fmt.Errorf("recipient expectation has unknown route %q", config.Route)
-	}
-	if config.Source != recipientSetSourceLegacy && config.Source != recipientSetSourceTopology && config.Source != recipientSetSourceThreadFollowers {
-		return fmt.Errorf("recipient expectation has unknown source %q", config.Source)
-	}
-	expected := make(map[string]struct{}, len(config.Recipients))
-	for _, recipient := range config.Recipients {
-		if recipient == "" {
-			return fmt.Errorf("recipient expectation contains an empty recipient")
-		}
-		if _, duplicate := expected[recipient]; duplicate {
-			return fmt.Errorf("recipient expectation repeats %q", recipient)
-		}
-		expected[recipient] = struct{}{}
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.operations[config.OperationID]; exists {
-		return fmt.Errorf("recipient expectation %q already exists", config.OperationID)
-	}
-	if r.capacity > 0 && len(r.operations) >= r.capacity {
-		return fmt.Errorf(
-			"recipient expectation capacity %d exceeded; evidence is not being expired",
-			r.capacity)
-	}
-	r.operations[config.OperationID] = &recipientExpectation{
-		expected: expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
-		roomID: config.RoomID, eventType: config.EventType,
-		route: config.Route, source: config.Source, complete: config.Complete,
-		durableMissing: make(map[string]struct{}), durableUnexpected: make(map[string]struct{}),
-		durableDuplicates: make(map[string]struct{}),
-		durableMismatches: make(map[string]struct{}),
-	}
-	return nil
-}
-
-func (r *recipientEvidence) Observe(operationID, recipient string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	expectation := r.operations[operationID]
-	if expectation == nil {
-		return false
-	}
-	incrementRecipientRoute(expectation, recipient, recipientDeliveryRouteUnknown)
-	return true
-}
-
-func (r *recipientEvidence) ObserveEvent(
-	operationID,
-	recipient,
-	roomID string,
-	eventType model.RoomEventType,
-) bool {
-	disposition := r.ObserveDelivery(operationID, recipient, roomID, eventType, recipientDeliveryRouteUnknown)
-	return disposition != recipientEvidenceUntracked
-}
-
-func (r *recipientEvidence) ObserveDelivery(
-	operationID,
-	recipient,
-	roomID string,
-	eventType model.RoomEventType,
-	route recipientDeliveryRoute,
-) recipientEvidenceDisposition {
-	if r == nil {
-		return recipientEvidenceUntracked
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	expectation := r.operations[operationID]
-	if expectation == nil {
-		return recipientEvidenceUntracked
-	}
-	disposition := recipientEvidenceExpected
-	if expectation.roomID != "" &&
-		(expectation.roomID != roomID || expectation.eventType != eventType) {
-		disposition = recipientEvidenceMismatch
-	}
-	if !recipientRouteMatches(expectation.route, route) {
-		disposition = recipientEvidenceMismatch
-	}
-	if disposition == recipientEvidenceExpected && expectation.complete {
-		if _, expected := expectation.expected[recipient]; !expected {
-			disposition = recipientEvidenceUnexpected
-		}
-	}
-	if disposition == recipientEvidenceMismatch {
-		expectation.mismatches[recipient] = struct{}{}
-		return disposition
-	}
-	if disposition == recipientEvidenceUnexpected {
-		incrementRecipientRoute(expectation, recipient, route)
-		return disposition
-	}
-	if recipientRouteIsDuplicate(expectation, recipient, route) {
-		disposition = recipientEvidenceDuplicate
-	}
-	incrementRecipientRoute(expectation, recipient, route)
-	return disposition
-}
-
-func recipientRouteMatches(expected recipientExpectedRoute, actual recipientDeliveryRoute) bool {
-	switch expected {
-	case recipientExpectedRouteAny:
-		return true
-	case recipientExpectedRouteRoom:
-		return actual == recipientDeliveryRouteRoomGlobal || actual == recipientDeliveryRouteRoomLocal
-	case recipientExpectedRouteUser:
-		return actual == recipientDeliveryRouteUser
-	default:
-		return false
-	}
-}
-
-func recipientRouteIsDuplicate(expectation *recipientExpectation, recipient string, route recipientDeliveryRoute) bool {
-	routes := expectation.observed[recipient]
-	if routes == nil {
-		return false
-	}
-	return routes[route] > 0
-}
-
-func incrementRecipientRoute(expectation *recipientExpectation, recipient string, route recipientDeliveryRoute) {
-	if expectation.observed[recipient] == nil {
-		expectation.observed[recipient] = make(map[recipientDeliveryRoute]int)
-	}
-	expectation.observed[recipient][route]++
-}
-
-func (r *recipientEvidence) ObserveMismatch(operationID, recipient string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	expectation := r.operations[operationID]
-	if expectation == nil {
-		return false
-	}
-	expectation.mismatches[recipient] = struct{}{}
-	return true
-}
-
-func (r *recipientEvidence) ReplayPositive(kind, operationID, recipient string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	expectation := r.operations[operationID]
-	if expectation == nil {
-		return false
-	}
-	switch kind {
-	case "missing":
-		expectation.durableMissing[recipient] = struct{}{}
-	case "unexpected":
-		expectation.durableUnexpected[recipient] = struct{}{}
-	case "duplicate":
-		expectation.durableDuplicates[recipient] = struct{}{}
-	case "mismatch":
-		expectation.mismatches[recipient] = struct{}{}
-		expectation.durableMismatches[recipient] = struct{}{}
-	default:
-		return false
-	}
-	return true
-}
-
-func (r *recipientEvidence) Forget(operationID string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.operations, operationID)
-}
-
-// ForgetAll releases the expectations for the operations the ledger reports it
-// finalized, and returns how many went. Taking the IDs from the ledger is what
-// keeps the two aligned: a time-based bound cannot be, because Expire stops at
-// its batch limit and skips claimed operations mid-verification, so "past its
-// deadline" and "the ledger is done with it" are different sets.
-//
-// The caller passes IDs the ledger has already returned, so this takes only the
-// evidence lock — the ledger's is released by then, and no ordering between the
-// two is created.
-func (r *recipientEvidence) ForgetAll(operationIDs []string) int {
-	if r == nil || len(operationIDs) == 0 {
-		return 0
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	forgotten := 0
-	for _, operationID := range operationIDs {
-		if _, tracked := r.operations[operationID]; !tracked {
-			continue
-		}
-		delete(r.operations, operationID)
-		forgotten++
-	}
-	return forgotten
-}
-
-// Len reports how many expectations are retained. The run needs this as a gauge:
-// a count that tracks the ledger's own in-flight number is healthy, one that
-// climbs past it is this map leaking again.
-func (r *recipientEvidence) Len() int {
-	if r == nil {
-		return 0
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.operations)
-}
-
-func (r *recipientEvidence) Complete(operationID string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	expectation := r.operations[operationID]
-	if expectation == nil {
-		return false
-	}
-	if !expectation.complete {
-		return false
-	}
-	for recipient := range expectation.expected {
-		if !recipientWasObserved(expectation, recipient) {
-			return false
-		}
-	}
-	for recipient := range expectation.observed {
-		if _, expected := expectation.expected[recipient]; !expected || (!r.allowDuplicates && recipientHasDuplicate(expectation, recipient)) {
-			return false
-		}
-	}
-	return len(expectation.mismatches) == 0
-}
-
-func (r *recipientEvidence) Finalize(operationID string, observerHealthy bool) recipientEvidenceResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	expectation := r.operations[operationID]
-	if expectation == nil {
-		return recipientEvidenceResult{Observation: failureObservationUnverified}
-	}
-	result := recipientEvidenceResult{
-		Observation:    failureObservationGood,
-		durableRecords: make(map[string]map[string]struct{}),
-	}
-	for recipient := range expectation.durableMissing {
-		result.Missing = append(result.Missing, recipient)
-		markRecipientEvidenceDurable(&result, "missing", recipient)
-	}
-	for recipient := range expectation.durableUnexpected {
-		result.Unexpected = append(result.Unexpected, recipient)
-		markRecipientEvidenceDurable(&result, "unexpected", recipient)
-	}
-	for recipient := range expectation.durableDuplicates {
-		result.Duplicates = append(result.Duplicates, recipient)
-		markRecipientEvidenceDurable(&result, "duplicate", recipient)
-	}
-	for recipient := range expectation.durableMismatches {
-		result.Mismatches = append(result.Mismatches, recipient)
-		markRecipientEvidenceDurable(&result, "mismatch", recipient)
-	}
-	durableClaim := len(result.Missing)+len(result.Unexpected)+len(result.Mismatches) > 0 ||
-		(!r.allowDuplicates && len(result.Duplicates) > 0)
-	if durableClaim {
-		slices.Sort(result.Missing)
-		slices.Sort(result.Unexpected)
-		slices.Sort(result.Duplicates)
-		slices.Sort(result.Mismatches)
-		if len(result.Mismatches) > 0 || len(result.Unexpected) > 0 ||
-			(!r.allowDuplicates && len(result.Duplicates) > 0) {
-			result.Observation = failureObservationBad
-		} else if len(result.Missing) > 0 {
-			result.Observation = failureObservationMissingAfterDeadline
-		}
-		delete(r.operations, operationID)
-		return result
-	}
-	if expectation.complete {
-		for recipient := range expectation.expected {
-			if !recipientWasObserved(expectation, recipient) {
-				result.Missing = appendRecipientOnce(result.Missing, recipient)
-			}
-		}
-	}
-	for recipient := range expectation.observed {
-		if _, expected := expectation.expected[recipient]; expectation.complete && !expected {
-			result.Unexpected = appendRecipientOnce(result.Unexpected, recipient)
-		}
-		if recipientHasDuplicate(expectation, recipient) {
-			result.Duplicates = appendRecipientOnce(result.Duplicates, recipient)
-		}
-	}
-	for recipient := range expectation.mismatches {
-		result.Mismatches = appendRecipientOnce(result.Mismatches, recipient)
-	}
-	slices.Sort(result.Missing)
-	slices.Sort(result.Unexpected)
-	slices.Sort(result.Duplicates)
-	slices.Sort(result.Mismatches)
-	switch {
-	case len(result.Mismatches) > 0 || len(result.Unexpected) > 0 || (!r.allowDuplicates && len(result.Duplicates) > 0):
-		result.Observation = failureObservationBad
-	case !observerHealthy || !expectation.complete:
-		result.Observation = failureObservationUnverified
-	case len(result.Missing) > 0:
-		result.Observation = failureObservationMissingAfterDeadline
-	}
-	delete(r.operations, operationID)
-	return result
-}
-
-func appendRecipientOnce(recipients []string, recipient string) []string {
-	if slices.Contains(recipients, recipient) {
-		return recipients
-	}
-	return append(recipients, recipient)
-}
-
-func markRecipientEvidenceDurable(result *recipientEvidenceResult, kind, recipient string) {
-	if result.durableRecords[kind] == nil {
-		result.durableRecords[kind] = make(map[string]struct{})
-	}
-	result.durableRecords[kind][recipient] = struct{}{}
-}
-
-func recipientWasObserved(expectation *recipientExpectation, recipient string) bool {
-	for _, count := range expectation.observed[recipient] {
-		if count > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func recipientHasDuplicate(expectation *recipientExpectation, recipient string) bool {
-	routes := expectation.observed[recipient]
-	for _, count := range routes {
-		if count > 1 {
-			return true
-		}
-	}
-	return false
 }
 
 type recipientDelivery struct {
@@ -772,7 +318,7 @@ type recipientDelivery struct {
 
 type failureRecipientObserver struct {
 	ledger        *failureLedger
-	metrics       *Metrics
+	metrics       failuremodel.RecipientMetrics
 	evidence      *recipientEvidence
 	health        *failureObserverHealth
 	queue         chan recipientDelivery
@@ -825,14 +371,14 @@ const recipientEvidenceCapacityFactor = 2
 func withFailureRecipientEvidenceCapacity(capacity int) failureRecipientObserverOption {
 	return func(o *failureRecipientObserver) {
 		if capacity > 0 {
-			o.evidence.capacity = capacity * recipientEvidenceCapacityFactor
+			o.evidence.SetCapacity(capacity * recipientEvidenceCapacityFactor)
 		}
 	}
 }
 
 func withFailureRecipientDuplicatePolicy(allow bool) failureRecipientObserverOption {
 	return func(observer *failureRecipientObserver) {
-		observer.evidence.allowDuplicates = allow
+		observer.evidence.SetAllowDuplicates(allow)
 	}
 }
 
@@ -859,7 +405,7 @@ func newFailureRecipientObserver(
 	}
 	startedAt := now().UTC()
 	observer := &failureRecipientObserver{
-		ledger: ledger, metrics: metrics, evidence: newRecipientEvidence(false),
+		ledger: ledger, metrics: newFailureMetricsAdapter(metrics), evidence: newRecipientEvidence(false),
 		health: newFailureObserverHealth(failureObserverRecipient, startedAt),
 		queue:  make(chan recipientDelivery, capacity), now: now,
 		syncDirectory: syncFailureWALDirectory,
@@ -872,10 +418,8 @@ func newFailureRecipientObserver(
 			directory: observer.evidenceDir, syncDirectory: observer.syncDirectory,
 		}
 	}
-	if metrics != nil {
-		metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
-		metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(0)
-	}
+	observer.metrics.SetObserverUp(failureObserverRecipient, false)
+	observer.metrics.SetObserverQueueDepth(failureObserverRecipient, 0)
 	return observer
 }
 
@@ -997,15 +541,15 @@ func (o *failureRecipientObserver) EnqueueRoute(
 	select {
 	case o.queue <- delivery:
 		if o.metrics != nil {
-			o.metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(float64(len(o.queue)))
+			o.metrics.SetObserverQueueDepth(failureObserverRecipient, len(o.queue))
 		}
 		return true
 	default:
 		now := o.now().UTC()
 		o.health.Set(false, now, "queue_overflow")
 		if o.metrics != nil {
-			o.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
-			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationUnverified)).Inc()
+			o.metrics.SetObserverUp(failureObserverRecipient, false)
+			o.metrics.RecordObserverEvent(failureObserverRecipient, failureObservationUnverified)
 		}
 		o.ledger.Invalidate("observer_queue")
 		return false
@@ -1026,7 +570,7 @@ func (o *failureRecipientObserver) Run(ctx context.Context) {
 			case delivery := <-o.queue:
 				o.process(delivery)
 				if o.metrics != nil {
-					o.metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(float64(len(o.queue)))
+					o.metrics.SetObserverQueueDepth(failureObserverRecipient, len(o.queue))
 				}
 			}
 		}
@@ -1049,7 +593,7 @@ func (o *failureRecipientObserver) Drain() {
 			o.process(delivery)
 		default:
 			if o.metrics != nil {
-				o.metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(0)
+				o.metrics.SetObserverQueueDepth(failureObserverRecipient, 0)
 			}
 			return
 		}
@@ -1060,7 +604,7 @@ func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 	var event model.RoomEvent
 	if err := json.Unmarshal(delivery.payload, &event); err != nil {
 		if o.metrics != nil {
-			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationBad)).Inc()
+			o.metrics.RecordObserverEvent(failureObserverRecipient, failureObservationBad)
 		}
 		if o.ledger != nil {
 			o.ledger.Invalidate("observer_malformed")
@@ -1072,7 +616,7 @@ func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 	}
 	if event.LastMsgID == "" || event.RoomID == "" {
 		if o.metrics != nil {
-			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationBad)).Inc()
+			o.metrics.RecordObserverEvent(failureObserverRecipient, failureObservationBad)
 		}
 		if o.ledger != nil {
 			o.ledger.Invalidate("observer_malformed")
@@ -1099,7 +643,7 @@ func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 	}
 	if disposition == recipientEvidenceUntracked {
 		if o.metrics != nil {
-			o.metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonObserve).Inc()
+			o.metrics.RecordUntracked(failureUntrackedReasonObserve)
 		}
 		return
 	}
@@ -1115,7 +659,7 @@ func (o *failureRecipientObserver) Finalize(operationID string, startedAt, deadl
 		}
 	}
 	if o.metrics != nil {
-		o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(result.Observation)).Inc()
+		o.metrics.RecordObserverEvent(failureObserverRecipient, result.Observation)
 	}
 	return result
 }
@@ -1124,7 +668,7 @@ func (o *failureRecipientObserver) markSidecarFailure() {
 	now := o.now().UTC()
 	o.health.Set(false, now, "sidecar_failure")
 	if o.metrics != nil {
-		o.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
+		o.metrics.SetObserverUp(failureObserverRecipient, false)
 	}
 	if o.ledger != nil {
 		o.ledger.Invalidate("sidecar")
@@ -1153,7 +697,7 @@ func (o *failureRecipientObserver) persistResult(
 	records := make([]failureRecipientEvidenceRecord, 0)
 	for _, item := range items {
 		for _, recipient := range item.recipients {
-			if _, durable := result.durableRecords[item.kind][recipient]; durable {
+			if result.Durable(item.kind, recipient) {
 				continue
 			}
 			records = append(records, failureRecipientEvidenceRecord{
@@ -1183,15 +727,17 @@ func (o *failureRecipientObserver) persistEvidenceRecords(
 	}
 	startedAt := time.Now()
 	err := o.journal.AppendBatch(records)
+	flushResult := "success"
+	if err != nil {
+		flushResult = "error"
+	}
 	if o.metrics != nil {
-		flushResult := "success"
-		if err != nil {
-			flushResult = "error"
-		}
-		o.metrics.FailureEvidenceFlushDuration.WithLabelValues(claim, flushResult).Observe(time.Since(startedAt).Seconds())
-		if err == nil {
-			for _, record := range records {
-				o.metrics.FailureEvidenceRecords.WithLabelValues(record.Kind).Inc()
+		o.metrics.ObserveEvidenceFlush(claim, flushResult, time.Since(startedAt))
+	}
+	if err == nil {
+		for _, record := range records {
+			if o.metrics != nil {
+				o.metrics.RecordEvidence(record.Kind)
 			}
 		}
 	}

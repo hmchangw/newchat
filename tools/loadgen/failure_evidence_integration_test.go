@@ -94,10 +94,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 		return recipientObserver.evidence.Complete("message-1")
 	}, 5*time.Second, 10*time.Millisecond)
 	if !completed {
-		recipientObserver.evidence.mu.Lock()
-		expectation := recipientObserver.evidence.operations["message-1"]
-		t.Logf("recipient expectation after timeout: %#v", expectation)
-		recipientObserver.evidence.mu.Unlock()
+		t.Logf("recipient expectations after timeout: %d", recipientObserver.evidence.Len())
 		require.True(t, completed)
 	}
 

@@ -146,8 +146,12 @@ test-loadgen-failure-integration:
 FAILURE_COVERAGE_PROFILE ?= coverage-loadgen-failure.out
 coverage-loadgen-failure:
 	go test -race -run $(FAILURE_TEST_PATTERN) -coverprofile=$(FAILURE_COVERAGE_PROFILE) ./tools/loadgen/...
-	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_ -min 80
-	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_observer.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_ -include tools/loadgen/internal/failure/ -include tools/loadgen/nats_health.go -min 80
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/ -min 80
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/health.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/model.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/group.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/internal/failure/wal.go -min 80
 	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_metrics.go -min 90
 
 # Run only Cassandra Run A tests (unit + integration), then enforce the scoped
@@ -158,7 +162,7 @@ SOAK_COVERAGE_PROFILE ?= coverage-loadgen-soak.out
 coverage-loadgen-soak:
 	go test -race -tags integration -run Soak -coverprofile=$(SOAK_COVERAGE_PROFILE) ./tools/loadgen/...
 	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -include tools/loadgen/internal/soak/ -min 80
-	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -include tools/loadgen/internal/soak/catalog/ -include tools/loadgen/internal/soak/collector/ -include tools/loadgen/internal/soak/mutation/ -include tools/loadgen/internal/soak/presence/ -include tools/loadgen/internal/soak/read/ -include tools/loadgen/internal/soak/run/ -include tools/loadgen/internal/soak/search/ -include tools/loadgen/internal/soak/send/ -include tools/loadgen/internal/soak/userread/ -include tools/loadgen/internal/soak/workload/ -exclude soak_main.go -exclude internal/soak/run/store.go -min 90
+	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -include tools/loadgen/internal/soak/catalog/ -include tools/loadgen/internal/soak/collector/ -include tools/loadgen/internal/soak/mutation/ -include tools/loadgen/internal/soak/presence/ -include tools/loadgen/internal/soak/read/ -include tools/loadgen/internal/soak/reconcile/ -include tools/loadgen/internal/soak/roomstate/ -include tools/loadgen/internal/soak/roomverify/ -include tools/loadgen/internal/soak/run/ -include tools/loadgen/internal/soak/search/ -include tools/loadgen/internal/soak/send/ -include tools/loadgen/internal/soak/userread/ -include tools/loadgen/internal/soak/workload/ -exclude soak_main.go -exclude internal/soak/run/store.go -min 90
 	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/internal/soak/ -exclude internal/soak/run/store.go -min 90
 
 # Regenerate all mocks via go generate

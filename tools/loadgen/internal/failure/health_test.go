@@ -1,4 +1,4 @@
-package main
+package failure
 
 import (
 	"testing"
@@ -8,36 +8,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFailureObserverHealth_BoundsIntervalsWithoutClaimingTruncatedHistory(t *testing.T) {
+func TestObserverHealth_BoundsIntervalsWithoutClaimingTruncatedHistory(t *testing.T) {
 	start := time.Date(2026, 8, 12, 1, 0, 0, 0, time.UTC)
-	health := newFailureObserverHealth(failureObserverRecipient, start)
-	for index := 1; index <= failureObserverHealthIntervalLimit+2; index++ {
+	var absent *ObserverHealth
+	absent.Set(true, start, "ignored")
+	assert.Empty(t, absent.Snapshot(start).Intervals)
+
+	health := NewObserverHealth(ObserverRecipient, start)
+	health.Set(true, start.Add(-time.Second), "out-of-order")
+	health.Set(true, start, "connected")
+	health.Set(true, start.Add(time.Millisecond), "probe")
+	for index := 1; index <= ObserverHealthIntervalLimit+2; index++ {
 		health.Set(index%2 == 0, start.Add(time.Duration(index)*time.Second), "transition")
 	}
 
-	end := start.Add(time.Duration(failureObserverHealthIntervalLimit+3) * time.Second)
+	end := start.Add(time.Duration(ObserverHealthIntervalLimit+3) * time.Second)
 	snapshot := health.Snapshot(end)
 
 	assert.True(t, snapshot.HistoryTruncated)
-	assert.Len(t, snapshot.Intervals, failureObserverHealthIntervalLimit)
+	assert.Len(t, snapshot.Intervals, ObserverHealthIntervalLimit)
 	assert.False(t, health.HealthyThroughout(start, end))
 	require.False(t, snapshot.HistoryAvailableFrom.IsZero())
-	assert.False(t, failureHealthSnapshotCovers(&snapshot, start, end))
+	assert.False(t, HealthSnapshotCovers(&snapshot, start, end))
 }
 
-func TestFailureObserverHealthSnapshotCovers_RequiresContinuousHealthyHistory(t *testing.T) {
+func TestObserverHealthSnapshotCovers_RequiresContinuousHealthyHistory(t *testing.T) {
 	start := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
 	end := start.Add(2 * time.Minute)
 	tests := []struct {
 		name     string
-		snapshot *failureObserverHealthSnapshot
+		snapshot *ObserverHealthSnapshot
 		want     bool
 	}{
 		{name: "nil snapshot"},
-		{name: "empty history", snapshot: &failureObserverHealthSnapshot{}},
+		{name: "empty history", snapshot: &ObserverHealthSnapshot{}},
 		{
 			name: "continuous healthy history",
-			snapshot: &failureObserverHealthSnapshot{Intervals: []failureHealthInterval{
+			snapshot: &ObserverHealthSnapshot{Intervals: []HealthInterval{
 				{Start: start.Add(-time.Minute), End: start.Add(time.Minute), Up: true},
 				{Start: start.Add(time.Minute), End: end.Add(time.Minute), Up: true},
 			}},
@@ -45,14 +52,14 @@ func TestFailureObserverHealthSnapshotCovers_RequiresContinuousHealthyHistory(t 
 		},
 		{
 			name: "gap",
-			snapshot: &failureObserverHealthSnapshot{Intervals: []failureHealthInterval{
+			snapshot: &ObserverHealthSnapshot{Intervals: []HealthInterval{
 				{Start: start, End: start.Add(30 * time.Second), Up: true},
 				{Start: start.Add(time.Minute), End: end, Up: true},
 			}},
 		},
 		{
 			name: "down interval",
-			snapshot: &failureObserverHealthSnapshot{Intervals: []failureHealthInterval{
+			snapshot: &ObserverHealthSnapshot{Intervals: []HealthInterval{
 				{Start: start, End: start.Add(time.Minute), Up: true},
 				{Start: start.Add(time.Minute), End: end, Up: false},
 			}},
@@ -60,16 +67,16 @@ func TestFailureObserverHealthSnapshotCovers_RequiresContinuousHealthyHistory(t 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			assert.Equal(t, test.want, failureHealthSnapshotCovers(test.snapshot, start, end))
+			assert.Equal(t, test.want, HealthSnapshotCovers(test.snapshot, start, end))
 		})
 	}
 }
 
-func TestFailureObserverHealth_HealthyThroughoutRejectsPreProcessWindow(t *testing.T) {
+func TestObserverHealth_HealthyThroughoutRejectsPreProcessWindow(t *testing.T) {
 	operationStarted := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
 	processStarted := operationStarted.Add(30 * time.Second)
 	deadline := processStarted.Add(30 * time.Second)
-	health := newFailureObserverHealth(failureObserverRecipient, processStarted)
+	health := NewObserverHealth(ObserverRecipient, processStarted)
 	health.Set(true, processStarted, "subscribed")
 
 	assert.False(t, health.HealthyThroughout(operationStarted, deadline))

@@ -41,54 +41,6 @@ var soakMemberCandidateStates = []soakMemberCandidateState{
 	soakMemberCandidateQuarantined,
 }
 
-// soakMemberIntent is one half of an add/remove cycle against a room the pool
-// owns. The requester is always the room owner, so room-service's permission
-// checks pass for reasons the workload controls.
-type soakMemberIntent struct {
-	RoomID    string
-	Account   string
-	Requester string
-	Add       bool
-}
-
-func (i soakMemberIntent) OperationType() failureOperationType {
-	if i.Add {
-		return failureOperationMemberAdd
-	}
-	return failureOperationMemberRemove
-}
-
-type soakRenameIntent struct {
-	RoomID    string
-	Requester string
-	NewName   string
-}
-
-type soakMuteIntent struct {
-	RoomID      string
-	Account     string
-	TargetMuted bool
-}
-
-// soakReadIntent marks one subscription read. The baseline is the last
-// server-written lastSeenAt this pool confirmed, so the expectation compares two
-// values the server itself stamped and never depends on loadgen's clock.
-type soakReadIntent struct {
-	RoomID   string
-	Account  string
-	Baseline time.Time
-	Known    bool
-}
-
-// soakRoomProbe re-reads state the pool stopped trusting. A mutation that ended
-// unverified leaves the real state unknown, and acting on a guess would either
-// re-add an existing member or toggle a mute twice.
-type soakRoomProbe struct {
-	RoomID  string
-	Account string
-	Mute    bool
-}
-
 type soakMuteState struct {
 	muted bool
 	known bool

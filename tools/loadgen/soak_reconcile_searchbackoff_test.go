@@ -41,9 +41,9 @@ func TestSoakFailureReconciler_BacksOffASearchProbeThatFoundNothing(t *testing.T
 		require.NoError(t, err)
 		_, _, err = reconciler.Try(context.Background())
 		require.NoError(t, err)
-		operation := ledger.active["m1"]
-		require.NotNil(t, operation)
-		return operation.nextVerifyAt
+		operation, active := ledger.Active("m1")
+		require.True(t, active)
+		return operation.NextVerifyAt()
 	}
 
 	t.Run("the first probe after the settle boundary keeps the flat interval", func(t *testing.T) {

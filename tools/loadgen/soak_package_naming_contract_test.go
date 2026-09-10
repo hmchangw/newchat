@@ -36,29 +36,39 @@ func TestSoakPackages_DoNotRepeatTheSoakPrefixInIdentifiers(t *testing.T) {
 		dir := dir
 		t.Run(dir, func(t *testing.T) {
 			t.Parallel()
-			files, err := filepath.Glob(filepath.Join(dir, "*.go"))
-			require.NoError(t, err)
-			require.NotEmpty(t, files)
+			assertPackageIdentifiersDropPrefix(t, dir, "soak")
+		})
+	}
+}
 
-			fset := token.NewFileSet()
-			for _, file := range files {
-				if strings.HasSuffix(file, "_test.go") {
-					continue
-				}
-				parsed, parseErr := parser.ParseFile(fset, file, nil, 0)
-				require.NoError(t, parseErr)
-				ast.Inspect(parsed, func(node ast.Node) bool {
-					identifier, ok := node.(*ast.Ident)
-					if !ok || !strings.HasPrefix(identifier.Name, "soak") {
-						return true
-					}
-					position := fset.Position(identifier.Pos())
-					assert.Failf(t, "redundant soak prefix",
-						"%s: identifier %q repeats its package context",
-						position, identifier.Name)
-					return true
-				})
+func TestFailurePackage_DoesNotRepeatTheFailurePrefixInIdentifiers(t *testing.T) {
+	t.Parallel()
+	assertPackageIdentifiersDropPrefix(t, "internal/failure", "failure")
+}
+
+func assertPackageIdentifiersDropPrefix(t *testing.T, dir, prefix string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+
+	fset := token.NewFileSet()
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		parsed, parseErr := parser.ParseFile(fset, file, nil, 0)
+		require.NoError(t, parseErr)
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			identifier, ok := node.(*ast.Ident)
+			if !ok || identifier == parsed.Name || !strings.HasPrefix(identifier.Name, prefix) {
+				return true
 			}
+			position := fset.Position(identifier.Pos())
+			assert.Failf(t, "redundant package prefix",
+				"%s: identifier %q repeats its package context",
+				position, identifier.Name)
+			return true
 		})
 	}
 }

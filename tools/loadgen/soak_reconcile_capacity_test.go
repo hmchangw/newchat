@@ -8,6 +8,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	failuremodel "github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
 // The arithmetic behind the floor, pinned separately from how it is reported so
@@ -135,8 +137,7 @@ func TestSoakReconcileFloorBreach_InvalidatesTheLedgerAndCountsOnce(t *testing.T
 // The reason has to be in the bounded registry, or a run recovering the same
 // invalidation from its journal would record it as "other" and lose the cause.
 func TestFailureInvalidationRegistry_KnowsTheReconcileCapacityReason(t *testing.T) {
-	_, known := failureInvalidationReasonRegistry[invalidReasonReconcileCapacity]
-	assert.True(t, known)
+	assert.True(t, failuremodel.ValidInvalidationReason(invalidReasonReconcileCapacity))
 }
 
 func TestWarnSoakReconcileCapacity_SaysNothingWhenTheLaneCanServeTheFloor(t *testing.T) {
