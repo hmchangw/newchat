@@ -48,8 +48,14 @@ type messageCollection struct {
 	// MESSAGES-TEAMS instead of a canonical stream, filters to only the teams batch
 	// subject, and skips the template/mapping pushes the primary (user) collection
 	// already owns for the same indexPrefix.
-	teamsOnly      bool
-	streamCfg      func(siteID string) jetstream.StreamConfig
+	teamsOnly bool
+	streamCfg func(siteID string) jetstream.StreamConfig
+	// filterSubjects sits beside streamCfg deliberately: the two must describe
+	// the same subject tree, and a consumer whose filter matches nothing on its
+	// stream is silently inert rather than an error. Set both, together, or the
+	// collection indexes nothing. assertFiltersMatchStream enforces it at
+	// startup; TestCollections_FilterSubjectsAreCapturedByTheirStream in CI.
+	filterSubjects func(siteID string) []string
 	consumerName   string
 	parentResolver parentCreatedAtResolver
 	// teamsUsers resolves migrated senders' account + user _id; nil on collections that
@@ -61,22 +67,24 @@ type messageCollection struct {
 // migrated Teams history now indexes off its own consumer, see newTeamsMessageCollection).
 func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMode bool) *messageCollection {
 	return &messageCollection{
-		indexPrefix:  indexPrefix,
-		siteID:       siteID,
-		syncFrom:     syncFrom,
-		devMode:      devMode,
-		streamCfg:    userMessagesStreamCfg,
-		consumerName: "message-sync",
+		indexPrefix:    indexPrefix,
+		siteID:         siteID,
+		syncFrom:       syncFrom,
+		devMode:        devMode,
+		streamCfg:      userMessagesStreamCfg,
+		filterSubjects: userMessagesFilter,
+		consumerName:   "message-sync",
 	}
 }
 
 // newBotMessageCollection binds to BOT-MESSAGES-CANONICAL and shares BuildAction with the user flow.
 func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollection {
 	return &messageCollection{
-		indexPrefix:  indexPrefix,
-		devMode:      devMode,
-		streamCfg:    botMessagesStreamCfg,
-		consumerName: "bot-message-sync",
+		indexPrefix:    indexPrefix,
+		devMode:        devMode,
+		streamCfg:      botMessagesStreamCfg,
+		filterSubjects: botMessagesFilter,
+		consumerName:   "bot-message-sync",
 	}
 }
 
@@ -87,12 +95,13 @@ func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollectio
 // the user collection already performs for the same indexPrefix.
 func newTeamsMessageCollection(indexPrefix, siteID string, devMode bool) *messageCollection {
 	return &messageCollection{
-		indexPrefix:  indexPrefix,
-		siteID:       siteID,
-		devMode:      devMode,
-		teamsOnly:    true,
-		streamCfg:    teamsMessagesStreamCfg,
-		consumerName: "message-sync-teams",
+		indexPrefix:    indexPrefix,
+		siteID:         siteID,
+		devMode:        devMode,
+		teamsOnly:      true,
+		streamCfg:      teamsMessagesStreamCfg,
+		filterSubjects: teamsMessagesFilter,
+		consumerName:   "message-sync-teams",
 	}
 }
 
@@ -120,13 +129,27 @@ func (c *messageCollection) ConsumerName() string {
 }
 
 func (c *messageCollection) FilterSubjects(siteID string) []string {
-	if c.teamsOnly {
-		// Own stream (MESSAGES-TEAMS), own subject — no message wildcard here.
-		return []string{subject.MsgTeamsCanonicalBatch(siteID)}
-	}
-	// Single-token message events (created/updated/deleted/...); the teams batch
-	// subject now lives on a separate stream (see newTeamsMessageCollection).
+	return c.filterSubjects(siteID)
+}
+
+// Each filter names the same subject tree as the stream config directly above
+// it. Branching on a behaviour flag (teamsOnly) is what let the bot collection
+// bind BOT-MESSAGES-CANONICAL while filtering the user tree.
+
+// userMessagesFilter selects the single-token message events on
+// MESSAGES-CANONICAL (created/updated/deleted/...).
+func userMessagesFilter(siteID string) []string {
 	return []string{subject.MsgCanonicalMessageWildcard(siteID)}
+}
+
+// botMessagesFilter is the same shape on BOT-MESSAGES-CANONICAL.
+func botMessagesFilter(siteID string) []string {
+	return []string{subject.BotCanonicalMessageWildcard(siteID)}
+}
+
+// teamsMessagesFilter selects the one batch subject on MESSAGES-TEAMS.
+func teamsMessagesFilter(siteID string) []string {
+	return []string{subject.MsgTeamsCanonicalBatch(siteID)}
 }
 
 func (c *messageCollection) TemplateName() string {
@@ -181,6 +204,16 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return nil, fmt.Errorf("unmarshal message event: %w", err)
 	}
+	// bot-room-service/sysmsg.go publishes a BARE model.Message on the same
+	// canonical subject as the MessageEvent envelope every other publisher uses
+	// (its own comment states the wire shape). It carries no "message" key, so it
+	// decodes into an empty event and would fail the id check below — Ack-dropped
+	// as poison with an error log per membership change. It is a system message,
+	// and those are not indexed either way, so account for it as filtered rather
+	// than as corruption. Anything else that decodes empty stays poison.
+	if evt.Message.ID == "" && isBareSystemMessage(data) {
+		return nil, nil
+	}
 	if evt.Message.ID == "" {
 		return nil, fmt.Errorf("build message action: missing message id")
 	}
@@ -206,6 +239,17 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	}
 	c.resolveThreadParentCreatedAt(&evt)
 	return []searchengine.BulkAction{buildMessageAction(&evt, c.indexPrefix)}, nil
+}
+
+// isBareSystemMessage reports whether data is a bare model.Message carrying a
+// system message type, rather than the MessageEvent envelope. A bare message of
+// any OTHER type is still a publisher bug worth surfacing, so it stays poison.
+func isBareSystemMessage(data []byte) bool {
+	var m model.Message
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false
+	}
+	return m.ID != "" && model.IsSystemMessageType(m.Type)
 }
 
 // resolveThreadParentCreatedAt fills the parent createdAt for a thread reply; the gatekeeper's

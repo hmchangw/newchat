@@ -324,6 +324,14 @@ func main() {
 
 		consumerCfg := buildConsumerConfig(cfg.Consumer, coll, cfg.SiteID)
 
+		// A filter that matches nothing on this stream is not a JetStream error —
+		// the consumer would be created, report healthy and index nothing. Refuse
+		// to start instead.
+		if err := checkFilterSubjects(streamCfg.Name, streamCfg.Subjects, consumerCfg.FilterSubjects, coll.ConsumerName()); err != nil {
+			slog.Error("consumer filter does not match its stream", "error", err)
+			os.Exit(1)
+		}
+
 		// The HR (spotlight-org) collection reads OrgSyncStream; when a remote HR domain is configured,
 		// create its consumer against the domain-scoped context — every other collection uses the shared js.
 		var fetcher msgFetcher
