@@ -7,13 +7,14 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
-const (
-	inCallIndexKey = "presence:status:index:azure"
-	idMapKey       = "presence:idmap:azure"
+var (
+	inCallIndexKey = cachekeys.PresenceInCallIndex()
+	idMapKey       = cachekeys.PresenceIDMap()
 )
 
 // --- in-call index ---

@@ -10,6 +10,8 @@ import (
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // Recorder records the outcome of an L2 cache lookup. An alias of
@@ -17,23 +19,12 @@ import (
 // interface, and cachemetrics.Recorder satisfies it.
 type Recorder = valkeyutil.CacheRecorder
 
-// cacheKeySchemaVersion namespaces keys by the stored value's shape, as
-// roomsubcache does. Bump it whenever a binary built against the other shape
-// would decode the value without error but with the wrong contents — Valkey has
-// no schema check, so the version is what makes those entries miss instead.
-//
-// The deployed shape is a bare Meta under an unversioned key; v3 is the shared
-// valkeyutil.Box envelope. Decoding either as the other yields an all-zero Meta
-// with no JSON error, which would have broadcast-worker drop fan-out on an empty
-// room type. (v1 and v2 were intermediate shapes on this branch and never ran.)
-const cacheKeySchemaVersion = "v3"
-
 // MetaKey is the L2 (Valkey) key for a room's cached Meta. The {roomID}
 // hash tag colocates it in the same cluster slot as the room's encryption
 // key (pkg/roomkeystore), matching house convention for room-scoped keys.
 // The version segment trails the key so the hash tag keeps that colocation.
 func MetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta:" + cacheKeySchemaVersion
+	return cachekeys.RoomMeta(roomID)
 }
 
 // legacyMetaKey is the deployed generation: unversioned, written and read by
@@ -42,7 +33,7 @@ func MetaKey(roomID string) string {
 // that has not been replaced yet keeps serving a room a new pod just renamed.
 // Drop it once no such binary can run.
 func legacyMetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta"
+	return cachekeys.RoomMetaLegacy(roomID)
 }
 
 // tierOption configures a tier at construction. Unexported: every production
