@@ -2,6 +2,8 @@ package poolartifact
 
 import (
 	"bytes"
+	"compress/gzip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -271,4 +273,150 @@ func TestWrite_RejectsWhatLoadRejects(t *testing.T) {
 			assert.True(t, os.IsNotExist(statErr), "a rejected artifact must not be written")
 		})
 	}
+}
+
+// The artifact has to travel through a ConfigMap-sized or object-store hop,
+// and 30k real account names run past 1 MiB uncompressed. Writing and reading
+// .gz keeps the same contract on both ends.
+func TestWriteLoad_GzipRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.json.gz")
+	want := &Artifact{
+		RunID: "r1", SiteID: "site-a", ConfigDigest: "d1",
+		Accounts: []string{"alice", "bob", "carol"},
+	}
+	require.NoError(t, Write(path, want))
+
+	// #nosec G304 -- reads the test's own TempDir fixture
+	// nosemgrep: gosec.G304-1 -- reads the test's own TempDir fixture
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x1f, 0x8b}, raw[:2], "a .gz path must produce gzip bytes, not plain JSON")
+
+	got, err := Load(path, "site-a")
+	require.NoError(t, err)
+	assert.Equal(t, want.Accounts, got.Accounts)
+	assert.Equal(t, SchemaVersion, got.SchemaVersion)
+	assert.Equal(t, "r1", got.RunID)
+	assert.Equal(t, "d1", got.ConfigDigest)
+}
+
+// The byte cap has to bind the DECOMPRESSED stream. Bounding the file instead
+// would let a few KiB of gzip expand into gigabytes of heap before any count
+// check runs — the same hazard the streaming decoder closed for plain JSON,
+// reopened by compression.
+func TestLoad_GzipCapsTheDecompressedStream(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bomb.json.gz")
+	// #nosec G304 -- writes the test's own TempDir fixture
+	// nosemgrep: gosec.G304-1 -- writes the test's own TempDir fixture
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	zw := gzip.NewWriter(f)
+	// Highly compressible filler: tiny on disk, far past the cap expanded.
+	chunk := bytes.Repeat([]byte{'a'}, 1<<20)
+	for written := int64(0); written <= maxArtifactBytes; written += int64(len(chunk)) {
+		_, err := zw.Write(chunk)
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	require.NoError(t, f.Close())
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Less(t, info.Size(), int64(maxArtifactBytes),
+		"the fixture must be small on disk, or it would not be testing the bomb case")
+
+	_, err = Load(path, "site-a")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "cap")
+}
+
+// A truncated or non-gzip file under a .gz name is a deployment mistake, and
+// it must say so rather than surfacing as a JSON parse error.
+func TestLoad_RejectsCorruptGzip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt.json.gz")
+	require.NoError(t, os.WriteFile(path, []byte("this is not gzip"), 0o600))
+	_, err := Load(path, "site-a")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "gzip")
+}
+
+// writeGzipFiller writes a .gz whose DECOMPRESSED size is about n bytes, from
+// filler that compresses hard — so the file on disk stays tiny however large
+// n is. That gap is the whole point: it is what a byte cap on the compressed
+// stream would fail to see.
+func writeGzipFiller(t *testing.T, n int64) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "filler.json.gz")
+	// #nosec G304 -- writes the test's own TempDir fixture
+	// nosemgrep: gosec.G304-1 -- writes the test's own TempDir fixture
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	zw := gzip.NewWriter(f)
+	chunk := bytes.Repeat([]byte{'a'}, 1<<20)
+	for written := int64(0); written < n; written += int64(len(chunk)) {
+		_, err := zw.Write(chunk)
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	require.NoError(t, f.Close())
+	return path
+}
+
+// The same promise as TestLoad_DecodeCostTracksTheCapNotTheFile, one layer
+// out. Compression breaks the file-size proxy the plain path relied on: a few
+// KiB of gzip expands to whatever the writer chose, so a reader that
+// decompresses first and checks the size afterwards pays for the ATTACKER's
+// number, not the cap's. Reading through a bounded reader makes the cost
+// track the cap again.
+func TestLoad_GzipRejectionCostTracksTheCapNotTheExpansion(t *testing.T) {
+	measure := func(path string) uint64 {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := Load(path, "s")
+		require.Error(t, err)
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	justOver := measure(writeGzipFiller(t, maxArtifactBytes+(1<<20)))
+	farOver := measure(writeGzipFiller(t, maxArtifactBytes*3))
+
+	assert.Less(t, farOver, justOver*2,
+		"rejecting a bomb that expands to three times the cap must not cost three times as much")
+}
+
+// The pool's accounts become NATS subject tokens. subject.UserSubscriptionList
+// PANICS on one carrying a dot, wildcard, whitespace or control rune, so an
+// artifact holding one takes the clientsim pod down at startup rather than
+// failing it cleanly. Reject at both ends, using the same validator the
+// subject builders use, so the two cannot drift.
+func TestValidateAccounts_RejectsUnsafeSubjectTokens(t *testing.T) {
+	for _, bad := range []string{"weather.site-a.bot", "*", ">", "has space", "ctl\x01"} {
+		err := Write(filepath.Join(t.TempDir(), "p.json"), &Artifact{
+			RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: []string{"ok", bad},
+		})
+		require.Error(t, err, "account %q must be refused by the producer", bad)
+		assert.Contains(t, err.Error(), "subject token")
+	}
+}
+
+// The account cap is symmetric between Write and Load for a stated reason —
+// a producer that can emit what the consumer refuses turns a bad input into a
+// failure hours later, in the wrong tool. That rule was applied to the count
+// and not to the byte size, leaving one window open: a population inside the
+// account cap whose names are long enough to blow the byte cap. Narrow, but
+// the consequence is every pod refusing an artifact that published cleanly.
+func TestWrite_RefusesAnArtifactAboveTheReadCap(t *testing.T) {
+	// Few accounts, each enormous: the account cap cannot fire here, so this
+	// isolates the byte cap rather than passing through the other guard.
+	long := strings.Repeat("a", 100_000)
+	accounts := make([]string, 0, 700)
+	for i := range 700 {
+		accounts = append(accounts, fmt.Sprintf("%s%06d", long, i))
+	}
+	err := Write(filepath.Join(t.TempDir(), "p.json"), &Artifact{
+		RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: accounts,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cap")
 }

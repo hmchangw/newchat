@@ -29,15 +29,24 @@ type config struct {
 	// the NATS user JWT crosses the wire on connect: against anything shared
 	// that is a credential in the clear, and a warning is too easy to miss in
 	// a soak's log stream. The local throwaway stack sets it explicitly.
-	AllowInsecureWS bool    `env:"CLIENTSIM_ALLOW_INSECURE_WS" envDefault:"false"`
-	AuthURL         string  `env:"CLIENTSIM_AUTH_URL,required"`
-	PoolFile        string  `env:"CLIENTSIM_POOL_FILE,required"`
-	SiteID          string  `env:"CLIENTSIM_SITE_ID,required"`
-	TargetConns     int     `env:"CLIENTSIM_TARGET_CONNS" envDefault:"0"`
-	ShardIndex      int     `env:"CLIENTSIM_SHARD_INDEX" envDefault:"0"`
-	ShardCount      int     `env:"CLIENTSIM_SHARD_COUNT" envDefault:"1"`
-	RampRate        float64 `env:"CLIENTSIM_RAMP_RATE" envDefault:"50"`
-	ChurnRate       float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
+	AllowInsecureWS bool   `env:"CLIENTSIM_ALLOW_INSECURE_WS" envDefault:"false"`
+	AuthURL         string `env:"CLIENTSIM_AUTH_URL,required"`
+	// PoolFile and PoolURL are the two ways the pool reaches this process,
+	// and exactly one must be set. A file is the local and docker-compose
+	// path; an s3:// URL is the k8s one, because a shared PVC needs
+	// ReadWriteMany and a ConfigMap caps below a real 30k-account pool.
+	PoolFile string `env:"CLIENTSIM_POOL_FILE"`
+	PoolURL  string `env:"CLIENTSIM_POOL_URL"`
+	// Pool is the object store PoolURL is read from. Declared in poolartifact
+	// because loadgen writes with the same knobs: two copies of the tags is
+	// how the producer and consumer end up on different buckets.
+	Pool        poolartifact.StoreConfig
+	SiteID      string  `env:"CLIENTSIM_SITE_ID,required"`
+	TargetConns int     `env:"CLIENTSIM_TARGET_CONNS" envDefault:"0"`
+	ShardIndex  int     `env:"CLIENTSIM_SHARD_INDEX" envDefault:"0"`
+	ShardCount  int     `env:"CLIENTSIM_SHARD_COUNT" envDefault:"1"`
+	RampRate    float64 `env:"CLIENTSIM_RAMP_RATE" envDefault:"50"`
+	ChurnRate   float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
 	// expiry is the DEFAULT because it is what the real client does: it never
 	// refreshes on its own, it holds the JWT until the server drops the
 	// connection at expiry and re-mints on the reconnect. proactive is a
@@ -88,7 +97,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	pool, err := poolartifact.Load(cfg.PoolFile, cfg.SiteID)
+	pool, err := loadPool(ctx, &cfg)
 	if err != nil {
 		return fmt.Errorf("load pool artifact: %w", err)
 	}
@@ -199,6 +208,81 @@ func serveMetrics(srv *http.Server, lis net.Listener) <-chan error {
 
 // validateConfig rejects value combinations that would silently void a
 // spec-required control instead of limping with surprising semantics.
+// loadPool reads the artifact from whichever source is configured. The object
+// store is the k8s path: a Job publishes the pool once and every pod reads
+// that one object, which is what keeps the sharding safe — each pod slicing
+// its own query result would give two pods different arrays.
+func loadPool(ctx context.Context, cfg *config) (*poolartifact.Artifact, error) {
+	if cfg.PoolFile != "" {
+		return poolartifact.Load(cfg.PoolFile, cfg.SiteID)
+	}
+	store, key, err := poolStoreFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if store.PlaintextEndpoint() {
+		// Not fatal: the documented docker-compose loop runs MinIO over HTTP,
+		// and this tool has to stay runnable there. But the artifact is a list
+		// of real employee accounts and the request carries the store's access
+		// key ID, so the operator should see the trade-off they configured
+		// rather than have it stay silent.
+		slog.Warn("fetching the pool over plaintext HTTP — the account list and the store access key ID cross the network in the clear; set POOL_S3_USE_SSL=true outside local development",
+			"endpoint", store.Endpoint)
+	}
+	s, err := poolartifact.NewStore(store)
+	if err != nil {
+		return nil, err
+	}
+	return s.Load(ctx, key, cfg.SiteID)
+}
+
+// poolStoreFor resolves the object-store config the URL implies. One function
+// so validation and loading cannot disagree: validating the raw config first
+// demanded POOL_S3_BUCKET even when the URL already named the bucket, which
+// made the documented k8s setup fail to start.
+func poolStoreFor(cfg *config) (*poolartifact.StoreConfig, string, error) {
+	bucket, key, err := poolartifact.ParsePoolURL(cfg.PoolURL)
+	if err != nil {
+		return nil, "", err
+	}
+	// The URL wins over POOL_S3_BUCKET: one env var locates the whole object,
+	// and the two cannot then disagree.
+	store := cfg.Pool
+	store.Bucket = bucket
+	return &store, key, nil
+}
+
+// validatePoolSource enforces exactly one pool source. Preferring one over
+// the other when both are set would let a fleet measure a different
+// population than the operator configured, with nothing in the logs saying
+// which one won.
+func validatePoolSource(cfg *config) error {
+	switch {
+	case cfg.PoolFile == "" && cfg.PoolURL == "":
+		return errors.New("set exactly one of CLIENTSIM_POOL_FILE or CLIENTSIM_POOL_URL")
+	case cfg.PoolFile != "" && cfg.PoolURL != "":
+		return errors.New("set CLIENTSIM_POOL_FILE or CLIENTSIM_POOL_URL, not both")
+	}
+	// A partly-set store is an error even on the file path: it means someone
+	// meant to use the object store and mistyped, and staying silent would
+	// hand them a run against the wrong pool.
+	if cfg.PoolURL != "" {
+		// Resolve first, validate second: the URL supplies the bucket.
+		store, _, err := poolStoreFor(cfg)
+		if err != nil {
+			return err
+		}
+		return store.Validate()
+	}
+	// A partly-set store is an error even on the file path: it means someone
+	// meant to use the object store and mistyped, and staying silent would
+	// hand them a run against the wrong pool.
+	if cfg.Pool.Configured() {
+		return cfg.Pool.Validate()
+	}
+	return nil
+}
+
 func validateConfig(cfg *config) error {
 	// The NATS user JWT crosses the wire on connect, so cleartext has to be a
 	// deliberate act rather than a typo in a URL. Opting in still warns: on a
@@ -207,6 +291,9 @@ func validateConfig(cfg *config) error {
 	// CLEARTEXT WEBSOCKET on a throwaway stack, never a different protocol. A
 	// nats:// URL would connect over plain TCP and quietly measure a transport
 	// the real client does not ship.
+	if err := validatePoolSource(cfg); err != nil {
+		return err
+	}
 	u, err := url.Parse(cfg.NATSWSURL)
 	if err != nil {
 		// Same message as a wrong scheme: an operator who set a bare host:port
