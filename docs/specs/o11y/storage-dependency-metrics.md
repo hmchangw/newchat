@@ -143,6 +143,7 @@ These metrics do not replace database telemetry; they connect dependency behavio
 | `oplog_events_published_total`, `oplog_publish_errors_total`, `oplog_events_skipped_total`, `oplog_events_degraded_total`, `oplog_replication_lag_ms` | oplog-connector | Mongo change-stream progress and downstream publish health | Existing |
 | `atrest_dek_cache_hits_total`, `atrest_dek_cache_misses_total`, `atrest_dek_creations_total`, `atrest_kek_wrap_total`, `atrest_kek_unwrap_total`, `atrest_kek_renewal_failures_total` | at-rest encryption package | Separates storage failure from key-cache/Vault behavior on encrypted message paths | Existing where at-rest encryption is wired |
 | `cache_hits_total`, `cache_misses_total`, `cache_errors_total` | service caches | Explains whether Mongo load/impact was hidden or amplified by cache behavior | Existing in selected services |
+| `circuit_breaker_state{breaker}` | 6 services via `pkg/circuitbreaker` | Which storage dependency a service has fenced, and for how long. It is the application-side counterpart to the driver metrics above, and reads in the opposite direction: once a breaker opens the service stops issuing calls, so `db_client_operation_duration_seconds_count` *falls* and the driver looks healthier as the outage deepens. See §5.1 | Existing |
 | `go_*`, `process_*`, container CPU/memory/network | SDK/runtime, cAdvisor | Detects client or loadgen exhaustion and recovery surge | Existing where targets are scraped |
 
 The Cassandra soak message-send lane now proves a terminal admission and
@@ -153,6 +154,97 @@ as dropped; either condition invalidates the affected observation interval.
 Other loadgen lanes remain aggregate or sampled. A campaign that relies on one
 of those lanes remains inconclusive if aggregate success looks healthy but
 individual operations can disappear.
+
+### 5.1 Circuit breaker state
+
+`pkg/circuitbreaker` fences a flaky storage dependency so callers fail fast
+instead of each paying the dependency's own timeout. Every breaker in the repo
+reports on one shared instrument.
+
+| Property | Value |
+|---|---|
+| Exported name | `circuit_breaker_state` |
+| Type | `Int64Gauge` (OTel meter `circuitbreaker`) |
+| Values | `0` closed, `1` open, `2` half-open |
+| Labels | `breaker` only, plus whatever the resource adds (`service_name`) |
+| Emitted | on each state **transition**, never at startup |
+| Also emits | a WARN log per transition: `circuit breaker transition` with `breaker`, `from`, `to` |
+| Declared in | `pkg/circuitbreaker/metric.go` |
+
+The numeric values are a deliberate contract and do **not** match gobreaker's
+own iota order, which puts half-open at 1 and open at 2. `fromGobreaker`
+translates; nothing should cast between the two.
+
+**The `breaker` label is what makes a multi-breaker service legible.** All
+breakers record to one instrument, so without it their datapoints overwrite each
+other and the series describes whichever breaker moved last rather than any of
+them.
+
+#### Breaker inventory
+
+| Service | `breaker` | Fences | Budget env |
+|---|---|---|---|
+| message-gatekeeper | `subscription` | subscription lookups | `GATEKEEPER_MONGO_BREAKER_*` |
+| message-gatekeeper | `roommeta` | room-metadata reads | `GATEKEEPER_MONGO_BREAKER_*` |
+| message-gatekeeper | `user` | user lookups | `GATEKEEPER_MONGO_BREAKER_*` |
+| message-worker | `user` | user lookups (sender/site resolution) | `MONGO_BREAKER_*` |
+| message-worker | `atrestdek` | at-rest DEK fetch | `ATREST_DEK_BREAKER_*` |
+| broadcast-worker | `mongo` | its Mongo reads | `BROADCAST_MONGO_BREAKER_*` |
+| notification-worker | `roomsub` | room-subscription reads | `MONGO_BREAKER_*` |
+| history-service | `subscription` | subscription lookups | `HISTORY_MONGO_BREAKER_*` |
+| history-service | `roomtimes` | room-times repository | `HISTORY_MONGO_BREAKER_*` |
+| history-service | `atrestdek` | at-rest DEK fetch | `ATREST_DEK_BREAKER_*` |
+| botplatform-service | `mongo` | its Mongo reads | `MONGO_BREAKER_*` |
+
+Breakers that share a `BreakerConfig` share the *budget values*, not the state:
+each holds its own consecutive-failure counter and trips independently. The DEK
+breaker is deliberately on a separate budget from a service's other Mongo reads
+(`pkg/atrest/breakerconfig.go`) — they are independent failure signals, and one
+budget would let either reset the other.
+
+#### What moves it
+
+`Fails` consecutive failures open the breaker; it stays open for `Cooldown`,
+then admits exactly one half-open probe (`MaxRequests: 1`, so recovery never
+stampedes). The closed-state failure count never auto-resets on a timer
+(`Interval: 0`) — only a success resets it.
+
+Which errors count is a per-call-site predicate, and the asymmetry matters when
+reading the metric:
+
+- `context.Canceled` is **always** exempt. It is evidence about the caller, not
+  the downstream, so a disconnect storm cannot fence a healthy database.
+- `context.DeadlineExceeded` is **not** exempt, and this is the load-bearing
+  part: an unreachable MongoDB surfaces as a `ServerSelectionError` wrapping
+  that error, so exempting it would leave the breaker permanently closed against
+  the exact outage it exists to fence.
+- `mongo.ErrNoDocuments` and a caller's "healthy absence" sentinels are exempt
+  via `mongoutil.BreakerFailure` — a missing document is an answer from a
+  working database. The DEK breaker passes no predicate: a key that cannot be
+  found leaves messages that cannot be opened, so every error counts.
+- An exempted error neither trips the breaker nor counts as recovery: it does
+  not reset the failure count, so an alternating stream of timeouts and
+  not-founds still trips.
+
+#### Reading it
+
+Three properties will mislead anyone who treats this as an ordinary gauge:
+
+1. **Absence is not `closed`.** The gauge is written only from the transition
+   callback, so a breaker that has never tripped since process start has no
+   series at all. Alert on `== 1`, never on `!= 0`.
+2. **A disabled breaker is permanently silent.** `Fails <= 0` (or a nil
+   `*Breaker`) means protection is off and calls always pass through; no
+   gobreaker is constructed, so it can never transition and never reports. A
+   missing series can therefore mean healthy *or* unfenced — `MONGO_BREAKER_FAILS`
+   is the only way to tell them apart.
+3. **A restart resets it to silence, not to `0`.** The last value goes stale and
+   the breaker reappears only on its next transition, so `max_over_time` across
+   a deploy reports the pre-restart state for as long as the staleness window
+   allows.
+
+The WARN log is the reliable per-episode record, and it carries `from` as well
+as `to` — which the gauge cannot express.
 
 ## 6. Missing Metrics and Telemetry
 
@@ -268,9 +360,25 @@ sum by (action, outcome, phase) (
 sum by (action, class) (
   increase(loadgen_soak_verifications_total{class!="ok"}[$__range])
 )
+
+# Which breakers are open right now (fleet-wide view)
+max by (service_name, breaker) (circuit_breaker_state) == 1
+
+# Breaker episodes in a window: transitions per breaker
+sum by (service_name, breaker) (
+  changes(circuit_breaker_state[$__range])
+)
+
+# Half-open flapping: a dependency recovering and failing its probe repeatedly
+max by (service_name, breaker) (circuit_breaker_state) == 2
 ```
 
 In PromQL, `error_type!=""` excludes series where the label is absent as well as series where it is empty. Keep the denominator unfiltered so it includes successful and failed operations.
+
+`circuit_breaker_state` is written only on a transition, so match on `== 1`
+rather than `!= 0`: a breaker that has never tripped emits no series, and one
+whose process restarted emits none again until its next transition. §5.1 covers
+the three ways this differs from an ordinary gauge.
 
 ## 8. Code Evidence
 
@@ -281,4 +389,6 @@ In PromQL, `error_type!=""` excludes series where the label is absent as well as
 - Current loadgen collectors: `tools/loadgen/metrics.go`.
 - Mongo change-stream outcome metrics: `data-migration/oplog-connector/metrics.go`.
 - At-rest metrics: `pkg/atrest/metrics.go`.
+- Circuit breaker state machine, failure predicate and state contract: `pkg/circuitbreaker/circuitbreaker.go`; the gauge and its `breaker` label: `pkg/circuitbreaker/metric.go`.
+- Breaker budgets and their env tags: `pkg/mongoutil/breakerconfig.go` (`MONGO_BREAKER_*`) and `pkg/atrest/breakerconfig.go` (`ATREST_DEK_BREAKER_*`); the per-service wiring and `breaker` names are in each service's `main.go`.
 - Current readiness wiring: service `main.go` files and `pkg/natsutil/health.go`; no MongoDB/Cassandra probe is registered.
