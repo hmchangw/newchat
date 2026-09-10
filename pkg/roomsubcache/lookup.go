@@ -3,7 +3,6 @@ package roomsubcache
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -145,7 +144,7 @@ func (c *Lookup) serveHit(ctx context.Context, roomID string, entry Entry) ([]Me
 
 func (c *Lookup) write(ctx context.Context, roomID string, members []Member) {
 	if err := c.cache.Set(ctx, roomID, members, c.ttl); err != nil {
-		slog.WarnContext(ctx, "roomsubcache set failed", "error", err, "roomId", roomID)
+		valkeyutil.LogDegraded(ctx, "roomsubcache set failed", err, "roomId", roomID)
 	}
 }
 

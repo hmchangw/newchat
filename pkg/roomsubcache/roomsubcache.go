@@ -193,8 +193,7 @@ func (c *valkeyCache) Get(ctx context.Context, roomID string) (Entry, bool) {
 		raw = ""
 		if !errors.Is(err, valkeyutil.ErrCacheMiss) {
 			c.metrics.Error(ctx)
-			slog.WarnContext(ctx, "roomsubcache L2 read failed, falling back to the source of truth",
-				"roomId", roomID, "error", err)
+			valkeyutil.LogDegraded(ctx, "roomsubcache L2 read failed, falling back to the source of truth", err, "roomId", roomID)
 			return Entry{}, false
 		}
 	}
