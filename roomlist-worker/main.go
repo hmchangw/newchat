@@ -13,10 +13,12 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -26,6 +28,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type config struct {
@@ -59,7 +62,11 @@ type config struct {
 	Mode      stream.Pipeline         `env:"MODE,required"`
 	Consumer  stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	DebugLog  logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	// Buddy is the peer cluster hosting this site's standby lanes. When set,
+	// the worker also consumes MESSAGES-CANONICAL-FAILOVER there, so room and
+	// subscription state keeps moving while this site's own NATS is down.
+	Buddy    natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	DebugLog logctx.Config        `envPrefix:"DEBUG_LOG_"`
 }
 
 func main() {
@@ -123,6 +130,10 @@ func main() {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
 	if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled); err != nil {
@@ -151,7 +162,7 @@ func main() {
 
 	// PullMaxMessages is bounded by MaxAckPending anyway; a modest buffer keeps
 	// the single consume goroutine fed without over-fetching during an outage.
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(256))
+	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(pullBatch))
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -172,6 +183,22 @@ func main() {
 	wg.Add(1)
 	go consumeLoop(iter, f, &wg, &consume)
 
+	// Buddy lane: the same body against the same flusher, fed from the standby
+	// canonical stream on the buddy. Never fails startup — on any failure
+	// buddyLane stays nil and the worker runs home-only. A one-slot pool keeps
+	// it sequential like the home loop; the flusher is the serialization point
+	// between the two lanes, and it is mutex-guarded. The bot pipeline has no
+	// standby stream, so HasFailover gates the lane out there.
+	binder := failoverlane.Binder{
+		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(wiring.HasFailover()),
+		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: pullBatch / 2,
+		Sem: make(chan struct{}, 1), WG: &wg,
+	}
+	buddyLane, buddyConn := binder.BindLane(ctx, failoverLaneSpec(cfg.Consumer, cfg.Mode, &wiring),
+		func(context.Context, *o11ynats.Conn, o11ynats.JetStream, subject.Lane) (func(context.Context, jetstream.Msg), error) {
+			return canonicalHandler(f), nil
+		})
+
 	// The consume-loop check sits alongside the NATS one deliberately: NATS stays
 	// healthy in precisely the failure where the loop has died, so probing the
 	// connection alone cannot detect a worker that has stopped doing its job.
@@ -191,7 +218,9 @@ func main() {
 		// exit is not mistaken for a failure and does not re-signal a process
 		// that is already on its way down.
 		func(_ context.Context) error { consume.beginShutdown(); return nil },
-		func(_ context.Context) error { iter.Stop(); return nil },
+		// Both iterators stop before the drain below, so neither lane pulls new
+		// work while the other is still finishing. Both feed one WaitGroup.
+		func(_ context.Context) error { iter.Stop(); buddyLane.Stop(); return nil },
 		func(ctx context.Context) error {
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()
@@ -214,6 +243,7 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		// Flush observability LAST so all prior teardown telemetry is exported.
@@ -333,6 +363,7 @@ func (s *consumeState) Check() health.Check {
 // consumeState.
 func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *consumeState) {
 	defer wg.Done()
+	handle := canonicalHandler(f)
 	for {
 		msgCtx, msg, err := iter.Next()
 		if err != nil {
@@ -354,6 +385,19 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 				"error", err)
 			return
 		}
+		handle(msgCtx, msg)
+	}
+}
+
+// pullBatch is both lanes' PullMaxMessages: bounded by MaxAckPending anyway, a
+// modest buffer keeps a lane fed without over-fetching during an outage.
+const pullBatch = 256
+
+// canonicalHandler is the per-message body both lanes run against one flusher.
+// The room state a failover-lane message derives is this site's, written to this
+// site's Mongo, exactly as on the home lane; only the stream it arrived on differs.
+func canonicalHandler(f *flusher) func(context.Context, jetstream.Msg) {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
 		// jobguard recovers a panic from the derive/add path so a single
 		// malformed-but-parseable event can't crash this goroutine. With
 		// MaxDeliver=-1 an un-acked in-flight message would otherwise
@@ -380,6 +424,17 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 				f.flushNow(handlerCtx)
 			}
 		})
+	}
+}
+
+// failoverLaneSpec is the durable on the buddy-hosted MESSAGES-CANONICAL-FAILOVER
+// stream. Its own durable, so the two lanes keep independent cursors, with the
+// home lane's unlimited redelivery: a MongoDB outage during a NATS outage must
+// still park messages rather than drop room state.
+func failoverLaneSpec(s stream.ConsumerSettings, mode stream.Pipeline, w *stream.Wiring) *failoverlane.LaneSpec {
+	return &failoverlane.LaneSpec{
+		Stream:   w.CanonicalFailoverStream,
+		Consumer: buildConsumerConfig(s, mode.FailoverConsumerName("roomlist-worker"), w.CanonicalFailoverWildcard),
 	}
 }
 

@@ -242,6 +242,7 @@ flowchart LR
     GK -.->|failover canonical| CANONFO
     CANONFO -.-> MW
     CANONFO -.-> BW
+    CANONFO -.-> RSW
     CANONFO -.-> NW
     CANONFO -.-> SS
     NW -.->|failover push| PUSHFO
