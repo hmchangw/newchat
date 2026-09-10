@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/poolartifact"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type fakeAccountSource struct {
@@ -17,6 +19,12 @@ type fakeAccountSource struct {
 	accounts []string
 	err      error
 	gotSite  string
+	// raw models a source that does NOT filter for itself — the case the Go
+	// belt exists for. The Mongo source excludes unusable accounts in the
+	// pipeline, so on that path the belt has nothing left to remove and
+	// nothing to report; a test about what the belt catches has to come from
+	// a source that hands it something.
+	raw bool
 }
 
 // channelSubscriberAccounts mirrors the pipeline: bots are excluded BEFORE the
@@ -28,7 +36,10 @@ func (f *fakeAccountSource) channelSubscriberAccounts(_ context.Context, siteID 
 	if f.err != nil {
 		return nil, f.err
 	}
-	out := dropUnusable(f.accounts)
+	out := f.accounts
+	if !f.raw {
+		out, _ = dropUnusable(out)
+	}
 	if n := cursorLimit(limit); len(out) > n {
 		out = out[:n]
 	}
@@ -328,4 +339,116 @@ func TestPoolExportQuery_DescribesThePipelineItRuns(t *testing.T) {
 	assert.Contains(t, poolExportQuery, "group", "the exclusion runs after the group; the record must say so")
 	assert.NotContains(t, poolExportQuery, `u.isBot: {$ne: true}} ->`,
 		"that shape claims the flag is filtered on rows before dedup, which is the bug this pipeline fixed")
+}
+
+// The staging population holds leftovers from other load tools —
+// "k6.test-1.user" is a real one. Nothing about it is a bot: no isBot flag, no
+// ".bot" suffix. Its dots still span subject tokens, so it reached
+// poolartifact's validator and failed the WHOLE export: one stale row from a
+// tool nobody is running any more blocks every run against that site. It is
+// the same class as an empty account or a bot — an account clientsim cannot
+// connect as — and belongs in the same drop.
+func TestExportPool_DropsAccountsThatCannotBeSubjectTokens(t *testing.T) {
+	src := &fakeAccountSource{raw: true, accounts: []string{
+		"anna", "k6.test-1.user", "bob", "has space", "wild*card", "tail>token", "ctrl\x07name",
+	}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.NoError(t, err, "one unusable account must not fail an export the rest of the site can serve")
+
+	art := pub.artifacts["site-a/run-1/pool.json.gz"]
+	require.NotNil(t, art)
+	assert.Equal(t, []string{"anna", "bob"}, art.Accounts)
+	assert.Equal(t, 2, res.Accounts)
+}
+
+// Skipping quietly is the other way to be wrong: the day the count goes from
+// one stale k6 row to the whole site, the operator has to be able to see it.
+// The export reports what it dropped so the caller can say so.
+func TestExportPool_ReportsWhatItSkipped(t *testing.T) {
+	src := &fakeAccountSource{raw: true, accounts: []string{"anna", "k6.test-1.user", "weather.site-a.bot", ""}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"k6.test-1.user", "weather.site-a.bot", ""}, res.Skipped,
+		"every dropped account is reported, whatever disqualified it")
+
+	man, ok := pub.blobs["site-a/run-1/pool-manifest.json"].(poolManifest)
+	require.True(t, ok)
+	assert.Equal(t, 3, man.SkippedAccounts,
+		"the manifest records the gap between the rows read and the accounts published")
+}
+
+// A site whose channel subscribers are ALL unusable is empty for clientsim,
+// and must fail — but not with the same bare "no accounts" as a site with no
+// subscriptions at all. The two need different fixes: one is a load-tool
+// leftover to clean up, the other is a site nobody uses.
+func TestExportPool_RejectsAPopulationOfOnlyUnusableAccounts(t *testing.T) {
+	src := &fakeAccountSource{raw: true, accounts: []string{"k6.test-1.user", "k6.test-2.user"}}
+
+	_, err := exportPool(context.Background(), src, newFakePublisher(), poolExportOptions{
+		RunID: "run-1", SiteID: "site-a",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "k6.test-1.user",
+		"an export that drops everything must name what it dropped")
+}
+
+// The same ordering rule the bot and the empty account already proved: $limit
+// bounds whatever reaches it, so an unusable account excluded only in Go
+// consumes a slot and then vanishes. "k6.test-1.user" sorts among the k's, so
+// this is not hypothetical on a site whose names run past it.
+func TestExportPool_LimitIsHonouredWhenAnUnusableAccountSitsInTheHead(t *testing.T) {
+	src := &fakeAccountSource{accounts: []string{"aaa", "bbb.test.user", "ccc", "ddd", "eee"}}
+	pub := newFakePublisher()
+
+	res, err := exportPool(context.Background(), src, pub, poolExportOptions{
+		RunID: "run-1", SiteID: "site-a", Limit: 3,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.Accounts)
+	assert.Equal(t, []string{"aaa", "ccc", "ddd"}, pub.artifacts[res.ArtifactKey].Accounts)
+}
+
+// The pipeline and the Go belt encode the same rule in two languages: a regex
+// Mongo evaluates, and the validator the subject builders use. They must agree
+// on every account either can see, or the layer that is wrong decides — and
+// which one that is depends on where the account came from.
+func TestUnusableAccountPattern_AgreesWithTheSubjectValidator(t *testing.T) {
+	re := regexp.MustCompile(unusableAccountPattern)
+
+	for _, account := range []string{
+		"anna", "p_admin", "user-1", "UPPER", "ac.count", "k6.test-1.user",
+		"weather.site-a.bot", "has space", "wild*card", "tail>token", "tab\tname",
+	} {
+		assert.Equal(t, !subject.IsValidAccountToken(account), re.MatchString(account),
+			"account %q must be judged the same by the pipeline regex and the validator", account)
+	}
+
+	// The one asymmetry, stated so it cannot be mistaken for a bug: the regex
+	// is the weaker half, so these reach the Go belt and are dropped there.
+	// Weaker in this direction costs a --limit slot; stronger would drop
+	// accounts the pods can serve.
+	for _, account := range []string{"ctrl\x07name", "nbsp\u00a0name"} {
+		assert.False(t, subject.IsValidAccountToken(account), "%q is not a usable account", account)
+		assert.False(t, re.MatchString(account), "%q is the belt's to catch, not the pipeline's", account)
+	}
+}
+
+// The sample is what an operator acts on, and the cap is what keeps one bad
+// site from turning a warning into a wall of names. Both halves matter: a cap
+// that also truncated a short list would hide the only account there was.
+func TestSampleAccounts_CapsWithoutTruncatingShortLists(t *testing.T) {
+	short := []string{"a", "b"}
+	assert.Equal(t, short, sampleAccounts(short))
+
+	long := []string{"a", "b", "c", "d", "e", "f", "g"}
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, sampleAccounts(long))
+	assert.Len(t, long, 7, "sampling must not modify the caller's slice")
 }

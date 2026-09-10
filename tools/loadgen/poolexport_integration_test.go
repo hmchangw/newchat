@@ -86,7 +86,9 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 	// dropUnusable is now a belt with nothing to remove on this path — which is
 	// the point: it stays for any other source, and composing it must not
 	// change what the Mongo source already returned.
-	assert.Equal(t, got, dropUnusable(got))
+	kept, skipped := dropUnusable(got)
+	assert.Equal(t, got, kept)
+	assert.Empty(t, skipped)
 }
 
 // An account with BOTH a Teams room and an ordinary channel is still a valid
@@ -140,4 +142,44 @@ func TestIntegration_MongoPoolSource_LimitSkipsUnusableAccounts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"zoe"}, got,
 		"limit=1 must return the first USABLE account, not the first row")
+}
+
+// The failure that motivated this: a staging site holds "k6.test-1.user", a
+// leftover subscription row from another load tool. No isBot flag, no ".bot"
+// suffix — nothing marks it as anything but a user — but its dots span subject
+// tokens, so poolartifact refused the artifact and the whole export died on one
+// stale row.
+//
+// The exclusion is in the pipeline, not only in the Go pass, for the reason
+// the empty account and the ".bot" suffix are: $limit bounds whatever reaches
+// it, so an account removed afterwards has already consumed a slot.
+func TestIntegration_MongoPoolSource_ExcludesAccountsThatSpanSubjectTokens(t *testing.T) {
+	db := testutil.MongoDB(t, "poolexporttokens")
+	ctx := context.Background()
+
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "k1", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "k6.test-1.user"}},
+		bson.M{"_id": "k2", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "has space"}},
+		bson.M{"_id": "k3", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "wild*card"}},
+		bson.M{"_id": "k4", "siteId": "site-a", "roomType": "channel",
+			"u": bson.M{"account": "tail>token"}},
+		bson.M{"_id": "k5", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "anna"}},
+		bson.M{"_id": "k6", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "zoe"}},
+	})
+	require.NoError(t, err)
+
+	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna", "zoe"}, got)
+
+	// "anna" is the only account before "k6.test-1.user" in sort order, so a
+	// pipeline that leaves the junk in returns it for limit=2 and the Go pass
+	// hands back one account for a --limit of two.
+	bounded, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna", "zoe"}, bounded,
+		"--limit 2 must deliver 2 usable accounts, not 2 rows minus the unusable ones")
 }

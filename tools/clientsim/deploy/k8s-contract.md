@@ -84,7 +84,7 @@ subscriptions: {siteId, roomType: "channel", open: {$ne: false},
                 origin: {$ne: "teams"}}
              → group by u.account, isBot = $max(u.isBot)
              → match isBot != true          ← AFTER the group, see below
-             → match _id not empty and not matching /\.bot$/
+             → match _id not empty and not matching /[.*>\s]/
              → sort ascending, then limit
 ```
 
@@ -118,6 +118,26 @@ and a dotted `.bot` account spans subject tokens, which panics
 on the stored flag so the bulk never leaves the server; a second pass in Go
 drops them on the account shape, catching a row whose flag was never stored.
 
+**The shape rule is the subject-token rule, not a `.bot` rule.** Any account
+carrying a dot, wildcard or whitespace rune panics the pod, and not all of them
+are bots: `k6.test-1.user` is a leftover subscription row from another load
+tool, with no `isBot` flag and no `.bot` suffix to mark it as anything else.
+Such a row used to fail the **whole** export at `pkg/poolartifact`'s validator —
+one stale record blocking every run against that site. It is now excluded like
+any other account clientsim cannot connect as: dropped, counted, and reported.
+
+- The regex is the weaker half of `subject.IsValidAccountToken` on purpose
+  (`\s` is the ASCII spaces; the validator refuses every unicode space and
+  control rune), so the Go pass stays the belt. Weaker in that direction costs
+  a `--limit` slot; stronger would drop accounts the pods can serve.
+- Every exclusion sits **before** the `$limit`, because the bound counts
+  whatever reaches it: an account removed afterwards has already consumed a
+  slot, and `--limit N` quietly returns fewer than N.
+- What was dropped is visible, not silent: a `WARN` line with the count and up
+  to five examples, and `skippedAccounts` in the manifest. An export whose
+  entire population is unusable fails and names what it dropped, which is a
+  different fix from a site nobody uses.
+
 The sort is load-bearing, not cosmetic — see the sharding note above.
 
 ### Index
@@ -147,7 +167,8 @@ healthy zero, and this is the last place that can say why.
 ### The manifest
 
 `pool-manifest.json` records `runId`, `siteId`, `configDigest`, the account
-count, the limit, the query, and the export time. The artifact says *who*
+count, `skippedAccounts` (present only when something was dropped), the limit,
+the query, and the export time. The artifact says *who*
 connected; the manifest says how that set was chosen, which is what makes a
 run reproducible months later rather than merely identifiable.
 
