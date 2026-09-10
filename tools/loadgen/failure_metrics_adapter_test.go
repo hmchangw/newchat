@@ -29,4 +29,6 @@ func TestFailureMetricsAdapter_RecordsRecipientRuntimeSignals(t *testing.T) {
 		metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonObserve)))
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureEvidenceRecords.WithLabelValues("duplicate")))
+	assert.Equal(t, 1, testutil.CollectAndCount(
+		metrics.FailureEvidenceFlushDuration, "loadgen_failure_evidence_flush_duration_seconds"))
 }
