@@ -143,14 +143,26 @@ func RequireRequestID(ctx context.Context, headers nats.Header, subject string) 
 	return WithRequestID(ctx, inbound), inbound, nil
 }
 
-// InboxDedupID composes a JetStream Nats-Msg-Id as base+":"+destSiteID. base
-// is the X-Request-ID from ctx; falls back to payloadSeed when ctx carries no
-// request ID, with a warn log so partial-deployment cases are observable.
-func InboxDedupID(ctx context.Context, destSiteID, payloadSeed string) string {
+// InboxDedupID composes a JetStream Nats-Msg-Id as
+// base+":"+eventType+":"+destSiteID. base is the X-Request-ID from ctx; falls
+// back to payloadSeed when ctx carries no request ID, with a warn log so
+// partial-deployment cases are observable.
+//
+// eventType is part of the key because one handler pass routinely publishes
+// several event types to the same peer under the same request ID — room-worker's
+// Teams membership sync emits a joinedAt refresh, then member_added, then
+// member_removed, same ctx, same destination. Without it all three carried an
+// identical Nats-Msg-Id and JetStream's stream-level dedup silently dropped
+// every publish after the first, so departed members were never removed at
+// their home site. It is a parameter rather than something the caller folds
+// into payloadSeed so a new federated publish cannot forget it: the seed is
+// only consulted on the no-request-ID fallback path.
+func InboxDedupID(ctx context.Context, destSiteID, eventType, payloadSeed string) string {
 	base := RequestIDFromContext(ctx)
 	if base == "" {
-		slog.Warn("missing X-Request-ID; falling back to payload-derived inbox dedup base", "destSiteID", destSiteID)
+		slog.Warn("missing X-Request-ID; falling back to payload-derived inbox dedup base",
+			"destSiteID", destSiteID, "eventType", eventType)
 		base = payloadSeed
 	}
-	return base + ":" + destSiteID
+	return base + ":" + eventType + ":" + destSiteID
 }
