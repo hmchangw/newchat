@@ -52,7 +52,7 @@ const (
 // can override it in either direction. With no higher-precedence source, false
 // selects the direct path without tracing or propagation overhead.
 func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, opts ...nats.Option) (*o11ynats.Conn, error) {
-	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, nil, opts...)
+	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, nil, false, opts...)
 }
 
 // ConnectWithMetrics opens a NATS connection and records its bounded lifecycle
@@ -63,10 +63,23 @@ func ConnectWithMetrics(ctx context.Context, url, credsFile string, tp trace.Tra
 	if meterProvider != nil {
 		metrics = newConnMetrics(meterProvider.Meter(connMetricsScope))
 	}
-	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, metrics, opts...)
+	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, metrics, false, opts...)
 }
 
-func connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, metrics *connMetrics, opts ...nats.Option) (*o11ynats.Conn, error) {
+// connectLazy is Connect for a home cluster that may be down at startup: the
+// initial dial failing returns a connection in the RECONNECTING state that keeps
+// dialing in the background, instead of an error. Configuration faults (a
+// missing creds file, a bad URL) still fail fast — retrying those would hide
+// them forever. See BuddyDialer.ConnectHome for when this is the right call.
+func connectLazy(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, meterProvider metric.MeterProvider) (*o11ynats.Conn, error) {
+	var metrics *connMetrics
+	if meterProvider != nil {
+		metrics = newConnMetrics(meterProvider.Meter(connMetricsScope))
+	}
+	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, metrics, true)
+}
+
+func connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, metrics *connMetrics, lazy bool, opts ...nats.Option) (*o11ynats.Conn, error) {
 	if credsFile != "" {
 		if _, err := os.Stat(credsFile); err != nil {
 			return nil, fmt.Errorf("nats creds file %q: %w", credsFile, err)
@@ -102,6 +115,18 @@ func connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 			log.Error("nats async error", "error", err)
 		}),
 	}
+	if lazy {
+		baseOpts = append(baseOpts,
+			nats.RetryOnFailedConnect(true),
+			// Fires only for the initial connect, and only once it lands — the
+			// synchronous gauge update below is skipped when the dial is still
+			// in flight, so this is the one place that reports it.
+			nats.ConnectHandler(func(c *nats.Conn) {
+				connState.Connected(ctx)
+				log.Info("nats connected", "url", c.ConnectedUrl())
+			}),
+		)
+	}
 	baseOpts = append(baseOpts, opts...)
 	// Credentials are just another nats.Option in the o11y/nats path; mounting
 	// them via UserCredentials keeps a single Connect call regardless of auth.
@@ -120,8 +145,16 @@ func connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 	if err != nil {
 		return nil, fmt.Errorf("connect nats: %w", err)
 	}
-	// The library fires no callback for the first successful connect, so the
-	// gauge would stay at zero until the first disconnect without this.
+	if conn.NatsConn().Status() != nats.CONNECTED {
+		// Only a lazy dial gets here: the first attempt failed and the client
+		// is retrying in the background. The ConnectHandler reports the gauge
+		// when it lands.
+		log.Warn("nats unreachable at startup; connecting in the background", "url", url)
+		return conn, nil
+	}
+	// The library fires no callback for the first successful connect on a
+	// fail-fast dial, so the gauge would stay at zero until the first disconnect
+	// without this.
 	connState.Connected(ctx)
 	return conn, nil
 }

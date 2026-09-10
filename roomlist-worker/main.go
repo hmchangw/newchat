@@ -119,7 +119,17 @@ func main() {
 	db := mongoClient.Database(cfg.MongoDB)
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"))
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
+	// The bot pipeline has no standby stream, so HasFailover gates the buddy
+	// lane out there; it also keeps the home dial fail-fast, since without a
+	// buddy a pod that cannot reach home has nothing to do.
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy.OnlyIf(wiring.HasFailover()), CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and serve the buddy lane, and join the home lane when it returns.
+	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -128,23 +138,6 @@ func main() {
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
-		os.Exit(1)
-	}
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
-
-	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
-	if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
-		os.Exit(1)
-	}
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name,
-		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("roomlist-worker"), wiring.CanonicalWildcard))
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -160,14 +153,6 @@ func main() {
 	slog.Info("room-list state flusher started",
 		"flush_interval", cfg.FlushInterval, "flush_timeout", cfg.FlushTimeout)
 
-	// PullMaxMessages is bounded by MaxAckPending anyway; a modest buffer keeps
-	// the single consume goroutine fed without over-fetching during an outage.
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(pullBatch))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-
 	// Armed BEFORE the consume loop starts, because the loop can raise this
 	// signal itself the moment it fails. Until signal.Notify runs, SIGTERM keeps
 	// its default disposition and would kill the process outright rather than
@@ -180,17 +165,42 @@ func main() {
 
 	var wg sync.WaitGroup
 	consume := consumeState{onUnexpectedStop: requestSelfShutdown}
-	wg.Add(1)
-	go consumeLoop(iter, f, &wg, &consume)
+
+	// Home lane, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage. Dev-only stream
+	// bootstrap rides inside for the same reason: it needs the server too.
+	homeLane, err := natsutil.BindWhenConnected(ctx, nc, wiring.CanonicalStream.Name, func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name,
+			buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("roomlist-worker"), wiring.CanonicalWildcard))
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		// PullMaxMessages is bounded by MaxAckPending anyway; a modest buffer
+		// keeps the single consume goroutine fed without over-fetching during an
+		// outage.
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(pullBatch))
+		if err != nil {
+			return nil, fmt.Errorf("messages: %w", err)
+		}
+		wg.Add(1)
+		go consumeLoop(iter, f, &wg, &consume)
+		return iter.Stop, nil
+	})
+	if err != nil {
+		slog.Error("bind home lane failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Buddy lane: the same body against the same flusher, fed from the standby
 	// canonical stream on the buddy. Never fails startup — on any failure
 	// buddyLane stays nil and the worker runs home-only. A one-slot pool keeps
 	// it sequential like the home loop; the flusher is the serialization point
-	// between the two lanes, and it is mutex-guarded. The bot pipeline has no
-	// standby stream, so HasFailover gates the lane out there.
+	// between the two lanes, and it is mutex-guarded.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(wiring.HasFailover()),
+		SiteID: cfg.SiteID, Dialer: &dialer,
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: pullBatch / 2,
 		Sem: make(chan struct{}, 1), WG: &wg,
 	}
@@ -204,6 +214,7 @@ func main() {
 	// connection alone cannot detect a worker that has stopped doing its job.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
 		consume.Check(),
 	)
 	if err != nil {
@@ -220,7 +231,7 @@ func main() {
 		func(_ context.Context) error { consume.beginShutdown(); return nil },
 		// Both iterators stop before the drain below, so neither lane pulls new
 		// work while the other is still finishing. Both feed one WaitGroup.
-		func(_ context.Context) error { iter.Stop(); buddyLane.Stop(); return nil },
+		func(_ context.Context) error { homeLane.Stop(); buddyLane.Stop(); return nil },
 		func(ctx context.Context) error {
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()

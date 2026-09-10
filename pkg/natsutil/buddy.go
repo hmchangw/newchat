@@ -2,9 +2,11 @@ package natsutil
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -85,6 +87,36 @@ type BuddyDialer struct {
 	TracerProvider trace.TracerProvider
 	Propagator     propagation.TextMapPropagator
 	TracingEnabled bool
+}
+
+// ConnectHome dials the service's own cluster. Without a buddy it fails fast,
+// exactly as Connect does: a single-site service with no bus has nothing to do,
+// and crash-looping is the right signal. With a buddy configured the dial is
+// lazy — a home cluster that is down at startup yields a RECONNECTING
+// connection that keeps dialing in the background, so a pod that restarts
+// during the outage still boots, binds its buddy lane, and joins the home lane
+// the moment the cluster returns. Without that, every rollout, eviction or
+// crash during an outage removed a worker from the standby lane too.
+//
+// Home is "the connection the lane comes up on" only once it is CONNECTED:
+// callers bind JetStream consumers through BindWhenConnected, which defers the
+// bind until then. Core subscriptions need no such care — nats.go buffers a
+// subscription made while reconnecting and replays it on connect.
+//
+// meterProvider may be nil to skip connection metrics.
+func (d *BuddyDialer) ConnectHome(ctx context.Context, url string, meterProvider metric.MeterProvider) (*o11ynats.Conn, error) {
+	if !d.Config.Enabled() {
+		conn, err := ConnectWithMetrics(ctx, url, d.CredsFile, d.TracerProvider, d.Propagator, d.TracingEnabled, meterProvider)
+		if err != nil {
+			return nil, fmt.Errorf("connect home nats: %w", err)
+		}
+		return conn, nil
+	}
+	conn, err := connectLazy(ctx, url, d.CredsFile, d.TracerProvider, d.Propagator, d.TracingEnabled, meterProvider)
+	if err != nil {
+		return nil, fmt.Errorf("connect home nats: %w", err)
+	}
+	return conn, nil
 }
 
 // OnlyIf narrows the dialer's config exactly as BuddyConfig.OnlyIf does, so a

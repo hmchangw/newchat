@@ -282,7 +282,12 @@ register a second router on that connection too, so a displaced client's RPCs â€
 and the failover-lane workers' own thread-parent, badge and presence RPCs â€” are
 answered by this site's instance against this site's stores. Every lane's
 publishes and outbound RPCs leave on the connection its work arrived on; nothing
-is shared with the home lane, whose connection is the one that is down. See
+is shared with the home lane, whose connection is the one that is down. With a
+buddy configured the home dial is lazy (`natsutil.BuddyDialer.ConnectHome`): a
+pod that boots while home is down still comes up on the buddy lane, binds its
+home lane when the cluster returns (`natsutil.BindWhenConnected` for consumers;
+router subscriptions are buffered by nats.go), and reports ready only while at
+least one lane serves. See
 [`nats-failover-scenarios.md`](./nats-failover-scenarios.md) for the operational
 picture and
 [the design spec](./superpowers/specs/2026-08-15-nats-site-failover-design.md)

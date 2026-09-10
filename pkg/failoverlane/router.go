@@ -5,7 +5,9 @@ import (
 	"fmt"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+	"github.com/nats-io/nats.go"
 
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -34,7 +36,28 @@ type Routers struct {
 	// Buddy serves clients displaced onto the buddy cluster by this site's NATS
 	// outage. Nil when no buddy is configured or the lane could not be bound.
 	Buddy     *natsrouter.Router
+	homeConn  *o11ynats.Conn
 	buddyConn *o11ynats.Conn
+}
+
+// Check is the readiness check for a service whose home dial may be lazy
+// (BuddyDialer.ConnectHome): ready while at least one connection is serving —
+// the home one, or the buddy while home is down. The plain NATS check reads a
+// still-dialing home as healthy, so on its own it would report a pod ready with
+// nothing answering on either cluster.
+//
+// A router's subscriptions are registered on both connections up front and
+// replayed by nats.go when a connection lands, so "connected" is the same as
+// "answering" here.
+func (r *Routers) Check() health.Check {
+	return natsutil.LanesCheck(
+		func() bool { return connected(r.homeConn) },
+		func() bool { return connected(r.buddyConn) },
+	)
+}
+
+func connected(conn *o11ynats.Conn) bool {
+	return conn != nil && conn.NatsConn() != nil && conn.NatsConn().Status() == nats.CONNECTED
 }
 
 // BindRouters builds the home router and, when a buddy is configured, an
@@ -56,7 +79,7 @@ func BindRouters(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetSt
 	if err != nil {
 		return nil, fmt.Errorf("build home router: %w", err)
 	}
-	routers := &Routers{Home: homeRouter}
+	routers := &Routers{Home: homeRouter, homeConn: home}
 	routers.buddyConn = buddy.Bind(ctx,
 		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
 			buddyRouter, bErr := build(ctx, bconn, bjs, subject.LaneFailover)
