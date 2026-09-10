@@ -176,7 +176,7 @@ func Register[Req, Resp any](
     fn func(c *Context, req Req) (*Resp, error),
 )
 
-// No request body, JSON response. For GET-style lookups where all data is in the subject.
+// No request body, JSON response. For handlers whose inputs come entirely from the subject.
 func RegisterNoBody[Resp any](
     r Registrar,
     pattern string,
@@ -374,7 +374,7 @@ Three handler shapes for three use cases:
 | Function | Request Body | Response | Use Case |
 |----------|-------------|----------|----------|
 | `Register[Req, Resp]` | Yes | Yes | Standard request/reply (most endpoints) |
-| `RegisterNoBody[Resp]` | No | Yes | GET-style lookups where subject has all info |
+| `RegisterNoBody[Resp]` | No | Yes | Handlers whose inputs come entirely from the subject — reads (`list_members`) and mutations alike (`open_room`, `toggle_mute`, `mark_room_read`) |
 | `RegisterVoid[Req]` | Yes | No | Fire-and-forget events (under `WithMaxConcurrency` saturation: dropped with a Warn log; under unbounded default: always spawns). Takes no `method` and records no `rpc.server.call.duration` sample. |
 
 ```go
@@ -386,11 +386,15 @@ natsrouter.Register(router, "chat.user.{account}.msg.send", natsmetrics.MethodSe
         return &SendResponse{ID: msg.ID}, nil
     })
 
-// GET-style — no request body needed.
-natsrouter.RegisterNoBody(router, "chat.user.{account}.rooms.get.{roomID}", natsmetrics.MethodBatchGetRoomsInfo,
-    func(c *natsrouter.Context) (*Room, error) {
-        return store.FindRoom(c, c.Param("roomID"))
-    })
+// No request body — all inputs come from subject parameters. Only {account} and
+// {roomID} stay as placeholders; the site is a literal the service supplies at
+// registration.
+natsrouter.RegisterNoBody(
+    router,
+    "chat.user.{account}.request.room.{roomID}.site-a.open",
+    natsmetrics.MethodOpenRoom,
+    service.OpenRoom,
+)
 
 // Fire-and-forget — no response sent. Dropped with a Warn log on saturation.
 natsrouter.RegisterVoid(router, "chat.user.{account}.event.typing",
@@ -708,7 +712,7 @@ These concerns don't belong in a request/reply router. If you need a typed handl
 See `example_test.go` for runnable examples:
 - `Example_basicUsage` — register a handler with params
 - `Example_withMiddleware` — canonical `Default()` + `HandlerTimeout` setup
-- `Example_noBodyHandler` — GET-style endpoint
+- `Example_noBodyHandler` — a handler whose inputs come entirely from the subject
 - `Example_errorHandling` — user-facing vs internal errors
 - `Example_fireAndForget` — RegisterVoid for events
 - `Example_customMiddleware` — write your own middleware

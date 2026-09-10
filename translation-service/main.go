@@ -127,7 +127,7 @@ func main() {
 
 // registerRoutes wires translation-service's routes onto the router. It is a
 // function rather than inline in main so the registration table has exactly one
-// definition, which routes_test.go runs against a golden file.
+// definition.
 func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
 	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), natsmetrics.MethodTranslateText, handler.Translate)
 }

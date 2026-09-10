@@ -19,10 +19,12 @@ package natsmetrics
 // position and carries no message id anywhere on its path, despite living under
 // a .message. subject.
 //
-// One value is deliberately shared across two services: mark_all_threads_read is
-// both user-service's client-facing route and the room-service route user-service
-// calls to serve it. They are one logical operation over two hops, and a panel
-// filtered on the method shows both.
+// Every route declares its own value. user-service's mark_all_threads_read and
+// room-service's mark_site_threads_read are the two halves of one user action
+// across a hop, named separately because their scopes differ: the first spans
+// every site the account holds threads on, the second clears exactly one. Name
+// the scope the handler actually has — a subject token can name the owning
+// service rather than a resource, as `.room.` does on that per-site leaf.
 type RPCMethod string
 
 const (
@@ -82,13 +84,17 @@ const (
 	MethodListUserThreads              RPCMethod = "list_user_threads"
 	MethodMarkAllThreadsRead           RPCMethod = "mark_all_threads_read"
 	MethodMarkRoomRead                 RPCMethod = "mark_room_read"
-	MethodMarkRoomThreadsRead          RPCMethod = "mark_room_threads_read"
-	MethodMarkThreadRead               RPCMethod = "mark_thread_read"
-	MethodMigrateDeleteMessage         RPCMethod = "migrate_delete_message"
-	MethodMigrateEditMessage           RPCMethod = "migrate_edit_message"
-	MethodMoveChat                     RPCMethod = "move_chat"
-	MethodOpenRoom                     RPCMethod = "open_room"
-	MethodPinMessage                   RPCMethod = "pin_message"
+	// MethodMarkSiteThreadsRead labels the per-site leaf that clears one
+	// account's thread read state across a single site. The subject's `.room.`
+	// token names the owning service, not a room; neither the subject nor request
+	// contains a roomID. MethodMarkAllThreadsRead fans out to one such call per site.
+	MethodMarkSiteThreadsRead  RPCMethod = "mark_site_threads_read"
+	MethodMarkThreadRead       RPCMethod = "mark_thread_read"
+	MethodMigrateDeleteMessage RPCMethod = "migrate_delete_message"
+	MethodMigrateEditMessage   RPCMethod = "migrate_edit_message"
+	MethodMoveChat             RPCMethod = "move_chat"
+	MethodOpenRoom             RPCMethod = "open_room"
+	MethodPinMessage           RPCMethod = "pin_message"
 	// An rpc.method label value naming the route that refreshes or sets a token,
 	// exported to Prometheus as a metric dimension. Not a credential.
 	// #nosec G101 -- see above
@@ -203,7 +209,7 @@ var rpcMethodVocabulary = map[RPCMethod]struct{}{
 	MethodListUserThreads:              {},
 	MethodMarkAllThreadsRead:           {},
 	MethodMarkRoomRead:                 {},
-	MethodMarkRoomThreadsRead:          {},
+	MethodMarkSiteThreadsRead:          {},
 	MethodMarkThreadRead:               {},
 	MethodMigrateDeleteMessage:         {},
 	MethodMigrateEditMessage:           {},

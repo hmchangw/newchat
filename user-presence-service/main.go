@@ -203,9 +203,9 @@ func main() {
 
 // registerRoutes wires user-presence-service's routes onto the router. It is a
 // function rather than inline in main so the registration table has exactly one
-// definition, which routes_test.go runs against a golden file. The four
-// RegisterVoid routes are fire-and-forget: they name no rpc.method and record no
-// server-side sample, so only the three Register routes reach the golden file.
+// definition. The four RegisterVoid routes are fire-and-forget: they name no
+// rpc.method and record no server-side sample, so only the three Register
+// routes appear in rpc.server.call.duration.
 func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
 	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(siteID), handler.Hello)
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(siteID), handler.Ping)

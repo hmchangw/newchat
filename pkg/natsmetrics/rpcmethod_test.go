@@ -69,7 +69,7 @@ var allRPCMethods = []RPCMethod{
 	MethodListUserThreads,
 	MethodMarkAllThreadsRead,
 	MethodMarkRoomRead,
-	MethodMarkRoomThreadsRead,
+	MethodMarkSiteThreadsRead,
 	MethodMarkThreadRead,
 	MethodMigrateDeleteMessage,
 	MethodMigrateEditMessage,

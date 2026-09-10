@@ -24,11 +24,11 @@ func Example_basicUsage() {
 	// Register a handler — {account} and {roomID} are extracted from the subject.
 	// The pattern is automatically converted to a NATS wildcard for subscription.
 	// The third argument is the route's rpc.method: a declared natsmetrics
-	// constant, unique within this router, that every metric for this route is
-	// labelled with. An undeclared method is not rejected: registration logs
-	// and degrades that route to natsmetrics.MethodOther ("_OTHER"). The gates
-	// that actually catch a wrong method run before deploy — .semgrep/
-	// rpcmethod.yml and the service's own testdata/routes.golden test.
+	// constant that every metric for this route is labelled with. The compiler
+	// requires an RPCMethod argument, and package tests keep the declared
+	// vocabulary bounded and unique. An out-of-vocabulary value is normalized to
+	// MethodOther at record time. Choosing the semantically correct method for a
+	// route remains a review responsibility.
 	natsrouter.Register[RenameRoomRequest, Room](
 		router,
 		"chat.user.{account}.request.room.{roomID}.site-a.rename",
