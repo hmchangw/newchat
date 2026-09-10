@@ -144,6 +144,8 @@ func TestFailureRecipientEvidence_RejectsMalformedExpectations(t *testing.T) {
 		{OperationID: "op", Recipients: []string{"alice"}, Source: RecipientSetSource("bad")},
 		{OperationID: "op", Recipients: []string{""}},
 	}
+	// #nosec G601 -- Go 1.22+ gives each iteration its own variable
+	// nosemgrep: gosec.G601-1
 	for _, config := range tests {
 		evidence := NewRecipientEvidence(false)
 		assert.Error(t, evidence.ExpectDelivery(&config))
