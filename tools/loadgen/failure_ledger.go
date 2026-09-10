@@ -16,14 +16,6 @@ const (
 	invalidReasonLeaseAbort        = failuremodel.InvalidReasonLeaseAbort
 )
 
-var failureInvalidationReasonRegistry = map[string]struct{}{
-	invalidReasonCapacity: {}, invalidReasonWAL: {}, "accounting_invariant": {},
-	"observer_queue": {}, invalidReasonReconcileCapacity: {},
-	invalidReasonReconcileLagRange: {}, invalidReasonLeaseAbort: {},
-	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
-	"timeline": {}, "other": {}, "sidecar": {},
-}
-
 type failureLedgerConfig = failuremodel.LedgerConfig
 type failureLedger = failuremodel.Ledger
 
