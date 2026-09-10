@@ -73,7 +73,7 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	metrics := natsmetrics.NewFromProvider(mp).Publisher("site-a")
-	r := New(nc, "room-service", WithMetrics(metrics))
+	r := New(nc, "room-service", WithSiteID("site-a"), WithMetrics(metrics))
 
 	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.member.list",
 		func(_ *Context, req testReq) (*testResp, error) {
@@ -112,7 +112,7 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 					}
 					for _, point := range data.DataPoints {
 						attrs := attrsOfPoint(point.Attributes)
-						if attrs["rpc.method"] != "member_read" || attrs["rpc.system.name"] != "nats" {
+						if attrs["rpc.method"] != "room_member_list" || attrs["rpc.system.name"] != "nats" {
 							return false
 						}
 						results[attrs["error.type"]] += point.Count

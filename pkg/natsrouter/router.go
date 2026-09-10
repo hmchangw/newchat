@@ -199,8 +199,17 @@ func (r *Router) Use(mw ...HandlerFunc) {
 	r.middleware = append(r.middleware, mw...)
 }
 
+// addRoute derives the route's rpc.method label once, here, from the pattern it
+// registers. Deriving per dispatch is what the previous subject matcher did: it
+// ran even with metrics disabled, and its family gate left most of the fleet
+// recording as "unknown".
+//
+// A router built without WithSiteID cannot recognise the site token in its own
+// patterns and will fold it into the label. Every service sets it; the guard is
+// that a stray label value is bounded and visible, not silent.
 func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 	rt := parsePattern(pattern)
+	method := natsmetrics.MethodFromPattern(pattern, r.siteID)
 	all := make([]HandlerFunc, 0, len(r.middleware)+1+len(handlers))
 	all = append(all, r.middleware...)
 	// Identity enrichment is router plumbing, not an opt-in middleware. Keep it
@@ -211,18 +220,17 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {
 		started := time.Now()
-		operation := natsmetrics.RequestOperationFromSubject(m.Subject)
 		// Stopping gate: reject before admit so Shutdown's contract holds
 		// even if a callback fires mid-drain or after Shutdown's ctx expired.
 		if r.stopping.Load() {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			r.metrics.HandledRequest(msgCtx, method, time.Since(started), natsmetrics.RequestUnavailable)
 			return
 		}
 		admitted, release := r.admit()
 		if !admitted {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			r.metrics.HandledRequest(msgCtx, method, time.Since(started), natsmetrics.RequestUnavailable)
 			return
 		}
 		r.wg.Add(1)
@@ -239,7 +247,7 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all, r.reply)
 			defer releaseContext(c)
 			defer func() {
-				r.metrics.HandledRequest(msgCtx, operation, time.Since(started), c.requestResult)
+				r.metrics.HandledRequest(msgCtx, method, time.Since(started), c.requestResult)
 			}()
 			defer func() {
 				if rec := recover(); rec != nil {

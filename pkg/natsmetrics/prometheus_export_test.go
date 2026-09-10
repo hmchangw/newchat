@@ -59,7 +59,7 @@ func TestPrometheusExport_GatherSucceedsWithResourceConstantLabels(t *testing.T)
 	// entirely and this guard silently stopped covering it.
 	p.Failure(ctx, DestinationCanonical, OperationCanonicalPublish, nats.ErrTimeout)
 	p.Request(ctx, OperationPresenceLookup, time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
+	p.HandledRequest(ctx, RPCMethod("room_open"), time.Millisecond, RequestSuccess)
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather must succeed — a failure here is the /metrics 500")

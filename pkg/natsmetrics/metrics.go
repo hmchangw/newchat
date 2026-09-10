@@ -283,8 +283,8 @@ type requestKey struct {
 }
 
 type handledRequestKey struct {
-	operation Operation
-	result    RequestResult
+	method RPCMethod
+	result RequestResult
 }
 
 type Consumer struct {
@@ -573,15 +573,15 @@ func (m *Metrics) Publisher(site string) Publisher {
 		// marks a call as having succeeded.
 		request: newOptTable(func(key requestKey) metric.MeasurementOption {
 			if key.outcome == RequestSucceeded {
-				return build(rpcSystemName, rpcMethod(key.operation))
+				return build(rpcSystemName, rpcMethod(string(key.operation)))
 			}
-			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.outcome)))
+			return build(rpcSystemName, rpcMethod(string(key.operation)), errorType(string(key.outcome)))
 		}),
 		handled: newOptTable(func(key handledRequestKey) metric.MeasurementOption {
 			if key.result == RequestSuccess {
-				return build(rpcSystemName, rpcMethod(key.operation))
+				return build(rpcSystemName, rpcMethod(string(key.method)))
 			}
-			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.result)))
+			return build(rpcSystemName, rpcMethod(string(key.method)), errorType(string(key.result)))
 		}),
 	}
 }
@@ -627,13 +627,13 @@ func (p Publisher) Request(ctx context.Context, operation Operation, duration ti
 }
 
 // HandledRequest records one inbound request/reply handler result as
-// rpc.server.call.duration. Both labels are normalized against closed enums;
-// subjects and error strings are never attributes.
-func (p Publisher) HandledRequest(ctx context.Context, operation Operation, duration time.Duration, result RequestResult) {
+// rpc.server.call.duration. method is derived once at route registration by
+// MethodFromPattern; subjects and error strings are never attributes.
+func (p Publisher) HandledRequest(ctx context.Context, method RPCMethod, duration time.Duration, result RequestResult) {
 	if p.metrics == nil {
 		return
 	}
-	opt := p.handled.get(handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)})
+	opt := p.handled.get(handledRequestKey{normalizeRPCMethod(method), normalizeRequestResult(result)})
 	p.metrics.serverCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
