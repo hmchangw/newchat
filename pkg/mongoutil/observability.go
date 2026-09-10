@@ -31,6 +31,9 @@ type connectConfig struct {
 	minPoolSize  *uint64
 	maxIdleTime  *time.Duration
 	writeConcern *writeconcern.WriteConcern
+	// degradedStart keeps an unreachable MongoDB from failing Connect. Set by
+	// WithDegradedStart, for services whose primary datastore is not MongoDB.
+	degradedStart bool
 }
 
 // Option configures Connect. Options are additive; the zero config attaches no
