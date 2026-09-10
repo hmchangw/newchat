@@ -199,3 +199,38 @@ func TestInstrumented_SetsObservabilityAndRequireParentSpan(t *testing.T) {
 	assert.Equal(t, obs, cfg.obs)
 	assert.Len(t, cfg.redisOpts, 1, "require-parent-span rides along with the providers")
 }
+
+// A shared datastore is the same for every replica, so making its reachability
+// a startup gate means a Valkey outage that overlaps a rollout, autoscale or
+// node drain crashloops every pod at once — including the message path. go-redis
+// dials lazily and self-heals per call, so the probe is a diagnostic, not a gate.
+func TestDialCluster_UnreachableIsNotFatalByDefault(t *testing.T) {
+	c, err := dialCluster(context.Background(), []string{"127.0.0.1:1"}, "")
+	require.NoError(t, err, "an unreachable cluster must not fail the dial")
+	require.NotNil(t, c)
+	t.Cleanup(func() { _ = c.Close() })
+}
+
+// The one-shot seeding CLI is the exception: it has no fallback and no next
+// call to self-heal into, so aborting the run is the correct behaviour there.
+func TestDialCluster_RequireReachableFailsFast(t *testing.T) {
+	c, err := dialCluster(context.Background(), []string{"127.0.0.1:1"}, "", WithRequireReachable())
+	require.Error(t, err, "WithRequireReachable must surface an unreachable cluster")
+	assert.Nil(t, c, "the half-constructed client must not leak to the caller")
+}
+
+// Connect and ConnectRaw share the dial, so both inherit the non-fatal probe —
+// the callers that exit on error keep that branch for construction failures only.
+func TestConnect_UnreachableClusterStillReturnsClient(t *testing.T) {
+	cfg := Config{Addrs: []string{"127.0.0.1:1"}}
+
+	client, err := Connect(context.Background(), cfg)
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	t.Cleanup(func() { Disconnect(client) })
+
+	raw, err := ConnectRaw(context.Background(), cfg)
+	require.NoError(t, err)
+	require.NotNil(t, raw)
+	t.Cleanup(func() { _ = raw.Close() })
+}

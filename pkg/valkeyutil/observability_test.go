@@ -44,5 +44,6 @@ func TestNewConnectConfig_NilOptionIgnored(t *testing.T) {
 func TestInstrumentCluster_NoObservability_NoError(t *testing.T) {
 	// With no observability configured, instrumentCluster is a no-op and must
 	// not touch the (here nil) client.
-	assert.NoError(t, instrumentCluster(nil, newConnectConfig()))
+	cc := newConnectConfig()
+	assert.NoError(t, instrumentCluster(nil, &cc))
 }
