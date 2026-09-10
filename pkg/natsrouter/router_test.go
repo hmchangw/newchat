@@ -868,3 +868,76 @@ func attrsOfPoint(set attribute.Set) map[string]string {
 	}
 	return out
 }
+
+func serverCallMethods(t *testing.T, reader *sdkmetric.ManualReader) []string {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var methods []string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok || m.Name != "rpc.server.call.duration" {
+				continue
+			}
+			for _, point := range hist.DataPoints {
+				methods = append(methods, attrsOfPoint(point.Attributes)["rpc.method"])
+			}
+		}
+	}
+	return methods
+}
+
+// RegisterVoid declares no method and must stay out of the RPC family entirely:
+// with no reply subject there is no round trip to time. Asserted after
+// Shutdown, because the handler runs in a goroutine whose `defer r.wg.Done()`
+// unwinds strictly after the record site would have fired — that ordering is
+// the edge this catches, and a recordRPC guard lost in a later refactor would
+// show up here as one sample instead of none.
+func TestRouter_RegisterVoidRecordsNoRPCSample(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "user-presence-service", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+	done := make(chan struct{})
+	RegisterVoid(r, "chat.user.{account}.event.presence.site-a.ping",
+		func(_ *Context, _ testReq) error { close(done); return nil })
+
+	require.NoError(t, nc.PublishMsg(context.Background(), &nats.Msg{
+		Subject: "chat.user.alice.event.presence.site-a.ping",
+		Data:    []byte(`{"name":"ok"}`),
+	}))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("void handler never ran")
+	}
+	require.NoError(t, r.Shutdown(context.Background()))
+	assert.Empty(t, serverCallMethods(t, reader))
+}
+
+// A value outside the vocabulary is only reachable by writing RPCMethod("…")
+// deliberately, bypassing the constants. It must not panic: metrics are opt-in,
+// so a telemetry defect should never take a chat service down. It degrades to
+// semconv's _OTHER, which is bounded and alertable.
+func TestRegisterDegradesUndeclaredMethodToOther(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "test", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+
+	require.NotPanics(t, func() {
+		Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open",
+			natsmetrics.RPCMethod("not_registered"),
+			func(_ *Context, _ testReq) (*testResp, error) { return &testResp{Greeting: "ok"}, nil })
+	})
+
+	_, err := nc.Request(context.Background(),
+		"chat.user.alice.request.room.room-a.site-a.open", []byte(`{"name":"ok"}`), 2*time.Second)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]string{"_OTHER"}, serverCallMethods(t, reader))
+	}, time.Second, 10*time.Millisecond)
+}
