@@ -82,22 +82,13 @@ func main() {
 	// With no peers there is nothing to forward, so the buddy lane is gated out
 	// entirely — and the home dial stays fail-fast, since without a buddy a pod
 	// that cannot reach home has nothing to do.
-	dialer := natsutil.BuddyDialer{
-		Config: cfg.Buddy.OnlyIf(len(peers) > 0), CredsFile: cfg.NatsCredsFile,
-		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
-	}
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(len(peers) > 0), cfg.NatsCredsFile, sdk)
 	// Lazy with a buddy: a pod that restarts while home NATS is down must still
 	// boot and keep federating outward through the buddy, and join the home
 	// lanes when home returns.
-	nc, err := dialer.ConnectHome(ctx, cfg.NatsURL, nil)
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/flywindy/o11y"
 	o11ynats "github.com/flywindy/o11y/nats"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -117,6 +118,31 @@ func (d *BuddyDialer) ConnectHome(ctx context.Context, url string, meterProvider
 		return nil, fmt.Errorf("connect home nats: %w", err)
 	}
 	return conn, nil
+}
+
+// NewBuddyDialer builds the dialer every failover-capable service needs from
+// its config and the observability SDK. One constructor, so the tracing tuple
+// cannot be copied wrong from one main to the next.
+func NewBuddyDialer(cfg BuddyConfig, credsFile string, sdk *o11y.SDK) *BuddyDialer {
+	return &BuddyDialer{
+		Config: cfg, CredsFile: credsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+}
+
+// ConnectHomeJS is ConnectHome plus the JetStream context every service builds
+// next. The context needs no live server — it only fixes the API prefix — so
+// it is ready even while a lazy dial is still in flight.
+func (d *BuddyDialer) ConnectHomeJS(ctx context.Context, url string, meterProvider metric.MeterProvider) (*o11ynats.Conn, o11ynats.JetStream, error) {
+	conn, err := d.ConnectHome(ctx, url, meterProvider)
+	if err != nil {
+		return nil, nil, err
+	}
+	js, err := conn.JetStream()
+	if err != nil {
+		return nil, nil, fmt.Errorf("init home jetstream: %w", err)
+	}
+	return conn, js, nil
 }
 
 // OnlyIf narrows the dialer's config exactly as BuddyConfig.OnlyIf does, so a
