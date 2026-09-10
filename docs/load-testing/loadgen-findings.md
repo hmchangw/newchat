@@ -52,6 +52,8 @@ here, there is a working safety net to refactor against.
 | F13 | Medium | `soak` search | A capped search page reports an indexed message as missing |
 | F14 | Medium | `soak` catalog | `SearchTerm` retains the whole message body, against its own doc comment |
 | F15 | Low-Med | `soak` mutation | Concurrent reaction toggles can leave the catalog disagreeing with the server |
+| F16 | Low | `failure` WAL | A legacy WAL awaiting compaction accepts a v2 append that replay then rejects |
+| F17 | Low-Med | `soak` reconcile | The malformed-claim release branch has no test and cannot get one without a consumer-side ledger interface |
 
 ---
 
@@ -359,3 +361,52 @@ never checked.
   publishing. Needs a decision on whether that is intended.
 - `ObserveEvent` / `ObserveMismatch` have no direct callers. Likely satisfied
   through an interface; not yet confirmed.
+
+---
+
+### F16 — a legacy WAL awaiting compaction accepts an append replay rejects · **Low**
+
+`WAL.appendBufferedLocked` (`tools/loadgen/internal/failure/wal.go:276-300`)
+writes the record with `SchemaVersion = WALSchemaVersion` (2) and only writes a
+header when `w.size == 0`. While `w.legacy` is true the file has schema-0
+framing and a non-zero size, so the v2 record lands without a versioned header
+and `ReplayEach` later rejects the whole WAL with `record version %d requires a
+versioned header`.
+
+Not reachable in production. The only production `OpenWAL` caller
+(`soak_failure.go:211`) hands the WAL straight to `newFailureLedger`, and
+`NewLedger` compacts before it returns, so nothing can append while `legacy` is
+still set. Only a test holding a `*WAL` directly can get there.
+
+Pre-existing, not introduced by the extraction: the function is byte-identical
+to `failure_ledger.go:2344-2364` at merge-base `6c6e93df`.
+
+Fix when touched: reject appends while `w.legacy` is true, or keep schema-0
+framing until `Compact` clears it. Raised by CodeRabbit on PR #482.
+
+---
+
+### F17 — the malformed-claim release branch is untestable as wired · **Low-Med**
+
+`soakFailureReconciler.Try` (`soak_failure.go:864-868`) releases the claim
+before returning `failure operation %q was queued without an unresolved
+observer`. Without that release the operation stays claimed for the rest of the
+run: it is never re-queued, so it expires unverified and its lane loses a
+reconcile slot permanently.
+
+`TestSoakFailureReconciler_ReleasesMalformedClaim` covered exactly that and was
+deleted in PR #482, because it reached the state by writing
+`ledger.active[id].Observations` — internals that moved to `internal/failure`.
+
+It cannot simply be rewritten against the exported API. `Ledger.Start` resets
+`Observations` to an empty map (`internal/failure/ledger.go:263`), and observing
+every expected observer finalizes the operation out of `active`, so no exported
+call sequence produces a claimable operation with all observers resolved. The
+branch is defensive against a state the ledger will not construct.
+
+The fix is a consumer-side interface for the reconciler's ledger dependency,
+which `Try` uses for exactly four methods — `ClaimDueLanes`, `Observe`,
+`ObserveWithReason`, `ReleaseClaim`. A stub returning a malformed operation then
+reaches the branch, and `*failure.Ledger` satisfies the interface unchanged, so
+no call site moves. Deferred to the failure-boundary follow-up rather than
+folded into an extraction PR.
