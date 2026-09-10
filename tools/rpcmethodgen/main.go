@@ -1,0 +1,200 @@
+// Command rpcmethodgen renders the rpc.method vocabulary from its source table.
+//
+// The vocabulary used to be written three times — a const block, the map Valid()
+// reads, and a slice the tests ranged over — so adding one route meant editing
+// three lists that nothing but a count check kept in step. Now rpcmethods.tsv is
+// the only place a name is written and this command derives the rest.
+//
+// The table is the review surface, so it is deliberately plain: two columns, one
+// row per method, sorted by label value. Nothing here invents a name.
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"flag"
+	"fmt"
+	"go/format"
+	"io"
+	"log"
+	"os"
+	"regexp"
+	"strings"
+	"text/template"
+)
+
+// method is one row of the source table.
+type method struct {
+	Constant string
+	Value    string
+	// Suppress names a SAST rule whose directive must be rendered above this
+	// constant. Only G101 is supported: a label value like "set_sso_token" reads
+	// to a credential scanner as a hardcoded secret.
+	Suppress string
+}
+
+var (
+	valueShape    = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
+	constantShape = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+)
+
+func main() {
+	in := flag.String("in", "rpcmethods.tsv", "source table")
+	out := flag.String("out", "rpcmethod_gen.go", "generated Go file")
+	flag.Parse()
+
+	// The work is in run so its deferred close is not skipped by log.Fatal.
+	if err := run(*in, *out); err != nil {
+		log.Fatalf("rpcmethodgen: %v", err)
+	}
+}
+
+func run(in, out string) error {
+	methods, err := readTable(in)
+	if err != nil {
+		return err
+	}
+
+	src, err := render(methods)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(out, src, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", out, err)
+	}
+
+	return nil
+}
+
+func readTable(path string) (methods []method, err error) {
+	// #nosec G304 -- developer-supplied path in build tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close %s: %w", path, closeErr)
+		}
+	}()
+
+	methods, err = parseTable(f)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	return methods, nil
+}
+
+// parseTable reads the source table, rejecting anything that would produce a
+// vocabulary the hand-written half cannot trust: a malformed name, a duplicate,
+// or rows out of label order.
+//
+// Order is enforced rather than sorted for the reviewer's sake: a generated diff
+// should show one added line, not a reshuffle, so the table has to arrive sorted.
+func parseTable(r io.Reader) ([]method, error) {
+	var (
+		methods   []method
+		values    = map[string]struct{}{}
+		constants = map[string]struct{}{}
+		previous  string
+	)
+
+	scanner := bufio.NewScanner(r)
+	for line := 1; scanner.Scan(); line++ {
+		text := scanner.Text()
+		if strings.TrimSpace(text) == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+
+		fields := strings.Split(text, "\t")
+		if len(fields) < 2 || len(fields) > 3 {
+			return nil, fmt.Errorf("line %d: expected 2 or 3 columns, got %d", line, len(fields))
+		}
+
+		m := method{Constant: strings.TrimSpace(fields[0]), Value: strings.TrimSpace(fields[1])}
+		if len(fields) == 3 {
+			m.Suppress = strings.TrimSpace(fields[2])
+		}
+
+		switch {
+		case !constantShape.MatchString(m.Constant):
+			return nil, fmt.Errorf("line %d: constant %q is not PascalCase", line, m.Constant)
+		case !valueShape.MatchString(m.Value):
+			return nil, fmt.Errorf("line %d: label value %q is not verb-first snake_case", line, m.Value)
+		case m.Suppress != "" && m.Suppress != "G101":
+			return nil, fmt.Errorf("line %d: unsupported suppression %q", line, m.Suppress)
+		}
+
+		// Duplicates are checked before order so the message names the real
+		// defect: an equal value also reads as out-of-order, and "duplicate" is
+		// what the author needs to hear.
+		if _, dup := values[m.Value]; dup {
+			return nil, fmt.Errorf("line %d: duplicate label value %q", line, m.Value)
+		}
+		if _, dup := constants[m.Constant]; dup {
+			return nil, fmt.Errorf("line %d: duplicate constant %q", line, m.Constant)
+		}
+		if m.Value <= previous {
+			return nil, fmt.Errorf("line %d: label value %q is out of order, after %q", line, m.Value, previous)
+		}
+		values[m.Value] = struct{}{}
+		constants[m.Constant] = struct{}{}
+		previous = m.Value
+
+		methods = append(methods, m)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read source table: %w", err)
+	}
+
+	return methods, nil
+}
+
+// Each scanner reads its own directive and neither honours the other's, so a
+// name a credential scanner misreads needs both, on the lines directly above the
+// statement they cover.
+var fileTemplate = template.Must(template.New("rpcmethod_gen").Parse(`// Code generated by tools/rpcmethodgen. DO NOT EDIT.
+// Source: rpcmethods.tsv
+
+package natsmetrics
+
+const (
+{{- range .}}
+{{- if .Suppress}}
+	// An rpc.method label value naming the route that refreshes or sets a token,
+	// exported to Prometheus as a metric dimension. Not a credential.
+	// #nosec {{.Suppress}} -- see above
+	// nosemgrep: gosec.{{.Suppress}}-1, hardcoded-credential-literal
+{{- end}}
+	Method{{.Constant}} RPCMethod = "{{.Value}}"
+{{- end}}
+)
+
+// rpcMethods is every vocabulary constant, in label order. Go cannot range over
+// a const block, and Valid() needs a membership set, so both are derived from
+// this one slice rather than repeating the names.
+var rpcMethods = []RPCMethod{
+{{- range .}}
+	Method{{.Constant}},
+{{- end}}
+}
+`))
+
+// render produces the generated file, gofmt'd so `make generate` is idempotent
+// and the up-to-date check in natsmetrics compares like with like.
+func render(methods []method) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := fileTemplate.Execute(&buf, methods); err != nil {
+		return nil, fmt.Errorf("render vocabulary: %w", err)
+	}
+
+	src, err := format.Source(buf.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("gofmt generated vocabulary: %w", err)
+	}
+
+	return src, nil
+}

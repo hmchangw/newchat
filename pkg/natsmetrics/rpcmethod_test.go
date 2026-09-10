@@ -1,118 +1,22 @@
 package natsmetrics
 
 import (
+	"bufio"
+	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// allRPCMethods enumerates the vocabulary so the tests below can walk it. It
-// mirrors enums_test.go's allPublishOperations: Go has no way to range over a
-// const block, and a hand-kept list that drifts is caught by
-// TestRPCMethodVocabularyIsComplete, which cross-checks it against Valid().
-var allRPCMethods = []RPCMethod{
-	MethodAddBotRoomMembers,
-	MethodAddMembers,
-	MethodAddPriorityContact,
-	MethodBatchGetBadgeCounts,
-	MethodBatchGetMessages,
-	MethodBatchGetPeerPresence,
-	MethodBatchGetPresence,
-	MethodBatchGetRoomPreviews,
-	MethodBatchGetRoomsInfo,
-	MethodBatchGetThreadRoomsInfo,
-	MethodCountSubscriptions,
-	MethodCreateBotRoom,
-	MethodCreateChatlistSection,
-	MethodCreateDMRoom,
-	MethodCreateRoom,
-	MethodCreateTeamsMeeting,
-	MethodDeleteChatlistSection,
-	MethodDeleteEmoji,
-	MethodDeleteMessage,
-	MethodEditMessage,
-	MethodEnsureBotDMRoom,
-	MethodEnsureRoomKey,
-	MethodGetBotRoom,
-	MethodGetChatlist,
-	MethodGetCurrentUser,
-	MethodGetDMSubscription,
-	MethodGetMessage,
-	MethodGetRoomAppCommandMenu,
-	MethodGetRoomAppTabs,
-	MethodGetRoomKey,
-	MethodGetSettings,
-	MethodGetSubscriptionByRoom,
-	MethodGetThreadUnreadSummary,
-	MethodGetUserProfile,
-	MethodGetUserStatus,
-	MethodListAppCategories,
-	MethodListApps,
-	MethodListChannelMessages,
-	MethodListChannelSubscriptions,
-	MethodListEmojis,
-	MethodListMemberStatuses,
-	MethodListMembers,
-	MethodListMentionableSubscriptions,
-	MethodListMessageReaders,
-	MethodListNextMessages,
-	MethodListOrgMembers,
-	MethodListPinnedMessages,
-	MethodListPriorityContacts,
-	MethodListSubscriptions,
-	MethodListSurroundingMessages,
-	MethodListThreadMessages,
-	MethodListThreadParentMessages,
-	MethodListThreadSubscriptions,
-	MethodListUserThreads,
-	MethodMarkAllThreadsRead,
-	MethodMarkRoomRead,
-	MethodMarkRoomThreadsRead,
-	MethodMarkThreadRead,
-	MethodMigrateDeleteMessage,
-	MethodMigrateEditMessage,
-	MethodMoveChat,
-	MethodOpenRoom,
-	MethodPinMessage,
-	MethodRefreshSSOToken,
-	MethodRemoveBotRoomMembers,
-	MethodRemoveMember,
-	MethodRemovePriorityContact,
-	MethodRenameChatlistSection,
-	MethodRenameRoom,
-	MethodReorderChatlistSections,
-	MethodSearchApps,
-	MethodSearchMessages,
-	MethodSearchOrgs,
-	MethodSearchRooms,
-	MethodSearchUsers,
-	MethodSendDM,
-	MethodSendRoomMessage,
-	MethodSetAppSubscription,
-	MethodSetChatlistSectionSortMode,
-	MethodSetManualPresence,
-	MethodSetRoomRestricted,
-	MethodSetSettings,
-	MethodSetSSOToken,
-	MethodSetUserStatus,
-	MethodStartTeamsRoomCall,
-	MethodStartTeamsUserCall,
-	MethodToggleFavorite,
-	MethodToggleMessageReaction,
-	MethodToggleMute,
-	MethodTranslateText,
-	MethodUnpinMessage,
-	MethodUpdateMemberRole,
-}
-
 // TestEveryRPCMethodIsValid pins the vocabulary as the closed set Valid()
 // reports. A constant that fails here is declared but unusable: addRPCRoute
 // degrades an invalid method to MethodOther, so the route would silently
 // record under the fallback instead of its own name.
 func TestEveryRPCMethodIsValid(t *testing.T) {
-	for _, m := range allRPCMethods {
+	for _, m := range rpcMethods {
 		assert.True(t, m.Valid(), "method %q is declared but not Valid()", m)
 	}
 }
@@ -129,11 +33,15 @@ func TestMethodOtherIsNotValid(t *testing.T) {
 // TestRPCMethodValuesAreUniqueAndWellFormed guards the label itself: a
 // duplicate value silently merges two routes into one time series, and a value
 // outside snake_case breaks the naming rule the vocabulary documents.
+//
+// rpcmethodgen rejects both at generation time, but this is the assertion that
+// holds if the generated file is ever edited by hand or produced by a future
+// generator, so it stays here rather than living only in the tool's tests.
 func TestRPCMethodValuesAreUniqueAndWellFormed(t *testing.T) {
 	snakeCase := regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
-	seen := make(map[RPCMethod]struct{}, len(allRPCMethods))
+	seen := make(map[RPCMethod]struct{}, len(rpcMethods))
 
-	for _, m := range allRPCMethods {
+	for _, m := range rpcMethods {
 		_, dup := seen[m]
 		require.False(t, dup, "duplicate RPCMethod value %q", m)
 		seen[m] = struct{}{}
@@ -141,11 +49,52 @@ func TestRPCMethodValuesAreUniqueAndWellFormed(t *testing.T) {
 	}
 }
 
-// TestRPCMethodVocabularyIsComplete catches the list above drifting from the
-// const block. Valid() is driven by its own table, so a constant added to one
-// and not the other shows up as a count mismatch here rather than as a route
-// silently recording under MethodOther in production.
-func TestRPCMethodVocabularyIsComplete(t *testing.T) {
-	assert.Equal(t, len(allRPCMethods), rpcMethodVocabularySize(),
-		"allRPCMethods and the Valid() table disagree; add the constant to both")
+// TestGeneratedVocabularyMatchesItsSourceTable catches the one mistake the
+// generator cannot: editing rpcmethods.tsv and not running `make generate`, or
+// editing rpcmethod_gen.go by hand. It compares label values only — a constant
+// missing from the generated file fails to compile at its call site, so the
+// compiler already covers that half.
+func TestGeneratedVocabularyMatchesItsSourceTable(t *testing.T) {
+	table := readSourceTable(t)
+
+	generated := make(map[RPCMethod]struct{}, len(rpcMethods))
+	for _, m := range rpcMethods {
+		generated[m] = struct{}{}
+	}
+
+	assert.Equal(t, len(table), len(generated),
+		"rpcmethods.tsv and rpcmethod_gen.go disagree on how many methods exist; run `make generate`")
+
+	for _, value := range table {
+		assert.Contains(t, generated, value,
+			"rpcmethods.tsv declares %q but the generated vocabulary does not; run `make generate`", value)
+	}
+}
+
+// readSourceTable returns the label values in rpcmethods.tsv. It re-reads the
+// source rather than importing the generator, which is package main — and that
+// independence is the point: a parser shared with the tool could not catch the
+// tool having run against a stale table.
+func readSourceTable(t *testing.T) []RPCMethod {
+	t.Helper()
+
+	f, err := os.Open("rpcmethods.tsv")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, f.Close()) }()
+
+	var values []RPCMethod
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		require.GreaterOrEqual(t, len(fields), 2, "malformed row: %s", line)
+		values = append(values, RPCMethod(strings.TrimSpace(fields[1])))
+	}
+	require.NoError(t, scanner.Err())
+	require.NotEmpty(t, values, "read no rows from rpcmethods.tsv; the test is broken, not the table")
+
+	return values
 }

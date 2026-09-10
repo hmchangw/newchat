@@ -25,108 +25,7 @@ package natsmetrics
 // filtered on the method shows both.
 type RPCMethod string
 
-const (
-	MethodAddBotRoomMembers            RPCMethod = "add_bot_room_members"
-	MethodAddMembers                   RPCMethod = "add_members"
-	MethodAddPriorityContact           RPCMethod = "add_priority_contact"
-	MethodBatchGetBadgeCounts          RPCMethod = "batch_get_badge_counts"
-	MethodBatchGetMessages             RPCMethod = "batch_get_messages"
-	MethodBatchGetPeerPresence         RPCMethod = "batch_get_peer_presence"
-	MethodBatchGetPresence             RPCMethod = "batch_get_presence"
-	MethodBatchGetRoomPreviews         RPCMethod = "batch_get_room_previews"
-	MethodBatchGetRoomsInfo            RPCMethod = "batch_get_rooms_info"
-	MethodBatchGetThreadRoomsInfo      RPCMethod = "batch_get_thread_rooms_info"
-	MethodCountSubscriptions           RPCMethod = "count_subscriptions"
-	MethodCreateBotRoom                RPCMethod = "create_bot_room"
-	MethodCreateChatlistSection        RPCMethod = "create_chatlist_section"
-	MethodCreateDMRoom                 RPCMethod = "create_dm_room"
-	MethodCreateRoom                   RPCMethod = "create_room"
-	MethodCreateTeamsMeeting           RPCMethod = "create_teams_meeting"
-	MethodDeleteChatlistSection        RPCMethod = "delete_chatlist_section"
-	MethodDeleteEmoji                  RPCMethod = "delete_emoji"
-	MethodDeleteMessage                RPCMethod = "delete_message"
-	MethodEditMessage                  RPCMethod = "edit_message"
-	MethodEnsureBotDMRoom              RPCMethod = "ensure_bot_dm_room"
-	MethodEnsureRoomKey                RPCMethod = "ensure_room_key"
-	MethodGetBotRoom                   RPCMethod = "get_bot_room"
-	MethodGetChatlist                  RPCMethod = "get_chatlist"
-	MethodGetCurrentUser               RPCMethod = "get_current_user"
-	MethodGetDMSubscription            RPCMethod = "get_dm_subscription"
-	MethodGetMessage                   RPCMethod = "get_message"
-	MethodGetRoomAppCommandMenu        RPCMethod = "get_room_app_command_menu"
-	MethodGetRoomAppTabs               RPCMethod = "get_room_app_tabs"
-	MethodGetRoomKey                   RPCMethod = "get_room_key"
-	MethodGetSettings                  RPCMethod = "get_settings"
-	MethodGetSubscriptionByRoom        RPCMethod = "get_subscription_by_room"
-	MethodGetThreadUnreadSummary       RPCMethod = "get_thread_unread_summary"
-	MethodGetUserProfile               RPCMethod = "get_user_profile"
-	MethodGetUserStatus                RPCMethod = "get_user_status"
-	MethodListAppCategories            RPCMethod = "list_app_categories"
-	MethodListApps                     RPCMethod = "list_apps"
-	MethodListChannelMessages          RPCMethod = "list_channel_messages"
-	MethodListChannelSubscriptions     RPCMethod = "list_channel_subscriptions"
-	MethodListEmojis                   RPCMethod = "list_emojis"
-	MethodListMemberStatuses           RPCMethod = "list_member_statuses"
-	MethodListMembers                  RPCMethod = "list_members"
-	MethodListMentionableSubscriptions RPCMethod = "list_mentionable_subscriptions"
-	MethodListMessageReaders           RPCMethod = "list_message_readers"
-	MethodListNextMessages             RPCMethod = "list_next_messages"
-	MethodListOrgMembers               RPCMethod = "list_org_members"
-	MethodListPinnedMessages           RPCMethod = "list_pinned_messages"
-	MethodListPriorityContacts         RPCMethod = "list_priority_contacts"
-	MethodListSubscriptions            RPCMethod = "list_subscriptions"
-	MethodListSurroundingMessages      RPCMethod = "list_surrounding_messages"
-	MethodListThreadMessages           RPCMethod = "list_thread_messages"
-	MethodListThreadParentMessages     RPCMethod = "list_thread_parent_messages"
-	MethodListThreadSubscriptions      RPCMethod = "list_thread_subscriptions"
-	MethodListUserThreads              RPCMethod = "list_user_threads"
-	MethodMarkAllThreadsRead           RPCMethod = "mark_all_threads_read"
-	MethodMarkRoomRead                 RPCMethod = "mark_room_read"
-	MethodMarkRoomThreadsRead          RPCMethod = "mark_room_threads_read"
-	MethodMarkThreadRead               RPCMethod = "mark_thread_read"
-	MethodMigrateDeleteMessage         RPCMethod = "migrate_delete_message"
-	MethodMigrateEditMessage           RPCMethod = "migrate_edit_message"
-	MethodMoveChat                     RPCMethod = "move_chat"
-	MethodOpenRoom                     RPCMethod = "open_room"
-	MethodPinMessage                   RPCMethod = "pin_message"
-	// An rpc.method label value naming the route that refreshes or sets a token,
-	// exported to Prometheus as a metric dimension. Not a credential.
-	// #nosec G101 -- see above
-	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
-	MethodRefreshSSOToken            RPCMethod = "refresh_sso_token"
-	MethodRemoveBotRoomMembers       RPCMethod = "remove_bot_room_members"
-	MethodRemoveMember               RPCMethod = "remove_member"
-	MethodRemovePriorityContact      RPCMethod = "remove_priority_contact"
-	MethodRenameChatlistSection      RPCMethod = "rename_chatlist_section"
-	MethodRenameRoom                 RPCMethod = "rename_room"
-	MethodReorderChatlistSections    RPCMethod = "reorder_chatlist_sections"
-	MethodSearchApps                 RPCMethod = "search_apps"
-	MethodSearchMessages             RPCMethod = "search_messages"
-	MethodSearchOrgs                 RPCMethod = "search_orgs"
-	MethodSearchRooms                RPCMethod = "search_rooms"
-	MethodSearchUsers                RPCMethod = "search_users"
-	MethodSendDM                     RPCMethod = "send_dm"
-	MethodSendRoomMessage            RPCMethod = "send_room_message"
-	MethodSetAppSubscription         RPCMethod = "set_app_subscription"
-	MethodSetChatlistSectionSortMode RPCMethod = "set_chatlist_section_sort_mode"
-	MethodSetManualPresence          RPCMethod = "set_manual_presence"
-	MethodSetRoomRestricted          RPCMethod = "set_room_restricted"
-	MethodSetSettings                RPCMethod = "set_settings"
-	// An rpc.method label value naming the route that refreshes or sets a token,
-	// exported to Prometheus as a metric dimension. Not a credential.
-	// #nosec G101 -- see above
-	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
-	MethodSetSSOToken           RPCMethod = "set_sso_token"
-	MethodSetUserStatus         RPCMethod = "set_user_status"
-	MethodStartTeamsRoomCall    RPCMethod = "start_teams_room_call"
-	MethodStartTeamsUserCall    RPCMethod = "start_teams_user_call"
-	MethodToggleFavorite        RPCMethod = "toggle_favorite"
-	MethodToggleMessageReaction RPCMethod = "toggle_message_reaction"
-	MethodToggleMute            RPCMethod = "toggle_mute"
-	MethodTranslateText         RPCMethod = "translate_text"
-	MethodUnpinMessage          RPCMethod = "unpin_message"
-	MethodUpdateMemberRole      RPCMethod = "update_member_role"
-)
+//go:generate go run github.com/hmchangw/chat/tools/rpcmethodgen -in rpcmethods.tsv -out rpcmethod_gen.go
 
 // MethodOther is the record-time fallback for a method outside the vocabulary.
 // semconv v1.40.0 makes "_OTHER" normative for an unrecognised rpc.method, and
@@ -143,111 +42,16 @@ const MethodOther RPCMethod = "_OTHER"
 // the intent is explicit at the call site rather than an omitted argument.
 const MethodNone RPCMethod = ""
 
-// rpcMethodVocabulary is the closed set Valid() reports. A map rather than a
-// switch so rpcMethodVocabularySize can report its length to the completeness
-// test, which is what catches a constant added here but not to allRPCMethods.
-var rpcMethodVocabulary = map[RPCMethod]struct{}{
-	MethodAddBotRoomMembers:            {},
-	MethodAddMembers:                   {},
-	MethodAddPriorityContact:           {},
-	MethodBatchGetBadgeCounts:          {},
-	MethodBatchGetMessages:             {},
-	MethodBatchGetPeerPresence:         {},
-	MethodBatchGetPresence:             {},
-	MethodBatchGetRoomPreviews:         {},
-	MethodBatchGetRoomsInfo:            {},
-	MethodBatchGetThreadRoomsInfo:      {},
-	MethodCountSubscriptions:           {},
-	MethodCreateBotRoom:                {},
-	MethodCreateChatlistSection:        {},
-	MethodCreateDMRoom:                 {},
-	MethodCreateRoom:                   {},
-	MethodCreateTeamsMeeting:           {},
-	MethodDeleteChatlistSection:        {},
-	MethodDeleteEmoji:                  {},
-	MethodDeleteMessage:                {},
-	MethodEditMessage:                  {},
-	MethodEnsureBotDMRoom:              {},
-	MethodEnsureRoomKey:                {},
-	MethodGetBotRoom:                   {},
-	MethodGetChatlist:                  {},
-	MethodGetCurrentUser:               {},
-	MethodGetDMSubscription:            {},
-	MethodGetMessage:                   {},
-	MethodGetRoomAppCommandMenu:        {},
-	MethodGetRoomAppTabs:               {},
-	MethodGetRoomKey:                   {},
-	MethodGetSettings:                  {},
-	MethodGetSubscriptionByRoom:        {},
-	MethodGetThreadUnreadSummary:       {},
-	MethodGetUserProfile:               {},
-	MethodGetUserStatus:                {},
-	MethodListAppCategories:            {},
-	MethodListApps:                     {},
-	MethodListChannelMessages:          {},
-	MethodListChannelSubscriptions:     {},
-	MethodListEmojis:                   {},
-	MethodListMemberStatuses:           {},
-	MethodListMembers:                  {},
-	MethodListMentionableSubscriptions: {},
-	MethodListMessageReaders:           {},
-	MethodListNextMessages:             {},
-	MethodListOrgMembers:               {},
-	MethodListPinnedMessages:           {},
-	MethodListPriorityContacts:         {},
-	MethodListSubscriptions:            {},
-	MethodListSurroundingMessages:      {},
-	MethodListThreadMessages:           {},
-	MethodListThreadParentMessages:     {},
-	MethodListThreadSubscriptions:      {},
-	MethodListUserThreads:              {},
-	MethodMarkAllThreadsRead:           {},
-	MethodMarkRoomRead:                 {},
-	MethodMarkRoomThreadsRead:          {},
-	MethodMarkThreadRead:               {},
-	MethodMigrateDeleteMessage:         {},
-	MethodMigrateEditMessage:           {},
-	MethodMoveChat:                     {},
-	MethodOpenRoom:                     {},
-	MethodPinMessage:                   {},
-	// An rpc.method label value naming the route that refreshes or sets a token,
-	// exported to Prometheus as a metric dimension. Not a credential.
-	// #nosec G101 -- see above
-	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
-	MethodRefreshSSOToken:            {},
-	MethodRemoveBotRoomMembers:       {},
-	MethodRemoveMember:               {},
-	MethodRemovePriorityContact:      {},
-	MethodRenameChatlistSection:      {},
-	MethodRenameRoom:                 {},
-	MethodReorderChatlistSections:    {},
-	MethodSearchApps:                 {},
-	MethodSearchMessages:             {},
-	MethodSearchOrgs:                 {},
-	MethodSearchRooms:                {},
-	MethodSearchUsers:                {},
-	MethodSendDM:                     {},
-	MethodSendRoomMessage:            {},
-	MethodSetAppSubscription:         {},
-	MethodSetChatlistSectionSortMode: {},
-	MethodSetManualPresence:          {},
-	MethodSetRoomRestricted:          {},
-	MethodSetSettings:                {},
-	// An rpc.method label value naming the route that refreshes or sets a token,
-	// exported to Prometheus as a metric dimension. Not a credential.
-	// #nosec G101 -- see above
-	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
-	MethodSetSSOToken:           {},
-	MethodSetUserStatus:         {},
-	MethodStartTeamsRoomCall:    {},
-	MethodStartTeamsUserCall:    {},
-	MethodToggleFavorite:        {},
-	MethodToggleMessageReaction: {},
-	MethodToggleMute:            {},
-	MethodTranslateText:         {},
-	MethodUnpinMessage:          {},
-	MethodUpdateMemberRole:      {},
-}
+// rpcMethodVocabulary is the membership set Valid() reads, derived from the
+// generated slice rather than written out a second time. A map rather than a
+// linear scan because Valid() is on the registration path for every route.
+var rpcMethodVocabulary = func() map[RPCMethod]struct{} {
+	set := make(map[RPCMethod]struct{}, len(rpcMethods))
+	for _, m := range rpcMethods {
+		set[m] = struct{}{}
+	}
+	return set
+}()
 
 // Valid reports whether m is one of the vocabulary constants. MethodOther is
 // not, by design.
@@ -255,7 +59,3 @@ func (m RPCMethod) Valid() bool {
 	_, ok := rpcMethodVocabulary[m]
 	return ok
 }
-
-// rpcMethodVocabularySize exists for the completeness test; nothing in
-// production needs the count.
-func rpcMethodVocabularySize() int { return len(rpcMethodVocabulary) }
