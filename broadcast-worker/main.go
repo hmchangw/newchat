@@ -177,7 +177,8 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		mongoutil.WithDegradedStart())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -283,9 +284,11 @@ func main() {
 	if sealer.enabled() {
 		previews = newPreviewWriter(store)
 	}
-	if err := store.EnsureIndexes(ctx); err != nil {
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
+	if err := store.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
+	ensureCancel()
 	cachedStore, err := newCachedMetaStore(store, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)

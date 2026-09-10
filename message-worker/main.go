@@ -146,7 +146,8 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		mongoutil.WithDegradedStart())
 	if err != nil {
 		slog.Error("mongodb connect failed", "error", err)
 		os.Exit(1)
@@ -200,9 +201,11 @@ func main() {
 
 	store := NewCassandraStore(cassSession, bucketSizer, cipher)
 	threadStore := newThreadStoreMongo(db)
-	if err := threadStore.EnsureIndexes(ctx); err != nil {
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
+	if err := threadStore.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
+	ensureCancel()
 	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
 		// verbose-tracing intent ride onto downstream badge/inbox events.
