@@ -17,6 +17,7 @@ served by `pkg/health`.
 | `auth-service` | `PORT` (default `8080`) | On the main Gin server. |
 | `user-service` | `HEALTH_ADDR` (default `:8081`) | A dedicated listener, deliberately separate from its client API on `HTTP_PORT`: the API group sheds overload with `429`, and a shed liveness probe would restart pods mid-burst. |
 | `search-service` | `SEARCH_METRICS_ADDR` (default `:9090`) | Mounted on the existing metrics listener — no extra port. |
+| `tcard-service` | `PORT` (default `8087`) | On the main Gin server. Readiness is the card cache's first successful load, not NATS (see below). |
 | all other (NATS) services | `HEALTH_ADDR` (default `:8081`) | A dedicated health-only listener. One port per pod, so the shared default does not collide. |
 
 ## What readiness checks — and why only NATS
@@ -41,6 +42,89 @@ primarily a rollout-gating and operator signal — and a safe one, since nothing
 routed off it.
 
 The NATS readiness check is `natsutil.HealthCheck(nc)`.
+
+## MongoDB degraded start
+
+Eight services pass `mongoutil.WithDegradedStart()`, so an unreachable MongoDB
+at startup is a warning rather than a fatal error and the pod starts:
+`broadcast-worker`, `history-service`, `message-gatekeeper`, `message-worker`,
+`notification-worker`, `search-service`, `tcard-service`,
+`user-presence-service`.
+
+Each has a primary datastore that is not MongoDB (Cassandra, Elasticsearch,
+Valkey, or an in-process cache). What a cold degraded pod can serve differs:
+
+- `broadcast-worker`, `history-service`, `message-gatekeeper`, `message-worker`
+  and `notification-worker` reach MongoDB through Valkey-backed L2 tiers,
+  fail-open enrichment, or NAK-and-retry. The L2 tiers are external and shared,
+  so a pod that starts cold during an outage still gets warm cache hits — it
+  serves real traffic rather than starting only to fail everything.
+- `user-presence-service` keeps users in a pod-local L1 only (Valkey is the
+  presence store itself). The whole presence write path never touches MongoDB
+  and serves in full; each user lookup on a cold pod pays a
+  `ServerSelectionTimeout` until MongoDB returns.
+- `search-service` has an in-process LRU and no breaker or Valkey tier in
+  front of its MongoDB lookups. Room, org and user search serve fully; message
+  search serves without HR, DM and app names; app search fails.
+- `tcard-service` holds an in-memory card snapshot. A cold pod is Running but
+  NotReady (below) until its first successful load.
+
+Fail-open enrichment has a cost that degraded start makes reachable on a cold
+pod: `message-worker` persists a message from an L2-cold sender with a
+projected sender and its `@mentions` dropped, permanently, rather than parking
+the message for retry. The trade is immediate-but-possibly-degraded over
+delayed-but-complete, bounded to L2-cold users; the real fix is deterministic
+enrichment from the canonical event (see `CLAUDE.md`, "Plaintext message
+creates pin their write timestamp").
+
+The driver reconnects on its own (SDAM) once MongoDB returns. A degraded pod
+resumes consuming at that moment, before a crashlooping fail-fast service has
+restarted and built the indexes it owns, so a write whose correctness rests on
+a unique index confirms it first: `message-worker` gates `CreateThreadRoom` on
+`thread_rooms.parentMessageId` and its subscription inserts and upserts on
+`thread_subscriptions.(threadRoomId,userAccount)`, and NAKs the reply until the
+constraint is there. It creates non-destructively and never repairs a
+conflicting index; that is `room-service`'s alone (see the sole-creator rule
+in `CLAUDE.md`). Rejected credentials and a
+cancelled startup context are the two ping failures that stay fatal.
+
+Every other service still exits when MongoDB is unreachable: MongoDB is their
+job, and a pod that cannot reach it can do no useful work. Membership is decided
+in code, not by an env var.
+
+**Rejected credentials are fatal even for a degradable service.** The server
+answered and said no, so that is misconfiguration, not an outage. Everything
+the startup ping cannot tell from an outage starts degraded instead — a wrong
+host or port (the network reports both as "nothing answering", exactly like a
+down MongoDB), a TLS failure, or a ping that timed out against an overloaded
+server. The warning names the underlying error, so an operator who finds
+MongoDB healthy knows to look at the config. The ping itself is bounded
+(`startupPingBound`: 10s, or the configured server-selection timeout plus 5s
+when that is longer) so an overloaded MongoDB cannot hang startup indefinitely;
+that bound applies to every service, not only the eight, and the index
+creation or verification that follows the ping runs under the shared
+`mongoutil.IndexEnsureTimeout` (30s) in every degradable service that does any
+(and in the fail-fast index owners that already bounded it). The rejection is read
+from the connection pool as well as from the ping, because with
+`MONGO_MIN_POOL_SIZE > 0` a warm-up connection fails SCRAM first and the ping
+only sees the cleared pool.
+
+**The probes do not change.** `/healthz` stays process-up only and `/readyz`
+stays NATS-only, for the reason given above: MongoDB is shared by every replica,
+so probing it in readiness would flip every pod `NotReady` at once on a blip. A
+pod running degraded on a shared L2 is genuinely serving traffic from its
+caches, so reporting it `NotReady` would be wrong.
+
+`tcard-service` is the carve-out: its `/readyz` already reports the card
+cache's first successful load, so a cold degraded pod is Running but NotReady
+and answers its card routes with `503`/`404` until MongoDB returns. That is
+still strictly better than the crashloop it replaces — `RefreshLoop` retries
+every `cacheRetryInterval` (30s) and the pod flips Ready within one interval
+of recovery, with zero restarts instead of a `CrashLoopBackOff` growing to a
+five-minute cap — and nothing writes to cards, so a NotReady pod is harmless.
+
+A degraded start is visible in the logs as
+`mongo ping failed at startup; continuing in degraded mode`, with the error.
 
 ## Liveness
 
