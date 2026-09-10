@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/threadcount"
 )
 
@@ -54,10 +55,18 @@ type CassandraStore struct {
 	sess   *gocql.Session
 	bucket msgbucket.Sizer
 	cipher atrest.Cipher
+	// threadPolicy tunes where exact counting stops and how often an
+	// approximate count is re-derived; tests override it.
+	threadPolicy threadcount.Policy
 }
 
 func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{sess: sess, bucket: bucket, cipher: cipher}
+	return &CassandraStore{
+		sess:         sess,
+		bucket:       bucket,
+		cipher:       cipher,
+		threadPolicy: threadcount.DefaultPolicy(),
+	}
 }
 
 // SaveMessage inserts into messages_by_room + messages_by_id via one UnloggedBatch.
@@ -138,7 +147,8 @@ func (s *CassandraStore) saveEncrypted(ctx context.Context, msg *model.Message, 
 }
 
 // SaveThreadMessage inserts into messages_by_id + thread_messages_by_thread, mirroring to
-// messages_by_room when TShow is true, then blind-SETs tcount/tlm from a bounded partition COUNT.
+// messages_by_room when TShow is true, then stamps the parent's tcount/tlm
+// (exact below the scan limit, incremental past it — see countAndSetParentTcount).
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, siteID, threadRoomID string) error {
 	if s.cipher != nil {
 		return s.saveThreadEncrypted(ctx, msg, siteID, threadRoomID)
@@ -189,9 +199,9 @@ func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Messa
 func (s *CassandraStore) saveThreadEncrypted(ctx context.Context, msg *model.Message, siteID, threadRoomID string) error {
 	cm := buildCassandraMessage(msg)
 	enc := atrest.SplitForEncryption(&cm)
-	payload, meta, err := s.cipher.Encrypt(ctx, cm.RoomID, enc)
-	if err != nil {
-		return fmt.Errorf("encrypt bot thread %s in room %s: %w", cm.MessageID, cm.RoomID, err)
+	payload, meta, encErr := s.cipher.Encrypt(ctx, cm.RoomID, enc)
+	if encErr != nil {
+		return fmt.Errorf("encrypt bot thread %s in room %s: %w", cm.MessageID, cm.RoomID, encErr)
 	}
 	atrest.StripEncryptedFields(&cm)
 	encMeta := &cassandra.EncMeta{Nonce: meta.Nonce}
@@ -241,31 +251,21 @@ func (s *CassandraStore) saveThreadEncrypted(ctx context.Context, msg *model.Mes
 	return s.countAndSetParentTcount(ctx, msg, threadRoomID)
 }
 
-// countAndSetParentTcount blind-SETs tcount/thread_last_msg_at on the parent from an
-// authoritative partition COUNT (idempotent on redelivery); no-op for legacy replies without ThreadParentMessageCreatedAt.
+// countAndSetParentTcount stamps the parent's reply count after this reply's
+// insert; the policy lives in pkg/threadcount, shared with the other tcount
+// writers. No-op for legacy replies without ThreadParentMessageCreatedAt.
 func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model.Message, threadRoomID string) error {
 	if msg.ThreadParentMessageCreatedAt == nil {
 		return nil
 	}
-	n, err := threadcount.Count(ctx, s.sess, threadRoomID)
-	if err != nil {
-		return fmt.Errorf("count bot thread replies: %w", err)
-	}
-	tlm := msg.CreatedAt
-	parentID := msg.ThreadParentMessageID
 	parentCreatedAt := *msg.ThreadParentMessageCreatedAt
-	parentBucket := s.bucket.Of(parentCreatedAt)
-	if err := s.sess.Query(
-		`UPDATE messages_by_id SET tcount = ?, thread_last_msg_at = ? WHERE message_id = ?`,
-		n, tlm, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_id: %w", parentID, err)
-	}
-	if err := s.sess.Query(
-		`UPDATE messages_by_room SET tcount = ?, thread_last_msg_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
-		n, tlm, msg.RoomID, parentBucket, parentCreatedAt, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_room: %w", parentID, err)
+	if _, err := threadcount.Maintain(ctx, s.sess, threadRoomID, threadcount.Parent{
+		MessageID: msg.ThreadParentMessageID,
+		RoomID:    msg.RoomID,
+		CreatedAt: parentCreatedAt,
+		Bucket:    s.bucket.Of(parentCreatedAt),
+	}, s.threadPolicy, +1, &msg.CreatedAt, natsutil.IsRedelivery(ctx)); err != nil {
+		return fmt.Errorf("maintain bot parent tcount: %w", err)
 	}
 	return nil
 }
