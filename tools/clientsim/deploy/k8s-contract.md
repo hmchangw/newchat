@@ -199,8 +199,9 @@ healthy zero, and this is the last place that can say why.
 ### The manifest
 
 `pool-manifest.json` records `runId`, `siteId`, `configDigest`, the account
-count, `skippedAccounts` (present only when something was dropped), the limit,
-the query, and the export time. The artifact says *who*
+count, `skippedAccounts` (always written, including zero — and counting what
+this export walked past, not the site; see above), the limit, the query, and
+the export time. The artifact says *who*
 connected; the manifest says how that set was chosen, which is what makes a
 run reproducible months later rather than merely identifiable.
 
