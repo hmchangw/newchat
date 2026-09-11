@@ -34,6 +34,10 @@ type LoadHistoryResponse struct {
 	// SizeLimited: rows were dropped to fit the payload budget — never set for
 	// a merely blanked row. A short page alone does not imply it.
 	SizeLimited bool `json:"sizeLimited,omitempty"`
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }
 
 type LoadNextMessagesRequest struct {
@@ -48,6 +52,10 @@ type LoadNextMessagesResponse struct {
 	NextCursor        string    `json:"nextCursor,omitempty"`
 	HasNext           bool      `json:"hasNext"`
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }
 
 // LoadSurroundingMessagesRequest centers a window on exactly one of MessageID
@@ -69,6 +77,10 @@ type LoadSurroundingMessagesResponse struct {
 	// SizeLimited: rows were dropped to fit the payload budget — never set for
 	// a merely blanked row. A short window alone does not imply it.
 	SizeLimited bool `json:"sizeLimited,omitempty"`
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }
 
 type GetMessageByIDRequest struct {

@@ -1007,6 +1007,7 @@ Message schema: see [../client-api.md § Message schema](../client-api.md#messag
 | `hasNext` | boolean | `true` if older messages may exist; next page via `before` = oldest returned `createdAt`. Always `false` on an empty page. |
 | `minUserLastSeenAt` | number | Optional. UTC ms. The room's strict read floor — present only when every member has read. |
 | `sizeLimited` | boolean | Optional. `true` when rows were dropped to fit the transport's max payload. Branch on this, not on a short page; set the next `limit` to the row count received. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — rows at or after this timestamp may not be persisted yet. |
 
 **Emits:** None — reply only.
 
@@ -1034,6 +1035,7 @@ Forward-pagination counterpart to Load History.
 | `messages` | Message[] | Oldest-first. |
 | `nextCursor` | string | Optional. Opaque cursor for next page. |
 | `hasNext` | boolean | `true` if more messages exist. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — rows at or after this timestamp may not be persisted yet. |
 
 **Emits:** None — reply only.
 
@@ -1062,6 +1064,7 @@ Pivot on **exactly one** of `messageId` or `timestamp`.
 | `moreBefore` | boolean | `true` if more messages exist before the window. |
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
 | `sizeLimited` | boolean | Optional. `true` when the window was narrowed to fit the transport's max payload. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — rows at or after this timestamp may not be persisted yet. |
 
 **Emits:** None — reply only.
 

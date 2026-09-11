@@ -68,6 +68,13 @@ func TestBootstrapStreams(t *testing.T) {
 			wantCreated: []string{"MESSAGES-CANONICAL-test"},
 		},
 		{
+			name:        "disabled - creates nothing",
+			mode:        "default",
+			enabled:     false,
+			existing:    map[string]bool{"MESSAGES-CANONICAL-test": true},
+			wantCreated: nil,
+		},
+		{
 			name:       "enabled - wraps MESSAGES-CANONICAL creator error",
 			mode:       "default",
 			enabled:    true,
