@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -59,7 +60,7 @@ func TestBindRouters_BuddyRouterAnswersOnTheBuddyCluster(t *testing.T) {
 		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
 			order = append(order, lane)
 			r := natsrouter.Default(conn, "failoverlane-test")
-			natsrouter.Register(r, pattern, func(_ *natsrouter.Context, _ echoReq) (*echoResp, error) {
+			natsrouter.Register(r, pattern, natsmetrics.RPCMethod("failoverlane.echo"), func(_ *natsrouter.Context, _ echoReq) (*echoResp, error) {
 				return &echoResp{Lane: laneName(lane)}, nil
 			})
 			return r, nil
@@ -95,7 +96,7 @@ func TestBindRouters_NoBuddyStillServesHome(t *testing.T) {
 		&natsutil.BuddyDialer{TracerProvider: noop.NewTracerProvider(), Propagator: propagation.TraceContext{}},
 		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
 			r := natsrouter.Default(conn, "failoverlane-test-homeonly")
-			natsrouter.Register(r, pattern, func(_ *natsrouter.Context, _ echoReq) (*echoResp, error) {
+			natsrouter.Register(r, pattern, natsmetrics.RPCMethod("failoverlane.echo"), func(_ *natsrouter.Context, _ echoReq) (*echoResp, error) {
 				return &echoResp{Lane: laneName(lane)}, nil
 			})
 			return r, nil
