@@ -162,24 +162,35 @@ workers where order is already not guaranteed: `message-worker`, `broadcast-work
 **Message content lives only where a machine needs it to keep processing, never where a
 human goes to look.**
 
-| Hop | Carries the body? | Why |
+The boundary is **human readability, not persistence**. The body is persisted — recovery
+requires it — but only in stores that no human browses:
+
+| Store | Carries the body? | Who reads it |
 |---|---|---|
-| Source stream | yes | It is the message |
+| Source stream | yes | The original consumers |
 | `RETRY-{siteID}` | **yes** | The retry consumer re-runs the handler on those bytes |
-| `DLQ-{siteID}` | **no** | Nothing re-processes it; it exists to be read by people |
-| Mongo triage record | **no** | Same, plus it is long-lived and queryable |
+| `DLQ-{siteID}` stream | **yes** | `dlq-worker` and `dlqreplay` only — no human path |
+| Mongo triage record | **no** | admin-service, QA, developers |
 
-RETRY is machine-only, short-lived, and no more exposed than the source stream it copies
-from. The DLQ is human-facing and long-lived, so the body stops at the RETRY→DLQ boundary:
-the dead-letter record is metadata, identifiers and failure context only.
+So the body stops at the **`dlq-worker` boundary**, not at the RETRY→DLQ one:
+`dlq-worker` reads the full message off the DLQ stream and writes a Mongo record that omits
+the payload, keeping only the pointer (`dlqStreamSeq`) needed to fetch it back.
 
-This replaces encrypting the stored payload. Not storing content is a stronger guarantee
-than storing it encrypted, and it removes a whole subsystem — no DEK handling, no decryption
-path, no key rotation concern for `dlq-worker`.
+Two consequences make this the right cut:
 
-The cost is that replay can no longer read the body from the DLQ; it fetches from the source
-stream by sequence (§3.8), which bounds the replayability window. That trade is taken
-deliberately.
+- **Recovery does not depend on source-stream retention.** `pkg/stream.Config` carries only
+  `Name` and `Subjects`, and no `MaxAge` is set anywhere in this repo — source retention is
+  ops-owned and not visible here. Reading the body back from the DLQ stream puts the recovery
+  window on a stream we size deliberately (§6) instead of on a number we cannot see.
+- **The human-facing store stays content-free.** The QA/admin view therefore needs no
+  data-protection controls beyond ordinary admin authz, and no payload encryption subsystem
+  is required — no DEK handling, no decryption path, no key rotation concern in
+  `dlq-worker`. This is why the earlier proposal to store the payload encrypted via
+  `pkg/atrest` is not needed.
+
+Content access is not absent, it is **relocated to a privileged, audited action**:
+`dlqreplay inspect` reads the body from the DLQ stream for an operator who has stream
+access, rather than every DLQ reader seeing a stored copy.
 
 ### 3.8 Dead-letter: stream first, Mongo second
 
@@ -215,7 +226,8 @@ Per §3.7 the record carries no message content — it is a **pointer plus failu
 
 | Field | Source |
 |---|---|
-| `originStream`, `originSeq`, `originSubject` | `X-Retry-Origin-*` — the pointer used for replay |
+| `dlqStreamSeq` | The DLQ stream sequence — **the pointer replay and inspect resolve the body through** |
+| `originStream`, `originSeq`, `originSubject` | `X-Retry-Origin-*` — provenance, and a fallback source if the DLQ entry has aged out |
 | `consumer` | Which handler failed |
 | `reason` | errcode category / terminal reason — never an error string |
 | `attempts`, `firstFailedAt`, `deadLetteredAt` | Failure shape over time |
@@ -236,22 +248,22 @@ typed field with review, not passed through a generic bag.
    the original request; `reason` plus `attempts` distinguish "dependency was down" from
    "this specific message cannot be processed".
 3. **Replay** — `tools/dlqreplay`: list, inspect, replay by filter, replay one. Because the
-   record holds no body, replay **fetches the original from the source stream by
-   `{originStream, originSeq}`** and republishes it to
-   `chat.retry.{siteID}.{consumer}.replay` with `X-Retry-Attempt` reset — not to the origin
-   subject, for the same single-consumer reason as §3.3. Rate-limited, or replaying an
-   outage's backlog re-creates the herd that caused it.
-4. **Expire** — explicit `MaxAge` (~30d, IaC-owned) on the Mongo record. Anything unreplayed
-   at expiry is accepted loss, stated plainly.
+   Mongo record holds no body, replay **fetches it from the DLQ stream by `dlqStreamSeq`**
+   and republishes to `chat.retry.{siteID}.{consumer}.replay` with `X-Retry-Attempt` reset —
+   not to the origin subject, for the same single-consumer reason as §3.3. Rate-limited, or
+   replaying an outage's backlog re-creates the herd that caused it. Full procedure in §3.12.
+4. **Expire** — the DLQ **stream**'s `MaxAge` is the recovery window (§6); the Mongo record
+   may outlive it, holding no content. Anything unreplayed when the stream entry expires is
+   accepted loss, stated plainly.
 
-**Replayability window.** Replay works only while the original is still in the source
-stream, so it is `min(source stream retention, DLQ record retention)` — in practice the
-source stream governs. The DLQ record therefore outlives its own replayability: a 30-day-old
-entry is still a valid bug record but may no longer be replayable. The `dlqreplay` tool must
-report "original no longer in stream" as a distinct outcome rather than a generic failure,
-and the admin view should show replayability as a derived state. Fetching by sequence is new
-ground for this repo — there is no existing `GetMsg`/direct-get usage — so it may require
-`AllowDirect` on the source streams (§6).
+**Two retentions, deliberately different.** The DLQ stream holds bodies and bounds
+*recoverability*; the Mongo record holds none and bounds the *audit trail*. A record can
+therefore outlive its own replayability: an entry past the stream window is still a valid
+bug record but no longer replayable. `dlqreplay` must report **"content no longer
+available"** as a distinct outcome rather than a generic failure, and the admin view should
+render replayability as a derived state. Fetching by sequence is new ground for this repo —
+no `GetMsg`/direct-get usage exists today — so it may need `AllowDirect` on the DLQ stream
+(§6), which is a stream we own.
 
 **No auto-drain.** Automatically replaying on dependency recovery re-creates the thundering
 herd, and for genuinely poisoned messages it is an infinite loop with extra steps. Replay
@@ -263,17 +275,58 @@ stays operator-triggered.
 permissions system and an audit endpoint (`routes.go:28-31`), with `admin-frontend` in
 front. DLQ list/detail endpoints there inherit authn, authz and audit.
 
-Because the record holds no content, the QA-facing view needs no data-protection controls
-beyond ordinary admin authz — that is the point of §3.7. Content access is not absent, it is
-**relocated to a privileged, audited action**: `dlqreplay --inspect` reads the body from the
-source stream for an operator who has stream access, rather than every DLQ reader seeing a
-stored copy. Ambient exposure becomes a deliberate one.
+Because the Mongo record holds no content (§3.7), the QA-facing view needs no
+data-protection controls beyond ordinary admin authz, and no payload encryption subsystem is
+required. The context for why that mattered: `pkg/atrest` encrypts the Cassandra
+`enc_payload` column, but the JetStream payload on MESSAGES-CANONICAL is plaintext JSON —
+`message-worker` encrypts on the way *into* Cassandra — so a DLQ record built naively from
+those bytes would hold message bodies in the clear, against CLAUDE.md's rule never to log
+full message bodies.
 
-This supersedes the earlier proposal to store the payload encrypted via `pkg/atrest`. The
-context for why it mattered: `atrest` encrypts the Cassandra `enc_payload` column, but the
-JetStream payload on MESSAGES-CANONICAL is plaintext JSON — `message-worker` encrypts on the
-way *into* Cassandra — so a naive DLQ copy would hold message bodies in the clear, against
-CLAUDE.md's rule never to log full message bodies.
+### 3.12 Runbook: recovering a dead-lettered message
+
+An operator reading a bullet list at 3am is the real deliverable, so the procedure is
+specified, not left implied.
+
+1. **Paged** on untriaged count > 0 (§5). A *stream-depth* page means something else —
+   `dlq-worker` is broken or Mongo is down — and is not this procedure.
+2. **Find it**: `dlqreplay list --consumer=<name> --since=24h`, or the admin-service view.
+   Queries Mongo; returns pointers and failure context, no content.
+3. **Diagnose**: `traceID` leads to the original request. `reason` + `attempts`, and whether
+   many entries share one window, separates outage debris from a per-message bug.
+4. **Inspect the payload only if needed**: `dlqreplay inspect --id=<record>` resolves
+   `dlqStreamSeq` against the DLQ stream. Requires stream access and is audited; steps 1–3
+   work without it.
+5. **Fix the cause before replaying.** For a bug: fix, deploy, then replay. For outage
+   debris: confirm the dependency is actually healthy. Replaying into a broken dependency
+   re-dead-letters everything and burns the budget again.
+6. **Replay**: `dlqreplay replay --id=<record>` (or `--filter=…`):
+   1. read the Mongo record → `dlqStreamSeq`, `consumer`, `siteID`
+   2. direct-get the DLQ stream message at that sequence → body + `X-Retry-*` headers
+   3. republish the **unmodified body** to `chat.retry.{siteID}.{consumer}.replay`,
+      `X-Retry-Attempt` reset to 0, origin headers and `requestID`/traceparent preserved,
+      operator identity stamped
+   4. mark the record `replayed` with timestamp and operator
+7. **The existing retry consumer picks it up** — already bound to
+   `chat.retry.{siteID}.{consumer}.>`, so a replay is an ordinary message to it, same
+   handler, no special path. Success acks; failure runs the normal slow schedule and returns
+   to the DLQ with `attempts` incremented, so **a failed replay is visible, never silent**.
+
+Properties an operator must know before running it:
+
+- **Replay targets one consumer, not the origin subject.** A message that dead-lettered on
+  three consumers has three records, replayed independently — otherwise replay re-runs the
+  two that succeeded.
+- **Bulk replay is rate-limited**, a paced drip. Unthrottled it re-breaks the dependency that
+  just recovered.
+- **`Nats-Msg-Id` stays the original** `{origStream}:{origSeq}:{consumer}`, so a
+  double-clicked replay inside the dedup window is a no-op; outside it, correctness rests on
+  handler idempotency — the system's baseline assumption everywhere else.
+- **Order is not preserved.** Replays arrive arbitrarily late, which is safe only because
+  §3.6 restricts the lane to order-insensitive consumers.
+- **Two pre-flight failures**: the DLQ entry aged out (→ "content no longer available"; the
+  Mongo record survives as a bug record), or the body predates an incompatible handler change
+  and no longer deserializes.
 
 ## 4. Configuration
 
@@ -334,18 +387,21 @@ from this repo:
 
 1. **`RETRY-{siteID}` `Duplicates` ≥ the escalation window.** §3.5's exactly-once escalation
    silently degrades to at-least-once if this is set too short.
-2. **`DLQ-{siteID}` `MaxAge` ≥ notice + triage time** (~30 days).
+2. **`DLQ-{siteID}` `MaxAge` = the recovery window. Proposed default: 90 days.** This is the
+   one number in the design that is a **data-governance decision, not an engineering one** —
+   it is how long dead-lettered user message content is retained, and it must be signed off
+   against the data-retention policy rather than chosen for convenience. 90 days gives a
+   quarter to notice and recover; the Mongo triage record can outlive it indefinitely as a
+   bug record, because it holds no content. *"Someday we might want to recover it" is exactly
+   the reasoning that produces unbounded retention of user messages — hence a number, and an
+   owner for it.*
 3. **Both `R3 + file`**, for the same reason OUTBOX is.
-4. **Source-stream retention governs replayability.** Because the DLQ holds no body (§3.7),
-   replay reads the original by sequence, so `min(source retention, DLQ MaxAge)` is the real
-   replay window — and in practice the source stream is the shorter of the two. If
-   MESSAGES-CANONICAL retention is materially shorter than the triage turnaround, replay is
-   unavailable for exactly the entries a human got to late. **Confirm the current retention
-   of every participating source stream before phase 4**, and size DLQ `MaxAge` knowing the
-   record outlives its replayability.
-5. **`AllowDirect` on participating source streams**, if direct get is chosen for the
-   sequence fetch. No `GetMsg`/direct-get exists in the repo today, so this is unproven
-   ground rather than an established pattern.
+4. **Storage sizing for the DLQ stream**: bodies × dead-letter volume × window. Near zero in
+   normal operation (§3.9 — the DLQ should be empty), but a single large outage can dump a
+   substantial backlog into it. Size for the bad day, not the median.
+5. **`AllowDirect` on `DLQ-{siteID}`**, if direct get is chosen for the sequence fetch. No
+   `GetMsg`/direct-get exists in the repo today, so this is unproven ground rather than an
+   established pattern — but it applies to a stream we own, not to every source stream.
 
 ## 7. Rollout
 
@@ -355,7 +411,7 @@ from this repo:
 | 1 | `pkg/retrylane`, stream configs, metrics — ships dark | `RETRY_LANE_ENABLED=false` |
 | 2 | `notification-worker` only — lowest blast radius | Watch escalation rate |
 | 3 | `message-worker`, `broadcast-worker` | |
-| 4 | DLQ stream, `dlq-worker`, Mongo, admin endpoints — **separate PR** | |
+| 4 | DLQ stream, `dlq-worker`, Mongo, `tools/dlqreplay`, admin endpoints — **separate PR** | DLQ `MaxAge` signed off (§6.2) |
 
 Phase 4 is collectively larger than the retry lane itself. The retry lane stops the outage;
 the DLQ pipeline is aftermath tooling. Sequencing it second keeps the stall fix from being
@@ -377,13 +433,15 @@ blocked behind a QA console.
    RETRY subject with correct headers and the original is acked.
 4. **Metrics:** `OutcomeEscalated` emitted; no mislabeling as `max_deliver`.
 5. **Per-service wiring** for each phase-2/3 adopter.
-6. **The content rule is a test, not a convention** (phase 4). Assert that a dead-letter
-   record and the DLQ stream message carry **no bytes from the original payload** — including
-   the negative case where the source payload contains a known sentinel string that must not
-   appear anywhere in the DLQ record or its serialized form. A rule enforced only by review
-   erodes the first time somebody wants the body for debugging.
-7. **Replay against an expired original** returns the distinct "no longer in stream" outcome
-   rather than a generic error (§3.10).
+6. **The content rule is a test, not a convention** (phase 4). Put a known sentinel string in
+   the source payload and assert it appears **nowhere in the Mongo record or the
+   admin-service API response** — while still being present in the DLQ *stream* message, so
+   the test pins both halves of §3.7 rather than just the prohibition. A rule enforced only
+   by review erodes the first time somebody wants the body for debugging.
+7. **Replay round-trip** (phase 4): dead-letter a message, replay it, assert the handler
+   re-runs on byte-identical content and the record moves to `replayed`.
+8. **Replay against an expired DLQ entry** returns the distinct "content no longer available"
+   outcome rather than a generic error (§3.10).
 
 Coverage floor 80%, 90%+ for `pkg/retrylane` per CLAUDE.md.
 
@@ -397,7 +455,7 @@ Coverage floor 80%, 90%+ for `pkg/retrylane` per CLAUDE.md.
 ## 10. Non-goals
 
 - No change to the FIFO lanes in §3.6.
-- No auto-drain of the DLQ (§3.8).
+- No auto-drain of the DLQ (§3.10) — replay stays operator-triggered.
 - No exactly-once claim — at-least-once plus idempotent handlers, as everywhere else.
 - No consumer-level backpressure (pausing the pull loop on correlated dependency failure).
   It is the cheapest treatment for the *cause* of a 5/s failure rate and complements this
