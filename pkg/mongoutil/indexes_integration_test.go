@@ -4,9 +4,7 @@ package mongoutil
 
 import (
 	"context"
-	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -109,39 +107,6 @@ func TestListIndexUniqueness_ReportsUniqueFlagPerIndex(t *testing.T) {
 	assert.False(t, have["plain_1"], "plain_1 must be listed as non-unique")
 	assert.True(t, have["strict_1"], "strict_1 must be listed as unique")
 	assert.Contains(t, have, "_id_")
-}
-
-// recordHandler captures each slog message with its index attribute.
-type recordHandler struct {
-	mu      sync.Mutex
-	entries []struct{ msg, index string }
-}
-
-func (h *recordHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (h *recordHandler) Handle(_ context.Context, r slog.Record) error { //nolint:gocritic // slog.Handler's signature
-	var index string
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == "index" {
-			index = a.Value.String()
-		}
-		return true
-	})
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.entries = append(h.entries, struct{ msg, index string }{r.Message, index})
-	return nil
-}
-func (h *recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *recordHandler) WithGroup(string) slog.Handler      { return h }
-
-// captureLogs installs a recordHandler as the default logger for the test.
-func captureLogs(t *testing.T) *recordHandler {
-	t.Helper()
-	orig := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(orig) })
-	h := &recordHandler{}
-	slog.SetDefault(slog.New(h))
-	return h
 }
 
 // indexesWarned returns, per warning message fragment, the index names it named.

@@ -54,30 +54,49 @@ func warnMissingIndexes(ctx context.Context, coll *mongo.Collection, requireUniq
 	}
 }
 
-// listIndexUniqueness maps index name to unique; the option is absent on a non-unique index, so false is honest.
-func listIndexUniqueness(ctx context.Context, coll *mongo.Collection) (map[string]bool, error) {
+// indexDoc is one entry of a collection's index listing.
+type indexDoc struct {
+	Name   string `bson:"name"`
+	Key    bson.D `bson:"key"`
+	Unique bool   `bson:"unique"` // absent (not false) on a non-unique index, so false is honest
+	spec   bson.M // the raw document, for a repair that must restore it verbatim
+}
+
+// listIndexes returns every index on coll. An undecodable index document is skipped deliberately
+// (the caller reads it as absent, the safe reading) with its cause kept at debug.
+func listIndexes(ctx context.Context, coll *mongo.Collection) ([]indexDoc, error) {
 	cur, err := coll.Indexes().List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list indexes: %w", err)
 	}
 	defer func() { _ = cur.Close(ctx) }()
 
-	have := make(map[string]bool)
+	var out []indexDoc
 	for cur.Next(ctx) {
-		var idx struct {
-			Name   string `bson:"name"`
-			Unique bool   `bson:"unique"`
-		}
+		var idx indexDoc
 		if err := cur.Decode(&idx); err != nil {
-			// Skipped deliberately: the caller reads an undecodable index as absent; the cause stays at debug.
 			slog.DebugContext(ctx, "mongo: skipping undecodable index document",
 				"collection", coll.Name(), "error", err)
 			continue
 		}
-		have[idx.Name] = idx.Unique
+		_ = bson.Unmarshal(cur.Current, &idx.spec)
+		out = append(out, idx)
 	}
 	if err := cur.Err(); err != nil {
 		return nil, fmt.Errorf("iterate indexes: %w", err)
+	}
+	return out, nil
+}
+
+// listIndexUniqueness maps each index name on coll to whether it is unique.
+func listIndexUniqueness(ctx context.Context, coll *mongo.Collection) (map[string]bool, error) {
+	docs, err := listIndexes(ctx, coll)
+	if err != nil {
+		return nil, err
+	}
+	have := make(map[string]bool, len(docs))
+	for _, d := range docs {
+		have[d.Name] = d.Unique
 	}
 	return have, nil
 }
@@ -242,22 +261,14 @@ func existingIndexByKeys(ctx context.Context, coll *mongo.Collection, keys any) 
 	if want == "" {
 		return existingIndex{}
 	}
-	cur, err := coll.Indexes().List(ctx)
+	docs, err := listIndexes(ctx, coll)
 	if err != nil {
-		return existingIndex{}
+		return existingIndex{} // an unlistable collection reads as "no such index"; the caller creates
 	}
-	defer func() { _ = cur.Close(ctx) }()
-	for cur.Next(ctx) {
-		var idx struct {
-			Name string `bson:"name"`
-			Key  bson.D `bson:"key"`
+	for _, d := range docs {
+		if keySpec(d.Key) == want {
+			return existingIndex{name: d.Name, keys: d.Key, spec: d.spec}
 		}
-		if cur.Decode(&idx) != nil || keySpec(idx.Key) != want {
-			continue
-		}
-		var spec bson.M
-		_ = bson.Unmarshal(cur.Current, &spec)
-		return existingIndex{name: idx.Name, keys: idx.Key, spec: spec}
 	}
 	return existingIndex{}
 }

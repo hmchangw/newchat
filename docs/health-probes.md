@@ -82,11 +82,19 @@ resumes consuming at that moment, before a crashlooping fail-fast service has
 restarted and built the indexes it owns, so a write whose correctness rests on
 a unique index confirms it first: `message-worker` gates `CreateThreadRoom` on
 `thread_rooms.parentMessageId` and its subscription inserts and upserts on
-`thread_subscriptions.(threadRoomId,userAccount)`, and NAKs the reply until the
-constraint is there. It creates non-destructively and never repairs a
-conflicting index; that is `room-service`'s alone (see the sole-creator rule
-in `CLAUDE.md`). Rejected credentials and a
-cancelled startup context are the two ping failures that stay fatal.
+`thread_subscriptions.(threadRoomId,userAccount)` (`mongoutil.IndexGate`), and
+NAKs the reply until the constraint is there. The hold is bounded by the
+consumer's outage retry budget (about an hour of redeliveries): an index the
+server refuses to build, because a conflicting index exists or duplicate data
+already violates the key, is logged at error level on every probe and needs
+`room-service` or an operator within that window, or the held replies are
+dropped. It creates non-destructively and never repairs a conflicting index;
+that is `room-service`'s alone (see the sole-creator rule in `CLAUDE.md`).
+`notification-worker` and `message-gatekeeper` carry the same outage retry
+budget on their consumers for the same reason: a degraded pod that resumes
+consuming must park a message through the outage, not exhaust the package
+default `MaxDeliver` and drop it. Rejected credentials and a cancelled startup
+context are the two ping failures that stay fatal.
 
 Every other service still exits when MongoDB is unreachable: MongoDB is their
 job, and a pod that cannot reach it can do no useful work. Membership is decided

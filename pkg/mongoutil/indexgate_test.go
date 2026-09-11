@@ -1,8 +1,10 @@
-package main
+package mongoutil
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,11 +12,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 func TestIndexGate_Ready_EnsuresOnceThenPasses(t *testing.T) {
 	var calls atomic.Int32
-	g := newIndexGate("t (k)", func(context.Context) error { calls.Add(1); return nil })
+	g := NewIndexGate("t (k)", func(context.Context) error { calls.Add(1); return nil })
 
 	require.NoError(t, g.Ready(context.Background()))
 	require.NoError(t, g.Ready(context.Background()))
@@ -24,10 +29,10 @@ func TestIndexGate_Ready_EnsuresOnceThenPasses(t *testing.T) {
 func TestIndexGate_Ready_RetriesAfterFailure(t *testing.T) {
 	var calls atomic.Int32
 	fail := true
-	g := newIndexGate("t (k)", func(context.Context) error {
+	g := NewIndexGate("t (k)", func(context.Context) error {
 		calls.Add(1)
 		if fail {
-			return errors.New("server selection timeout")
+			return errors.New("E11000 duplicate key")
 		}
 		return nil
 	})
@@ -66,9 +71,9 @@ func (c *fakeClock) Advance(d time.Duration) {
 
 // A persistent failure (duplicate data no index build gets past) must not turn every write and NAK
 // redelivery into another collection-wide createIndexes: remembered, re-probed once per doubling interval.
-func TestIndexGate_Ready_BacksOffAfterFailure(t *testing.T) {
+func TestIndexGate_Ready_BacksOffAfterAServerReportedFailure(t *testing.T) {
 	var calls atomic.Int32
-	g := newIndexGate("t (k)", func(context.Context) error {
+	g := NewIndexGate("t (k)", func(context.Context) error {
 		calls.Add(1)
 		return errors.New("E11000 duplicate key")
 	})
@@ -98,10 +103,65 @@ func TestIndexGate_Ready_BacksOffAfterFailure(t *testing.T) {
 	assert.EqualValues(t, 13, calls.Load(), "one probe per capped interval")
 }
 
+// An outage (network error, server selection timeout) is re-probed every indexRetryMin: a failed
+// createIndexes over a dead server is cheap, and a memo that outlives the outage only delays recovery.
+func TestIndexGate_Ready_TransientFailureRetriesAtTheFloor(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"network error label", mongo.CommandError{Message: "connection reset", Labels: []string{"NetworkError"}}},
+		{"attempt deadline", context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			g := NewIndexGate("t (k)", func(context.Context) error {
+				calls.Add(1)
+				return fmt.Errorf("create index: %w", tt.err)
+			})
+			clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+			g.now = clock.Now
+
+			require.Error(t, g.Ready(context.Background()))
+			for i := 0; i < 5; i++ {
+				clock.Advance(indexRetryMin)
+				require.Error(t, g.Ready(context.Background()))
+			}
+			assert.EqualValues(t, 6, calls.Load(), "one probe per indexRetryMin; the interval never doubles for an outage")
+		})
+	}
+}
+
+// A failure that is the caller's own deadline expiring (startup's shared budget nearly spent) says
+// nothing about the index, so it must not close the gate for the callers that follow.
+func TestIndexGate_Ready_DoesNotRememberTheCallersExpiredDeadline(t *testing.T) {
+	var calls atomic.Int32
+	var fail atomic.Bool
+	fail.Store(true)
+	g := NewIndexGate("t (k)", func(ctx context.Context) error {
+		calls.Add(1)
+		if fail.Load() {
+			<-ctx.Done()
+			return fmt.Errorf("create index: %w", ctx.Err())
+		}
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, g.Ready(ctx), context.DeadlineExceeded)
+
+	fail.Store(false)
+	require.Eventually(t, func() bool { return g.Ready(context.Background()) == nil }, time.Second, time.Millisecond,
+		"the next caller must probe again immediately instead of inheriting the expired caller's failure")
+	assert.EqualValues(t, 2, calls.Load())
+}
+
 func TestIndexGate_Ready_ConcurrentCallersEnsureOnce(t *testing.T) {
 	var calls atomic.Int32
 	release := make(chan struct{})
-	g := newIndexGate("t (k)", func(context.Context) error {
+	g := NewIndexGate("t (k)", func(context.Context) error {
 		calls.Add(1)
 		<-release
 		return nil
@@ -130,12 +190,12 @@ func TestIndexGate_Ready_WaitersShareOneFailedAttempt(t *testing.T) {
 	var calls atomic.Int32
 	started := make(chan struct{})
 	release := make(chan struct{})
-	g := newIndexGate("t (k)", func(context.Context) error {
+	g := NewIndexGate("t (k)", func(context.Context) error {
 		if calls.Add(1) == 1 {
 			close(started)
 		}
 		<-release
-		return errors.New("server selection timeout")
+		return errors.New("E11000 duplicate key")
 	})
 
 	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
@@ -173,7 +233,7 @@ func TestIndexGate_Ready_BoundsTheEnsureAndDetachesCancellation(t *testing.T) {
 	var cancelledWhileRunning bool
 	started := make(chan struct{})
 	release := make(chan struct{})
-	g := newIndexGate("t (k)", func(ctx context.Context) error {
+	g := NewIndexGate("t (k)", func(ctx context.Context) error {
 		_, sawDeadline = ctx.Deadline()
 		close(started)
 		<-release
@@ -194,17 +254,46 @@ func TestIndexGate_Ready_BoundsTheEnsureAndDetachesCancellation(t *testing.T) {
 	assert.False(t, cancelledWhileRunning, "the leader's cancellation did not reach the attempt")
 }
 
+// A caller without a deadline (a JetStream handler) gets IndexProbeTimeout, kept well under the 30s
+// ACK_WAIT default so a stalled createIndexes cannot hold a delivery past its ack deadline.
+func TestIndexGate_Ready_HotPathAttemptIsBoundedBelowAckWait(t *testing.T) {
+	var deadline time.Time
+	var ok bool
+	g := NewIndexGate("t (k)", func(ctx context.Context) error { deadline, ok = ctx.Deadline(); return nil })
+	before := time.Now()
+	require.NoError(t, g.Ready(context.Background()))
+	require.True(t, ok, "the hot-path attempt must carry a deadline")
+	assert.LessOrEqual(t, deadline.Sub(before), IndexProbeTimeout+time.Second)
+	assert.Less(t, IndexProbeTimeout, 30*time.Second, "must stay under the consumer ACK_WAIT default")
+}
+
+// A caller that states a budget (startup's shared ensure context) keeps it, capped at IndexEnsureTimeout.
+func TestIndexGate_Ready_CallerBudgetIsHonouredUpToIndexEnsureTimeout(t *testing.T) {
+	var deadline time.Time
+	var ok bool
+	g := NewIndexGate("t (k)", func(ctx context.Context) error { deadline, ok = ctx.Deadline(); return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	before := time.Now()
+	require.NoError(t, g.Ready(ctx))
+	require.True(t, ok)
+	assert.Greater(t, deadline.Sub(before), IndexProbeTimeout, "a stated budget is not cut to the hot-path bound")
+	assert.LessOrEqual(t, deadline.Sub(before), IndexEnsureTimeout+time.Second, "but never exceeds the startup budget")
+}
+
 // A gate must not replace a sooner caller deadline with its own budget: startup shares one across both.
 func TestIndexGate_Ready_HonoursASoonerCallerDeadline(t *testing.T) {
 	var seen time.Time
-	g := newIndexGate("t (k)", func(ctx context.Context) error {
-		seen, _ = ctx.Deadline()
+	var ok bool
+	g := NewIndexGate("t (k)", func(ctx context.Context) error {
+		seen, ok = ctx.Deadline()
 		return nil
 	})
 	callerDeadline := time.Now().Add(time.Second)
 	ctx, cancel := context.WithDeadline(context.Background(), callerDeadline)
 	defer cancel()
 	require.NoError(t, g.Ready(ctx))
+	require.True(t, ok, "the attempt must carry a deadline at all")
 	assert.False(t, seen.After(callerDeadline), "ensure's deadline %v must not exceed the caller's %v", seen, callerDeadline)
 }
 
@@ -213,7 +302,7 @@ func TestIndexGate_Ready_ReleasesACancelledWaiterWithoutAbortingTheAttempt(t *te
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	g := newIndexGate("t (k)", func(context.Context) error {
+	g := NewIndexGate("t (k)", func(context.Context) error {
 		calls.Add(1)
 		close(started)
 		<-release
@@ -240,4 +329,41 @@ func TestIndexGate_Ready_ReleasesACancelledWaiterWithoutAbortingTheAttempt(t *te
 	require.NoError(t, <-leaderDone, "the attempt completes for the leader")
 	require.NoError(t, g.Ready(context.Background()))
 	assert.EqualValues(t, 1, calls.Load(), "the cancelled waiter did not abort or repeat the attempt")
+}
+
+// A failure the server reported (a conflicting index, duplicate data) holds dependent writes until an
+// operator or the owner acts, so it is logged at error level once per probe; an outage is not.
+func TestIndexGate_Ready_LogsAServerReportedFailureAtErrorLevel(t *testing.T) {
+	t.Run("spec conflict is loud", func(t *testing.T) {
+		h := captureLogs(t)
+		g := NewIndexGate("things (k)", func(context.Context) error {
+			return fmt.Errorf("ensure index on things: %w", ErrIndexSpecConflict)
+		})
+		require.Error(t, g.Ready(context.Background()))
+		errs := h.at(slog.LevelError)
+		require.Len(t, errs, 1)
+		assert.Equal(t, "things (k)", errs[0].index)
+	})
+	t.Run("an outage is not", func(t *testing.T) {
+		h := captureLogs(t)
+		g := NewIndexGate("things (k)", func(context.Context) error {
+			return fmt.Errorf("create index: %w", mongo.CommandError{Message: "reset", Labels: []string{"NetworkError"}})
+		})
+		require.Error(t, g.Ready(context.Background()))
+		assert.Empty(t, h.at(slog.LevelError))
+	})
+}
+
+// The unique-index gate names the collection and key fields so a NAK log says which index is unconfirmed.
+func TestNewUniqueIndexGate_NamesTheIndexInErrors(t *testing.T) {
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://127.0.0.1:1").
+		SetServerSelectionTimeout(100 * time.Millisecond))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
+
+	g := NewUniqueIndexGate(client.Database("db").Collection("things"),
+		bson.D{{Key: "a", Value: 1}, {Key: "b", Value: 1}})
+	err = g.Ready(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "confirm unique index things (a,b)")
 }

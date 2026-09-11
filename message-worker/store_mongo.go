@@ -4,15 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -27,9 +23,9 @@ type threadStoreMongo struct {
 	threadRooms         *mongo.Collection
 	threadSubscriptions *mongo.Collection
 	subscriptions       *mongo.Collection
-	// parentIndex and subIndex gate the document-creating writes on their unique index; see indexGate.
-	parentIndex *indexGate
-	subIndex    *indexGate
+	// parentIndex and subIndex gate the document-creating writes on their unique index.
+	parentIndex *mongoutil.IndexGate
+	subIndex    *mongoutil.IndexGate
 }
 
 // Compile-time assertion that *threadStoreMongo satisfies ThreadStore.
@@ -43,122 +39,10 @@ func newThreadStoreMongo(db *mongo.Database) *threadStoreMongo {
 		threadRooms:         threadRooms,
 		threadSubscriptions: threadSubscriptions,
 		subscriptions:       db.Collection("subscriptions"),
-		parentIndex:         uniqueIndexGate(threadRooms, bson.D{{Key: "parentMessageId", Value: 1}}),
-		subIndex: uniqueIndexGate(threadSubscriptions,
+		parentIndex:         mongoutil.NewUniqueIndexGate(threadRooms, bson.D{{Key: "parentMessageId", Value: 1}}),
+		subIndex: mongoutil.NewUniqueIndexGate(threadSubscriptions,
 			bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}}),
 	}
-}
-
-// uniqueIndexGate gates on a unique index over keys on coll, created non-destructively.
-func uniqueIndexGate(coll *mongo.Collection, keys bson.D) *indexGate {
-	fields := make([]string, 0, len(keys))
-	for _, k := range keys {
-		fields = append(fields, k.Key)
-	}
-	name := coll.Name() + " (" + strings.Join(fields, ",") + ")"
-	return newIndexGate(name, func(ctx context.Context) error {
-		return mongoutil.EnsureIndex(ctx, coll, mongo.IndexModel{
-			Keys:    keys,
-			Options: options.Index().SetUnique(true),
-		})
-	})
-}
-
-// indexGate confirms an index on demand, so a degraded worker that resumes before room-service has
-// rebuilt the key NAKs instead of inserting. All callers share one bounded, detached attempt (see wait).
-type indexGate struct {
-	name   string // names the index in errors
-	ensure func(context.Context) error
-	now    func() time.Time
-	flight singleflight.Group
-	ready  atomic.Bool
-
-	// mu guards the remembered failure: written inside the flight, read by any caller's fast path.
-	mu      sync.Mutex
-	lastErr error
-	retryAt time.Time
-	backoff time.Duration
-}
-
-// indexRetryMin and indexRetryMax bound the backoff between probes after a failed ensure.
-const (
-	indexRetryMin = 5 * time.Second
-	indexRetryMax = time.Minute
-)
-
-func newIndexGate(name string, ensure func(context.Context) error) *indexGate {
-	return &indexGate{name: name, ensure: ensure, now: time.Now}
-}
-
-// Ready returns nil once the index is confirmed, ensuring it if needed.
-func (g *indexGate) Ready(ctx context.Context) error {
-	if g.ready.Load() {
-		return nil
-	}
-	if err := g.wait(ctx); err != nil {
-		return fmt.Errorf("confirm unique index %s: %w", g.name, err)
-	}
-	return nil
-}
-
-// wait returns the remembered failure inside its retry-after, else joins or leads one attempt. A waiter
-// whose ctx ends is released while the attempt runs on for the rest, so one cancelled caller fails nobody.
-func (g *indexGate) wait(ctx context.Context) error {
-	if err := g.remembered(); err != nil {
-		return err
-	}
-	results := g.flight.DoChan("ensure", func() (any, error) {
-		if g.ready.Load() {
-			return nil, nil
-		}
-		if err := g.remembered(); err != nil {
-			return nil, err
-		}
-		ensureCtx, cancel := g.attemptContext(ctx)
-		defer cancel()
-		if err := g.ensure(ensureCtx); err != nil {
-			g.remember(err)
-			return nil, err
-		}
-		g.ready.Store(true)
-		return nil, nil
-	})
-	select {
-	case r := <-results:
-		return r.Err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// remembered returns the last failure while its retry-after has not elapsed.
-func (g *indexGate) remembered() error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.lastErr != nil && g.now().Before(g.retryAt) {
-		return g.lastErr
-	}
-	return nil
-}
-
-// remember records a failure and schedules the next probe, doubling the interval up to indexRetryMax,
-// so duplicate data no index build gets past cannot turn every NAK redelivery into a createIndexes.
-func (g *indexGate) remember(err error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.backoff = min(max(2*g.backoff, indexRetryMin), indexRetryMax)
-	g.lastErr = err
-	g.retryAt = g.now().Add(g.backoff)
-}
-
-// attemptContext detaches the caller's cancellation; deadline = min(caller's, now+IndexEnsureTimeout).
-func (g *indexGate) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	// Wall clock, not g.now: the driver enforces this deadline; g.now only paces the retry-after.
-	deadline := time.Now().Add(mongoutil.IndexEnsureTimeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
 // EnsureIndexes co-creates both unique keys with room-service's spec: on a fresh site the first reply can
@@ -171,7 +55,8 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 }
 
 func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
-	// The duplicate-key branch is the thread's identity guarantee, so the index is confirmed first.
+	// The duplicate-key branch is the thread's identity guarantee, so the index is confirmed first;
+	// a failure NAKs (see mongoutil.IndexGate).
 	if err := s.parentIndex.Ready(ctx); err != nil {
 		return err
 	}

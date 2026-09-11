@@ -233,10 +233,13 @@ func main() {
 	userStore := userstore.NewMongoStore(db.Collection("users"))
 	appRepo := mongorepo.NewAppRepo(db)
 
+	// One budget per repo: a slow thread_rooms build must not leave thread_subscriptions an expired ctx.
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
 	if err := threadRoomRepo.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure thread_rooms indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
+	ensureCancel()
+	ensureCtx, ensureCancel = context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
 	if err := threadSubRepo.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure thread_subscriptions indexes failed; continuing (indexes are best-effort)", "error", err)
 	}

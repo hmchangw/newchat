@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -269,8 +270,11 @@ func main() {
 
 // buildConsumerConfig returns the durable consumer config for
 // message-gatekeeper. Centralized so it is unit-testable without NATS.
+// The outage retry budget matters now that the pod starts with MongoDB down: a cold-cache
+// GetSubscription failure NAKs, and at the package default the user's message would be
+// dropped after ~2.6 min with no reply ever sent.
 func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff))
 	cc.Durable = "message-gatekeeper"
 	return cc
 }
