@@ -68,7 +68,7 @@ func TestValkeyCache_Get_RecordsErrorOnTransportFailure(t *testing.T) {
 func TestValkeyCache_Get_RecordsErrorOnOversizeBlob(t *testing.T) {
 	ctx := context.Background()
 	client := valkeyfake.New()
-	client.Seed("room:v4:room1:subs", strings.Repeat("x", 200), time.Minute)
+	client.Seed("room:v5:room1:subs", strings.Repeat("x", 200), time.Minute)
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client,
 		roomsubcache.WithMaxValueBytes(100), roomsubcache.WithMetrics(rec))
@@ -84,7 +84,7 @@ func TestValkeyCache_Get_RecordsErrorOnOversizeBlob(t *testing.T) {
 func TestValkeyCache_Get_RecordsErrorOnMalformedJSON(t *testing.T) {
 	ctx := context.Background()
 	client := valkeyfake.New()
-	client.Seed("room:v4:room1:subs", "{not json", time.Minute)
+	client.Seed("room:v5:room1:subs", "{not json", time.Minute)
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
