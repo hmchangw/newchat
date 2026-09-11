@@ -174,26 +174,26 @@ func TestCredentialProbe_RecordsRejectionFromPoolCleared(t *testing.T) {
 	created := &event.PoolEvent{Type: event.ConnectionCreated, Address: "h:1"}
 
 	t.Run("nothing recorded before any event", func(t *testing.T) {
-		var p credentialProbe
+		p := newCredentialProbe()
 		assert.NoError(t, p.rejection())
 	})
 
 	t.Run("auth-caused clear is recorded and classified", func(t *testing.T) {
-		var p credentialProbe
+		p := newCredentialProbe()
 		p.monitor().Event(authClear)
 		require.Error(t, p.rejection())
 		assert.True(t, isAuthError(p.rejection()))
 	})
 
 	t.Run("network-caused clear and other events are ignored", func(t *testing.T) {
-		var p credentialProbe
+		p := newCredentialProbe()
 		p.monitor().Event(created)
 		p.monitor().Event(netClear)
 		assert.NoError(t, p.rejection())
 	})
 
 	t.Run("first rejection is kept", func(t *testing.T) {
-		var p credentialProbe
+		p := newCredentialProbe()
 		p.monitor().Event(authClear)
 		later := &event.PoolEvent{Type: event.ConnectionPoolCleared, Error: driver.Error{Code: 13}}
 		p.monitor().Event(later)
@@ -220,6 +220,9 @@ func TestStartupPingBound(t *testing.T) {
 		})
 	}
 }
+
+// unreachableMongo: nothing listens there, and the short connect bound keeps these tests quick.
+const unreachableMongo = "mongodb://127.0.0.1:1/?connectTimeoutMS=200"
 
 // fastFailPool and warmPool keep the failing-connect tests quick with a short server-selection bound.
 func fastFailPool() PoolConfig {
@@ -266,4 +269,50 @@ func TestConnect_CallerCancelled_FailsEvenWithDegradedStart(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, client)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// A pod that started degraded because MongoDB was unreachable may hold bad credentials too; the
+// first operation after recovery is refused, and without this the pod would sit Running with an
+// unusable client while its consumer burned redeliveries. The rejection must end the process.
+func TestConnect_DegradedStart_ShutsDownWhenCredentialsAreRejectedAfterRecovery(t *testing.T) {
+	terminated := make(chan struct{}, 1)
+	orig := terminateProcess
+	terminateProcess = func() { terminated <- struct{}{} }
+	t.Cleanup(func() { terminateProcess = orig })
+
+	srv := startFakeMongodPaused(t)
+	client, err := Connect(context.Background(), srv.uri()+"/?connectTimeoutMS=200", "user", "wrong",
+		WithPool(fastFailPool()), WithDegradedStart())
+	require.NoError(t, err, "an unresponsive server starts degraded")
+	require.NotNil(t, client)
+	t.Cleanup(func() { Disconnect(context.Background(), client) })
+
+	srv.resume()
+	require.Eventually(t, func() bool {
+		_ = client.Ping(context.Background(), nil) // the first operation after recovery
+		select {
+		case <-terminated:
+			return true
+		default:
+			return false
+		}
+	}, 10*time.Second, 200*time.Millisecond, "the post-start credential rejection must shut the process down")
+}
+
+// A degraded client that is disconnected before any rejection must not leave the watcher behind.
+func TestConnect_DegradedStart_DisconnectStopsTheCredentialWatch(t *testing.T) {
+	terminated := make(chan struct{}, 1)
+	orig := terminateProcess
+	terminateProcess = func() { terminated <- struct{}{} }
+	t.Cleanup(func() { terminateProcess = orig })
+
+	client, err := Connect(context.Background(), unreachableMongo, "", "",
+		WithPool(fastFailPool()), WithDegradedStart())
+	require.NoError(t, err)
+	Disconnect(context.Background(), client)
+	select {
+	case <-terminated:
+		t.Fatal("no rejection was observed; nothing may terminate")
+	case <-time.After(200 * time.Millisecond):
+	}
 }

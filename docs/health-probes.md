@@ -93,8 +93,17 @@ that is `room-service`'s alone (see the sole-creator rule in `CLAUDE.md`).
 `notification-worker` and `message-gatekeeper` carry the same outage retry
 budget on their consumers for the same reason: a degraded pod that resumes
 consuming must park a message through the outage, not exhaust the package
-default `MaxDeliver` and drop it. Rejected credentials and a cancelled startup
-context are the two ping failures that stay fatal.
+default `MaxDeliver` and drop it. That budget means a source message can be
+redelivered for about an hour, so the `PUSH-NOTIFICATION` stream's duplicate
+window must be at least `stream.OutageRetryWindow`: `notification-worker`'s
+bootstrap sets it in dev, and ops must set it on the production stream, or a
+redelivery after the window republishes push batches that were already
+accepted. Rejected credentials and a cancelled startup context are the two
+ping failures that stay fatal. A pod that started degraded because MongoDB was
+unreachable may hold bad credentials too; the first operation after recovery
+is refused, and `mongoutil` ends the process on that first post-start
+rejection (a self-signal into `pkg/shutdown`'s graceful path), so the
+misconfiguration crashloops as it would have on a healthy start.
 
 Every other service still exits when MongoDB is unreachable: MongoDB is their
 job, and a pod that cannot reach it can do no useful work. Membership is decided

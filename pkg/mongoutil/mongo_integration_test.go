@@ -30,9 +30,6 @@ func TestConnectRead_ConnectsAndReads(t *testing.T) {
 	assert.EqualValues(t, 1, n)
 }
 
-// unreachableMongo: nothing listens there, and the short connect bound keeps these tests quick.
-const unreachableMongo = "mongodb://127.0.0.1:1/?connectTimeoutMS=200"
-
 func TestConnect_UnreachableMongo_FailsWithoutDegradedStart(t *testing.T) {
 	client, err := Connect(context.Background(), unreachableMongo, "", "",
 		WithPool(fastFailPool()))

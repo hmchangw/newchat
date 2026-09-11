@@ -7,6 +7,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 // bootstrapConfig gates stream creation to dev/integration; leave Enabled false in production.
@@ -35,6 +37,9 @@ func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputS
 			Subjects: []string{outputSubject},
 			// S2 storage compression — transparent to publisher/consumer; ~2× ratio on JSON at near-zero CPU. Shrinks inter-replica wire bytes and on-disk bytes.
 			Compression: jetstream.S2Compression,
+			// The consumer's outage retry budget can redeliver a source message for about an hour; each
+			// batch's Nats-Msg-Id only protects it while this window covers that span. Ops must match it.
+			Duplicates: stream.OutageRetryWindow,
 		}); err != nil {
 			return fmt.Errorf("create stream %s: %w", outputStream, err)
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -105,8 +106,13 @@ func isAuthCode(code int32, message string) bool {
 // credentialProbe records the first credential rejection the pool reports: with MinPoolSize > 0 a warm-up
 // connection fails SCRAM first and clears the pool, so the ping sees only "pool cleared" with no code.
 type credentialProbe struct {
-	mu  sync.Mutex
-	err error
+	mu       sync.Mutex
+	err      error
+	rejected chan struct{} // closed on the first rejection, for the post-start watch
+}
+
+func newCredentialProbe() *credentialProbe {
+	return &credentialProbe{rejected: make(chan struct{})}
 }
 
 func (p *credentialProbe) monitor() *event.PoolMonitor {
@@ -118,8 +124,38 @@ func (p *credentialProbe) monitor() *event.PoolMonitor {
 		defer p.mu.Unlock()
 		if p.err == nil {
 			p.err = e.Error
+			close(p.rejected)
 		}
 	}}
+}
+
+// terminateProcess ends a degraded pod whose credentials were rejected after recovery. The self-signal
+// takes the graceful path through pkg/shutdown; the exit is the fallback when it cannot be delivered.
+var terminateProcess = func() {
+	if p, err := os.FindProcess(os.Getpid()); err == nil && p.Signal(os.Interrupt) == nil {
+		return
+	}
+	os.Exit(1)
+}
+
+// credentialWatches holds the stop func of each degraded client's watch, keyed by client, for Disconnect.
+var credentialWatches sync.Map
+
+// startCredentialWatch ends the process on the first rejection a degraded client observes after startup
+// (the first operation once MongoDB is back), so bad credentials surface as the crashloop a healthy
+// start would have produced instead of a Running pod whose every MongoDB call fails.
+func startCredentialWatch(p *credentialProbe, uri string) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-p.rejected:
+			slog.Error("mongo credentials rejected after a degraded start; shutting down",
+				"uri", sanitizeURI(uri), "error", p.rejection())
+			terminateProcess()
+		case <-done:
+		}
+	}()
+	return sync.OnceFunc(func() { close(done) })
 }
 
 // rejection returns the recorded credential rejection, or nil.
@@ -136,7 +172,7 @@ func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string,
 	cfg.applyReadPreference(clientOpts)
 
 	// Before instrumentation, so o11y chains after it; the probe must see the pool clears the ping cannot.
-	var probe credentialProbe
+	probe := newCredentialProbe()
 	clientOpts.SetPoolMonitor(probe.monitor())
 
 	var cleanup func(context.Context) error
@@ -176,6 +212,7 @@ func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string,
 		}
 		slog.Warn("mongo ping failed at startup; continuing in degraded mode",
 			"uri", sanitizeURI(uri), "error", err)
+		credentialWatches.Store(client, startCredentialWatch(probe, uri))
 		return client, nil
 	}
 	slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
@@ -207,6 +244,11 @@ func sanitizeURI(uri string) string {
 }
 
 func Disconnect(ctx context.Context, client *mongo.Client) {
+	if v, ok := credentialWatches.LoadAndDelete(client); ok {
+		if stop, ok := v.(func()); ok {
+			stop()
+		}
+	}
 	if v, ok := cleanups.LoadAndDelete(client); ok {
 		if fn, ok := v.(func(context.Context) error); ok {
 			if err := fn(ctx); err != nil {

@@ -10,10 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 type fakeStreamManager struct {
 	created  []string
+	configs  map[string]jetstream.StreamConfig
 	existing map[string]bool // streams that "exist" for the disabled path
 	failOn   string          // stream name to fail on; empty = never fail
 	failErr  error           // error to return when failing
@@ -24,6 +27,10 @@ func (f *fakeStreamManager) CreateOrUpdateStream(_ context.Context, cfg jetstrea
 		return nil, f.failErr
 	}
 	f.created = append(f.created, cfg.Name)
+	if f.configs == nil {
+		f.configs = map[string]jetstream.StreamConfig{}
+	}
+	f.configs[cfg.Name] = cfg
 	return nil, nil
 }
 
@@ -97,4 +104,16 @@ func TestBootstrapStreams(t *testing.T) {
 			assert.Equal(t, tc.wantCreated, fake.created)
 		})
 	}
+}
+
+// The consumer carries an outage retry budget, so a source message can be redelivered for about an
+// hour; each push batch is protected by its Nats-Msg-Id only while the PUSH stream's duplicate window
+// covers that span, or a batch already accepted is published again and a duplicate push goes out.
+func TestBootstrapStreams_PushStreamDedupWindowCoversTheRetryBudget(t *testing.T) {
+	js := &fakeStreamManager{}
+	require.NoError(t, bootstrapStreams(context.Background(), js,
+		"MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.test.>", true))
+	cfg, ok := js.configs["PUSH-NOTIFICATION-test"]
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, cfg.Duplicates, stream.OutageRetryWindow)
 }

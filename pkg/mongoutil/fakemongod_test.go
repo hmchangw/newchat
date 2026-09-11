@@ -14,17 +14,28 @@ import (
 // fakeMongod is an in-process wire-protocol server that answers hello as a writable primary and rejects
 // every saslStart with AuthenticationFailed (18): the shape of a real server refusing our credentials.
 type fakeMongod struct {
-	ln net.Listener
+	resumed chan struct{}
+	ln      net.Listener
 }
 
 func startFakeMongod(t *testing.T) *fakeMongod {
+	t.Helper()
+	f := startFakeMongodPaused(t)
+	f.resume()
+	return f
+}
+
+// startFakeMongodPaused listens but answers nothing until resume: connections queue in the
+// backlog and the driver's handshake times out, which reads as an unreachable server.
+func startFakeMongodPaused(t *testing.T) *fakeMongod {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	f := &fakeMongod{ln: ln}
+	f := &fakeMongod{ln: ln, resumed: make(chan struct{})}
 	go func() {
+		<-f.resumed
 		for {
 			c, err := ln.Accept()
 			if err != nil {
@@ -36,6 +47,9 @@ func startFakeMongod(t *testing.T) *fakeMongod {
 	t.Cleanup(func() { _ = ln.Close() })
 	return f
 }
+
+// resume starts serving; safe to call once.
+func (f *fakeMongod) resume() { close(f.resumed) }
 
 func (f *fakeMongod) uri() string { return "mongodb://" + f.ln.Addr().String() }
 

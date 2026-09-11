@@ -934,6 +934,28 @@ func TestThreadStoreMongo_CreateThreadRoom_RefusesToRepairAConflictingIndex(t *t
 }
 
 // Without the unique key two concurrent upserts on one (threadRoomId, userAccount) both insert.
+// The room insert is the point of no return for a first reply: once it lands, a redelivery takes
+// the subsequent-reply path. Both keys are confirmed before it, so a subscription index the owner
+// still has to repair refuses the reply before any document is written.
+func TestThreadStoreMongo_CreateThreadRoom_RefusesWhenTheSubscriptionIndexConflicts(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "message_worker_gate_sub_conflict_test")
+	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}}, // non-unique: the wrong spec
+	})
+	require.NoError(t, err)
+	store := newThreadStoreMongo(db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	err = store.CreateThreadRoom(ctx, &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1",
+		SiteID: "site-a", LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now})
+	require.ErrorIs(t, err, mongoutil.ErrIndexSpecConflict)
+
+	n, err := db.Collection("thread_rooms").CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Zero(t, n, "no thread room is created while a key its subscriptions need is unconfirmed")
+}
+
 func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_sub_gate_test") // no seeded index, EnsureIndexes never called

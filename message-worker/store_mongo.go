@@ -56,8 +56,12 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 
 func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
 	// The duplicate-key branch is the thread's identity guarantee, so the index is confirmed first;
-	// a failure NAKs (see mongoutil.IndexGate).
+	// a failure NAKs (see mongoutil.IndexGate). The subscriptions' key is confirmed here too: the room
+	// insert is the point of no return for a first reply (a redelivery takes the subsequent-reply path).
 	if err := s.parentIndex.Ready(ctx); err != nil {
+		return err
+	}
+	if err := s.subIndex.Ready(ctx); err != nil {
 		return err
 	}
 	toInsert := *room
