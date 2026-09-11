@@ -83,10 +83,8 @@ func (s *MongoStore) EnableRoomMetaCache(size int, ttl time.Duration) error {
 	return nil
 }
 
-// ListByRoom returns all subscriptions for roomID across every site. Not part
-// of SubscriptionStore — the handler's hot paths only need accounts (see
-// GetSubscriptionAccounts); this full-document read is retained for integration
-// test verification.
+// ListByRoom returns every subscription in roomID. Only the Teams reconcile path
+// needs full documents; other callers must use projected GetSubscriptionAccounts.
 func (s *MongoStore) ListByRoom(ctx context.Context, roomID string) ([]model.Subscription, error) {
 	cursor, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID})
 	if err != nil {
@@ -329,6 +327,8 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 		// has member.id = deptId. Checking only sectId would miss that case
 		// and report HasOrgMembership=false, causing the remove flow to drop
 		// the user's subscription even though they are still org-attached.
+		// $lookup justification: resolves one user's membership and subscription
+		// in a single round trip; splitting it would triple them.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"sectId": "$sectId", "deptId": "$deptId"},
@@ -345,6 +345,7 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 			},
 			"as": "orgMembership",
 		}}},
+		// $lookup justification: see above; this half checks for a live subscription.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "subscriptions",
 			"let":  bson.M{"acct": "$account"},
@@ -385,12 +386,25 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 	return &result, nil
 }
 
-func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, roomID, orgID string) ([]OrgMemberStatus, error) {
-	pipeline := mongo.Pipeline{
+// orgMembersPipeline builds the org-member status aggregation, split from the
+// query so stage order stays unit-testable without Mongo.
+func orgMembersPipeline(roomID, orgID string) mongo.Pipeline {
+	return mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"$or": bson.A{
 			bson.M{"sectId": orgID},
 			bson.M{"deptId": orgID},
 		}}}},
+		// Narrow first: both joins run per matched user, multiplying every byte kept.
+		{{Key: "$project", Value: bson.M{
+			"account":    1,
+			"siteId":     1,
+			"sectId":     1,
+			"deptId":     1,
+			"deptName":   1,
+			"sectName":   1,
+			"deptTCName": 1,
+			"sectTCName": 1,
+		}}},
 		{{Key: "$addFields", Value: bson.M{
 			"isDept": bson.M{"$eq": bson.A{"$deptId", orgID}},
 			"name": bson.M{"$cond": bson.A{
@@ -398,6 +412,8 @@ func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, room
 			"tcName": bson.M{"$cond": bson.A{
 				bson.M{"$eq": bson.A{"$deptId", orgID}}, "$deptTCName", "$sectTCName"}},
 		}}},
+		// $lookup justification: per-user membership flag in the same pass; the
+		// alternative is one round trip per org member.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"uid": "$_id"},
@@ -418,6 +434,8 @@ func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, room
 		// being removed)? If yes, the user remains a member via that sibling
 		// even after the current org is dropped, so processRemoveOrg must NOT
 		// delete their subscription.
+		// $lookup justification: sibling-org check depends on the room being
+		// modified, so it cannot be denormalised onto the user.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"sectId": "$sectId", "deptId": "$deptId"},
@@ -447,7 +465,10 @@ func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, room
 			"hasOtherOrgMembership":   bson.M{"$gt": bson.A{bson.M{"$size": "$otherOrgMembership"}, 0}},
 		}}},
 	}
-	cursor, err := s.users.Aggregate(ctx, pipeline)
+}
+
+func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, roomID, orgID string) ([]OrgMemberStatus, error) {
+	cursor, err := s.users.Aggregate(ctx, orgMembersPipeline(roomID, orgID))
 	if err != nil {
 		return nil, fmt.Errorf("aggregate org members: %w", err)
 	}
@@ -527,8 +548,8 @@ func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.
 		filter := bson.M{"roomId": sub.RoomID, "u.account": sub.User.Account}
 		models = append(models, mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": sub}))
 	}
-	opts := options.BulkWrite().SetOrdered(false)
-	if _, err := s.subscriptions.BulkWrite(ctx, models, opts); err != nil {
+	// Chunked: an org add can present tens of thousands of candidates.
+	if _, err := mongoutil.ChunkedBulkWrite(ctx, s.subscriptions, models, mongoutil.MaxBulkChunk); err != nil {
 		return fmt.Errorf("bulk create %d subscriptions: %w", len(subs), err)
 	}
 	return nil
@@ -549,7 +570,7 @@ func (s *MongoStore) BulkRefreshJoinedAt(ctx context.Context, roomID string, joi
 			SetFilter(bson.M{"roomId": roomID, "u.account": account}).
 			SetUpdate(bson.M{"$set": bson.M{"joinedAt": joinedAt}}))
 	}
-	if _, err := s.subscriptions.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+	if _, err := mongoutil.ChunkedBulkWrite(ctx, s.subscriptions, models, mongoutil.MaxBulkChunk); err != nil {
 		return fmt.Errorf("bulk refresh joinedAt for %d subs: %w", len(models), err)
 	}
 	return nil
@@ -572,7 +593,7 @@ func (s *MongoStore) BulkCreateRoomMembers(ctx context.Context, members []*model
 		filter := bson.M{"rid": m.RoomID, "member.type": m.Member.Type, "member.id": m.Member.ID}
 		writes[i] = mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": set})
 	}
-	if _, err := s.roomMembers.BulkWrite(ctx, writes, options.BulkWrite().SetOrdered(false)); err != nil {
+	if _, err := mongoutil.ChunkedBulkWrite(ctx, s.roomMembers, writes, mongoutil.MaxBulkChunk); err != nil {
 		return fmt.Errorf("bulk upsert %d room members: %w", len(members), err)
 	}
 	return nil
