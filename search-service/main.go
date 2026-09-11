@@ -234,7 +234,8 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		mongoutil.WithDegradedStart())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -252,7 +253,7 @@ func main() {
 	cache := newValkeyCache(valkey)
 	mongoStore := newMongoStore(mongoDB)
 
-	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
 	if err := mongoStore.ensureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure mongo indexes failed; continuing (indexes are best-effort)", "error", err)
 	}

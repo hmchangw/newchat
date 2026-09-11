@@ -130,3 +130,55 @@ func TestExistingIndex_Model_OmitsUnsetOptions(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestMissingUniqueIndexes(t *testing.T) {
+	tests := []struct {
+		name          string
+		have          map[string]bool // index name -> unique
+		names         []string
+		wantAbsent    []string
+		wantNonUnique []string
+	}{
+		{
+			name:  "all present and unique",
+			have:  map[string]bool{"a_1": true, "b_1": true},
+			names: []string{"a_1", "b_1"},
+		},
+		{
+			name:       "absent index reported as absent",
+			have:       map[string]bool{"a_1": true},
+			names:      []string{"a_1", "b_1"},
+			wantAbsent: []string{"b_1"},
+		},
+		{
+			name:          "present but non-unique reported separately, not as absent",
+			have:          map[string]bool{"a_1": false},
+			names:         []string{"a_1"},
+			wantNonUnique: []string{"a_1"},
+		},
+		{
+			name:          "mixed",
+			have:          map[string]bool{"a_1": true, "b_1": false},
+			names:         []string{"a_1", "b_1", "c_1"},
+			wantAbsent:    []string{"c_1"},
+			wantNonUnique: []string{"b_1"},
+		},
+		{
+			name: "no names wanted",
+			have: map[string]bool{"a_1": false},
+		},
+		{
+			name:       "empty listing",
+			have:       map[string]bool{},
+			names:      []string{"a_1"},
+			wantAbsent: []string{"a_1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			absent, nonUnique := missingUniqueIndexes(tt.have, tt.names...)
+			assert.Equal(t, tt.wantAbsent, absent)
+			assert.Equal(t, tt.wantNonUnique, nonUnique)
+		})
+	}
+}

@@ -145,6 +145,8 @@ func main() {
 		mongoutil.WithPool(cfg.Pool),
 		mongoutil.WithObservability(sdk),
 		mongoutil.WithReadPreference(readPref),
+		// Cassandra is the primary datastore: serve history through an outage rather than crashloop.
+		mongoutil.WithDegradedStart(),
 	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
@@ -231,12 +233,17 @@ func main() {
 	userStore := userstore.NewMongoStore(db.Collection("users"))
 	appRepo := mongorepo.NewAppRepo(db)
 
-	if err := threadRoomRepo.EnsureIndexes(ctx); err != nil {
+	// One budget per repo: a slow thread_rooms build must not leave thread_subscriptions an expired ctx.
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
+	if err := threadRoomRepo.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure thread_rooms indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
-	if err := threadSubRepo.EnsureIndexes(ctx); err != nil {
+	ensureCancel()
+	ensureCtx, ensureCancel = context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
+	if err := threadSubRepo.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure thread_subscriptions indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
+	ensureCancel()
 
 	// Front the per-request Mongo reads with process-local LRU+TTL caches. The
 	// subscription L1's loader runs through the shared Valkey L2 (subauthcache),

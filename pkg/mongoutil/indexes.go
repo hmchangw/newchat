@@ -14,34 +14,121 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
+// IndexEnsureTimeout bounds a service's startup index work, so a MongoDB that answers hello but
+// stalls commands cannot hang startup. A degradable service keeps the attempt best-effort.
+const IndexEnsureTimeout = 30 * time.Second
+
 // WarnMissingIndexes warns (never errors) for each named index absent from coll.
 // For a service that DEPENDS on an index another owns: creating the shared index
 // with a divergent spec crashloops whichever service starts second, and a
 // not-yet-built index must not take the dependent down. names are the owner's
 // resolved names (e.g. "account_1").
 func WarnMissingIndexes(ctx context.Context, coll *mongo.Collection, names ...string) {
-	cur, err := coll.Indexes().List(ctx)
+	warnMissingIndexes(ctx, coll, false, names...)
+}
+
+// WarnMissingUniqueIndexes also warns when a named index exists but lost its unique option, which the
+// name-only WarnMissingIndexes passes silently. Warn-only: a degradable service cannot list indexes mid-outage.
+func WarnMissingUniqueIndexes(ctx context.Context, coll *mongo.Collection, names ...string) {
+	warnMissingIndexes(ctx, coll, true, names...)
+}
+
+func warnMissingIndexes(ctx context.Context, coll *mongo.Collection, requireUnique bool, names ...string) {
+	have, err := listIndexUniqueness(ctx, coll)
 	if err != nil {
 		slog.WarnContext(ctx, "mongo: cannot list indexes to verify dependencies",
 			"collection", coll.Name(), "error", err)
 		return
 	}
+	absent, nonUnique := missingUniqueIndexes(have, names...)
+	for _, n := range absent {
+		slog.WarnContext(ctx, "mongo: depended-on index missing; its owner service must create it",
+			"collection", coll.Name(), "index", n)
+	}
+	if !requireUnique {
+		return
+	}
+	for _, n := range nonUnique {
+		slog.WarnContext(ctx, "mongo: depended-on index exists but is not unique; its owner service must repair it",
+			"collection", coll.Name(), "index", n)
+	}
+}
+
+// indexDoc is one entry of a collection's index listing.
+type indexDoc struct {
+	Name   string `bson:"name"`
+	Key    bson.D `bson:"key"`
+	Unique bool   `bson:"unique"` // absent (not false) on a non-unique index, so false is honest
+	spec   bson.M // the raw document, for a repair that must restore it verbatim
+}
+
+// listIndexes returns every index on coll. An undecodable index document is skipped deliberately
+// (the caller reads it as absent, the safe reading) with its cause kept at debug.
+func listIndexes(ctx context.Context, coll *mongo.Collection) ([]indexDoc, error) {
+	cur, err := coll.Indexes().List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list indexes: %w", err)
+	}
 	defer func() { _ = cur.Close(ctx) }()
 
-	have := make(map[string]bool)
+	var out []indexDoc
 	for cur.Next(ctx) {
-		var idx struct {
-			Name string `bson:"name"`
+		var idx indexDoc
+		if err := cur.Decode(&idx); err != nil {
+			slog.DebugContext(ctx, "mongo: skipping undecodable index document",
+				"collection", coll.Name(), "error", err)
+			continue
 		}
-		if err := cur.Decode(&idx); err == nil {
-			have[idx.Name] = true
+		_ = bson.Unmarshal(cur.Current, &idx.spec)
+		out = append(out, idx)
+	}
+	if err := cur.Err(); err != nil {
+		return nil, fmt.Errorf("iterate indexes: %w", err)
+	}
+	return out, nil
+}
+
+// listIndexUniqueness maps each index name on coll to whether it is unique.
+func listIndexUniqueness(ctx context.Context, coll *mongo.Collection) (map[string]bool, error) {
+	docs, err := listIndexes(ctx, coll)
+	if err != nil {
+		return nil, err
+	}
+	have := make(map[string]bool, len(docs))
+	for _, d := range docs {
+		have[d.Name] = d.Unique
+	}
+	return have, nil
+}
+
+// missingUniqueIndexes partitions names into absent and present-but-not-unique, in names order.
+func missingUniqueIndexes(have map[string]bool, names ...string) (absent, nonUnique []string) {
+	for _, n := range names {
+		unique, ok := have[n]
+		switch {
+		case !ok:
+			absent = append(absent, n)
+		case !unique:
+			nonUnique = append(nonUnique, n)
 		}
 	}
-	for _, n := range names {
-		if !have[n] {
-			slog.WarnContext(ctx, "mongo: depended-on index missing; its owner service must create it",
-				"collection", coll.Name(), "index", n)
-		}
+	return absent, nonUnique
+}
+
+// ErrIndexSpecConflict reports a same-keys index with a different spec that EnsureIndex may not repair.
+var ErrIndexSpecConflict = errors.New("conflicting index exists; its owner service must repair it")
+
+// EnsureIndex creates model without ever dropping anything: a no-op on an identical index, a wrapped
+// ErrIndexSpecConflict on a same-keys conflict. Only the owner repairs (two repairers can drop each other's rebuild).
+func EnsureIndex(ctx context.Context, coll *mongo.Collection, model mongo.IndexModel) error {
+	_, err := coll.Indexes().CreateOne(ctx, model)
+	switch {
+	case err == nil:
+		return nil
+	case isIndexSpecConflict(err):
+		return fmt.Errorf("ensure index on %s: %w (%v)", coll.Name(), ErrIndexSpecConflict, err)
+	default:
+		return fmt.Errorf("ensure index on %s: %w", coll.Name(), err)
 	}
 }
 
@@ -174,22 +261,14 @@ func existingIndexByKeys(ctx context.Context, coll *mongo.Collection, keys any) 
 	if want == "" {
 		return existingIndex{}
 	}
-	cur, err := coll.Indexes().List(ctx)
+	docs, err := listIndexes(ctx, coll)
 	if err != nil {
-		return existingIndex{}
+		return existingIndex{} // an unlistable collection reads as "no such index"; the caller creates
 	}
-	defer func() { _ = cur.Close(ctx) }()
-	for cur.Next(ctx) {
-		var idx struct {
-			Name string `bson:"name"`
-			Key  bson.D `bson:"key"`
+	for _, d := range docs {
+		if keySpec(d.Key) == want {
+			return existingIndex{name: d.Name, keys: d.Key, spec: d.spec}
 		}
-		if cur.Decode(&idx) != nil || keySpec(idx.Key) != want {
-			continue
-		}
-		var spec bson.M
-		_ = bson.Unmarshal(cur.Current, &spec)
-		return existingIndex{name: idx.Name, keys: idx.Key, spec: spec}
 	}
 	return existingIndex{}
 }

@@ -23,36 +23,47 @@ type threadStoreMongo struct {
 	threadRooms         *mongo.Collection
 	threadSubscriptions *mongo.Collection
 	subscriptions       *mongo.Collection
+	// parentIndex and subIndex gate the document-creating writes on their unique index.
+	parentIndex *mongoutil.IndexGate
+	subIndex    *mongoutil.IndexGate
 }
 
 // Compile-time assertion that *threadStoreMongo satisfies ThreadStore.
 var _ ThreadStore = (*threadStoreMongo)(nil)
 
 func newThreadStoreMongo(db *mongo.Database) *threadStoreMongo {
+	threadRooms := db.Collection("thread_rooms")
+	threadSubscriptions := db.Collection("thread_subscriptions")
+	// Same specs as room-service, the owner; a conflicting index closes the gate until room-service repairs it.
 	return &threadStoreMongo{
-		threadRooms:         db.Collection("thread_rooms"),
-		threadSubscriptions: db.Collection("thread_subscriptions"),
+		threadRooms:         threadRooms,
+		threadSubscriptions: threadSubscriptions,
 		subscriptions:       db.Collection("subscriptions"),
+		parentIndex:         mongoutil.NewUniqueIndexGate(threadRooms, bson.D{{Key: "parentMessageId", Value: 1}}),
+		subIndex: mongoutil.NewUniqueIndexGate(threadSubscriptions,
+			bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}}),
 	}
 }
 
-// EnsureIndexes creates the unique indexes required by the thread store.
+// EnsureIndexes co-creates both unique keys with room-service's spec: on a fresh site the first reply can
+// beat the owner's start, and duplicates once landed block any later build. Best-effort; writes re-ask.
 func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
-	if err := mongoutil.EnsureIndexWithRepair(ctx, s.threadRooms, mongo.IndexModel{
-		Keys:    bson.D{{Key: "parentMessageId", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure thread_rooms parentMessageId index: %w", err)
+	if err := s.parentIndex.Ready(ctx); err != nil {
+		return err
 	}
-
-	// thread_subscriptions.{threadRoomId,userAccount} (unique) is owned by room-service
-	// (which also drops the legacy threadRoomId_1_userId_1 index); verify + warn only, never create.
-	mongoutil.WarnMissingIndexes(ctx, s.threadSubscriptions, "threadRoomId_1_userAccount_1")
-
-	return nil
+	return s.subIndex.Ready(ctx)
 }
 
 func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
+	// The duplicate-key branch is the thread's identity guarantee, so the index is confirmed first;
+	// a failure NAKs (see mongoutil.IndexGate). The subscriptions' key is confirmed here too: the room
+	// insert is the point of no return for a first reply (a redelivery takes the subsequent-reply path).
+	if err := s.parentIndex.Ready(ctx); err != nil {
+		return err
+	}
+	if err := s.subIndex.Ready(ctx); err != nil {
+		return err
+	}
 	toInsert := *room
 	if toInsert.ReplyAccounts == nil {
 		toInsert.ReplyAccounts = []string{}
@@ -79,6 +90,9 @@ func (s *threadStoreMongo) GetThreadRoomByParentMessageID(ctx context.Context, p
 }
 
 func (s *threadStoreMongo) InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
+	if err := s.subIndex.Ready(ctx); err != nil {
+		return err
+	}
 	if _, err := s.threadSubscriptions.InsertOne(ctx, sub); err != nil {
 		return fmt.Errorf("insert thread subscription: %w", err)
 	}
@@ -88,6 +102,9 @@ func (s *threadStoreMongo) InsertThreadSubscription(ctx context.Context, sub *mo
 // UpsertThreadSubscription inserts sub if no document exists for (threadRoomId, userAccount);
 // otherwise it is a no-op. $setOnInsert ensures existing subscriptions are never overwritten.
 func (s *threadStoreMongo) UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
+	if err := s.subIndex.Ready(ctx); err != nil {
+		return err
+	}
 	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
 	update := bson.M{"$setOnInsert": sub}
 	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
@@ -101,6 +118,9 @@ func (s *threadStoreMongo) UpsertThreadSubscription(ctx context.Context, sub *mo
 // New subs go via $setOnInsert on the upsert; existing ones get a separate
 // guarded, non-upsert update, so an already-read sub can't be upserted twice.
 func (s *threadStoreMongo) MarkThreadSubscriptionMention(ctx context.Context, sub *model.ThreadSubscription) error {
+	if err := s.subIndex.Ready(ctx); err != nil {
+		return err
+	}
 	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
 	upsert := bson.M{
 		"$setOnInsert": bson.M{
