@@ -84,10 +84,9 @@ subscriptions: {siteId, roomType: "channel", open: {$ne: false},
                 origin: {$ne: "teams"}}
              → group by u.account, isBot = $max(u.isBot)
              → match isBot != true          ← AFTER the group, see below
-             → match _id not null
              → sort ascending
    then, walking the cursor: keep the accounts a run can connect as,
-   stop at --limit, count the rest
+   stop at --limit, count what it walked past
 ```
 
 Mirrors user-service's own `subscription.list` match, narrowed to `channel`:
@@ -153,9 +152,23 @@ count* — like `roomType`, `open` and `origin` — rather than judging an accou
 string. What it removes is the population's definition, not a skip.
 
 **Skipping is not silent.** A `WARN` with the count and up to five examples,
-`skippedAccounts` in the manifest, and — when a site's whole population is
-unusable — a failure that names what was dropped, which is a different fix from
-a site nobody uses.
+`skippedAccounts` in the manifest (always written, including zero — an absent
+field cannot tell a clean site from a version that never counted), and — when a
+site's whole population is unusable — a failure that names what was dropped,
+which is a different fix from a site nobody uses.
+
+Read the count as *what this export walked past*, not as a site total. A
+bounded export stops at `--limit` and never sees what sorts after the last
+account it took, so `skippedAccounts: 0` with a `limit` beside it means "none in
+the part that was read". Only an unbounded export walks the whole population,
+and only there is the count the site's. The alternative — walking on to total
+the junk — would make every run a full census of a collection the bound exists
+to avoid reading.
+
+A row whose `u.account` is absent or empty is counted like any other candidate
+(it groups under null, and the walk reads it as a pointer rather than letting a
+`$match` hide it), but never quoted in the sample: `""` names no leftover to
+clean up, sorts first, and would take a slot from the names that do.
 
 The sort is load-bearing, not cosmetic — see the sharding note above.
 

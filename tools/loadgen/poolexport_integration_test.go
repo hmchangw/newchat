@@ -80,7 +80,8 @@ func TestIntegration_MongoPoolSource_SelectsChannelSubscribers(t *testing.T) {
 	// empty account carry no flag, so the cursor walks them — and counts them.
 	assert.Equal(t, []string{"anna", "bob", "carol"}, got.Accounts)
 	assert.Equal(t, 2, got.Skipped)
-	assert.Equal(t, []string{"", "legacy.site-a.bot"}, got.Sample)
+	assert.Equal(t, []string{"legacy.site-a.bot"}, got.Sample,
+		"the empty account is counted, but naming it would tell an operator nothing")
 
 	// dropUnusable is the belt, and on this path it must find nothing:
 	// composing it cannot change what the source already returned.
@@ -174,7 +175,9 @@ func TestIntegration_MongoPoolSource_SkipsAndCountsUnusableAccounts(t *testing.T
 			"u": bson.M{"account": "nbsp\u00a0user"}},
 		bson.M{"_id": "k6", "siteId": "site-a", "roomType": "channel",
 			"u": bson.M{"account": "ctrl\x07user"}},
-		// A row with no account at all: not an account, so not a skipped one.
+		// A row with no account at all. It groups under null, which the walk
+		// reads as a candidate it cannot connect as — counted like the rest
+		// rather than filtered where nothing could count it.
 		bson.M{"_id": "k7", "siteId": "site-a", "roomType": "channel", "u": bson.M{}},
 		bson.M{"_id": "k8", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "anna"}},
 		bson.M{"_id": "k9", "siteId": "site-a", "roomType": "channel", "u": bson.M{"account": "zoe"}},
@@ -184,7 +187,8 @@ func TestIntegration_MongoPoolSource_SkipsAndCountsUnusableAccounts(t *testing.T
 	got, err := mongoPoolSource{db: db}.channelSubscriberAccounts(ctx, "site-a", 0)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"anna", "zoe"}, got.Accounts)
-	assert.Equal(t, 6, got.Skipped, "every unusable account is counted, whatever kind of rune broke it")
+	assert.Equal(t, 7, got.Skipped,
+		"every unusable candidate is counted — every rune class, and the row with no account at all")
 	assert.Contains(t, got.Sample, "k6.test-1.user")
 
 	// The bound counts usable accounts. All six unusable rows sort between

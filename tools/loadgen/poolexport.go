@@ -29,9 +29,15 @@ type poolCandidates struct {
 	// Accounts are usable, sorted, and already bounded by the caller's limit —
 	// bounded by USABLE accounts, so --limit N means N connections.
 	Accounts []string
-	// Skipped counts what was rejected as unusable and Sample quotes a few. A
-	// count and a sample rather than the whole list: a site can hold more junk
-	// rows than pool, and neither a log line nor an error should scale with it.
+	// Skipped counts what the source rejected as unusable and Sample quotes a
+	// few — a count and a bounded sample rather than the list, because a site
+	// can hold more junk rows than pool and neither a log line nor an error
+	// should scale with it.
+	//
+	// It counts what the source WALKED PAST, which is the whole population
+	// only for an unbounded export. A bounded one stops at the limit, so junk
+	// sorting after the last account taken is never seen — reading it as a
+	// site-wide total would overstate what the export can know.
 	Skipped int
 	Sample  []string
 }
@@ -45,13 +51,15 @@ type poolAccountSource interface {
 	channelSubscriberAccounts(ctx context.Context, siteID string, limit int) (poolCandidates, error)
 }
 
-// cursorLimit converts --limit into the server-side bound. The pipeline
-// filters bots before this bound applies, so the bound counts only accounts
-// that will survive to the artifact — no headroom needed.
+// cursorLimit converts --limit into the bound collectUsableAccounts stops at.
+// It is a count of USABLE accounts, not of rows: the aggregation carries no
+// $limit stage, deliberately, because only the client side knows which
+// candidates a run can connect as. Reinstating one there would bound rows that
+// are then dropped, and --limit N would quietly deliver fewer than N.
 //
 // An unbounded export still gets a bound: maxAccounts+1, so a population over
-// the artifact cap is still DETECTED (by the extra row) rather than silently
-// truncated to it.
+// the artifact cap is still DETECTED (by the extra account) rather than
+// silently truncated to it.
 func cursorLimit(limit int) int {
 	if limit > 0 && limit <= poolartifact.MaxAccounts {
 		return limit
@@ -103,7 +111,7 @@ const (
 // would connect cleanly and then measure nothing.
 const poolExportQuery = `subscriptions: match {siteId, roomType: "channel", open: {$ne: false}, origin: {$ne: "teams"}} ` +
 	`-> group by u.account with isBot = $max(u.isBot) ` +
-	`-> match {isBot: {$ne: true}, _id: not null} -> sort _id asc ` +
+	`-> match {isBot: {$ne: true}} -> sort _id asc ` +
 	`-> keep accounts usable as NATS subject tokens, until limit`
 
 type poolExportOptions struct {
@@ -121,9 +129,14 @@ type poolExportResult struct {
 	ConfigDigest string
 	ArtifactKey  string
 	ManifestKey  string
-	// Skipped counts every account excluded as unusable — by the source while
-	// it was bounding the run, and by the belt below it — and SkippedSample
-	// quotes a few of them, so the caller can say what shrank the pool.
+	// Skipped counts every account excluded as unusable while this pool was
+	// selected — by the source as it walked candidates, and by the belt below
+	// it — and SkippedSample quotes a few, so the caller can say what shrank
+	// the pool and which leftover to clean up.
+	//
+	// "While this pool was selected" is the exact claim: a bounded export stops
+	// at --limit and never sees what sorts after it. Only an unbounded export's
+	// count is the site's total.
 	Skipped       int
 	SkippedSample []string
 }
@@ -136,10 +149,15 @@ type poolManifest struct {
 	SiteID       string `json:"siteId"`
 	ConfigDigest string `json:"configDigest"`
 	Accounts     int    `json:"accounts"`
-	// SkippedAccounts closes the gap between the rows the source returned and
-	// the accounts published, so a shrinking pool is visible in the record
-	// rather than only in a log line nobody kept.
-	SkippedAccounts int       `json:"skippedAccounts,omitempty"`
+	// SkippedAccounts is how many unusable accounts this export walked past —
+	// the gap between the candidates read and the accounts published — so a
+	// shrinking pool is visible in the record rather than only in a log line
+	// nobody kept. Always written, including zero: an absent field cannot tell
+	// a clean site from a version that never counted.
+	//
+	// A bounded export stops at --limit, so this counts what it saw getting
+	// there, not the site. Limit is right beside it, which is what says which.
+	SkippedAccounts int       `json:"skippedAccounts"`
 	Limit           int       `json:"limit,omitempty"`
 	Query           string    `json:"query"`
 	Source          string    `json:"source"`
@@ -212,11 +230,17 @@ func dropUnusable(accounts []string) (kept, skipped []string) {
 // shape, which is what tells an operator WHICH leftover to clean up.
 const skipSample = 5
 
-func sampleAccounts(accounts []string) []string {
-	if len(accounts) > skipSample {
-		return accounts[:skipSample]
+// appendSkipSample adds account to a bounded sample of skipped accounts.
+//
+// Blank names are counted but never quoted. A row whose u.account is empty or
+// absent is malformed rather than misnamed: printing "" tells an operator
+// nothing and, since it sorts first, would take a slot from the names that do
+// — "k6.test-1.user" is the whole point of quoting any.
+func appendSkipSample(sample []string, account string) []string {
+	if account == "" || len(sample) >= skipSample {
+		return sample
 	}
-	return accounts
+	return append(sample, account)
 }
 
 // exportPool reads the population, publishes the artifact the fleet consumes
@@ -230,7 +254,17 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 	// anything it let through. Summed, because either alone under-reports.
 	accounts, beltSkipped := dropUnusable(cand.Accounts)
 	skipped := cand.Skipped + len(beltSkipped)
-	sample := sampleAccounts(append(append([]string{}, cand.Sample...), beltSkipped...))
+	// The belt's catches take the sample slots first. They are the ones a
+	// source did NOT report, so they are evidence that its own filtering and
+	// its own counting disagree — appending them after a full source sample
+	// would drop exactly the names worth reading.
+	var sample []string
+	for _, a := range beltSkipped {
+		sample = appendSkipSample(sample, a)
+	}
+	for _, a := range cand.Sample {
+		sample = appendSkipSample(sample, a)
+	}
 	// The failure this export exists to prevent: a fleet that starts against
 	// nobody reports a healthy zero. Fail here, in the tool that can say why.
 	if len(accounts) == 0 {
@@ -351,10 +385,6 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 		// kind is decided below, in Go, where it can also be counted.
 		{{Key: "$group", Value: bson.M{"_id": "$u.account", "isBot": bson.M{"$max": "$u.isBot"}}}},
 		{{Key: "$match", Value: bson.M{"isBot": bson.M{"$ne": true}}}},
-		// A row with no u.account groups under null, which is not an account
-		// at all — it decodes into no string and stands for no connection, so
-		// it is dropped here rather than counted as a skipped account.
-		{{Key: "$match", Value: bson.M{"_id": bson.M{"$ne": nil}}}},
 		{{Key: "$sort", Value: bson.M{"_id": 1}}},
 		// No $limit stage. The bound counts USABLE accounts, and only Go knows
 		// which those are, so bounding here would count rows that are then
@@ -401,24 +431,36 @@ type accountRows interface {
 func collectUsableAccounts(ctx context.Context, rows accountRows, want int) (poolCandidates, error) {
 	var out poolCandidates
 	for rows.Next(ctx) {
+		// A pointer, because a row whose u.account is absent groups under null
+		// and a string field cannot decode it. Reading it here rather than
+		// excluding it in the pipeline keeps the aggregation free of any
+		// judgement about the account — and a row with no account is then
+		// counted like any other candidate a run cannot connect as, instead of
+		// being the one kind that disappears silently.
 		var row struct {
-			Account string `bson:"_id"`
+			Account *string `bson:"_id"`
 		}
 		if err := rows.Decode(&row); err != nil {
 			return poolCandidates{}, fmt.Errorf("decode channel subscriber: %w", err)
 		}
-		if !accountUsable(row.Account) {
+		var account string
+		if row.Account != nil {
+			account = *row.Account
+		}
+		if !accountUsable(account) {
 			// Counted, not passed over in silence: this walk is the only place
 			// that ever sees "k6.test-1.user", so if it says nothing, nothing
 			// downstream can.
 			out.Skipped++
-			if len(out.Sample) < skipSample {
-				out.Sample = append(out.Sample, row.Account)
-			}
+			out.Sample = appendSkipSample(out.Sample, account)
 			continue
 		}
-		out.Accounts = append(out.Accounts, row.Account)
+		out.Accounts = append(out.Accounts, account)
 		if len(out.Accounts) >= want {
+			// The bound is the caller's, so the walk ends here — and with it
+			// what this export can claim to know: junk sorting after the last
+			// account taken is never read, and never counted. Walking on to
+			// total it would trade the caller's bound for a census.
 			break
 		}
 	}
