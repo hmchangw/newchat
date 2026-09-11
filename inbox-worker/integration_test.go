@@ -18,6 +18,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -2002,4 +2003,37 @@ func TestUpsertUserAccount_ArrivalOrder_Integration(t *testing.T) {
 			assert.Equal(t, tt.wantRoles, got)
 		})
 	}
+}
+
+// Pins the budget the server actually stores: an event waiting on a recovering
+// peer must not be dropped an hour into the outage.
+func TestInboxWorker_FederationBudget_Integration(t *testing.T) {
+	const siteID = "site-budget"
+
+	ctx, js := setupNATS(t)
+
+	inboxCfg := stream.Inbox(siteID)
+	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     inboxCfg.Name,
+		Subjects: inboxCfg.Subjects,
+	})
+	require.NoError(t, err)
+
+	// Shaped as main() builds it: left at the package default, so the lane takes
+	// the outage budget.
+	settings := stream.ConsumerSettings{
+		AckWait: 30 * time.Second, MaxDeliver: stream.DefaultMaxDeliver,
+		MaxWaiting: 512, MaxAckPending: 1000,
+		BackOffSteps: 5, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+	}
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, buildConsumerConfig(settings, siteID))
+	require.NoError(t, err)
+
+	info, err := cons.Info(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, jsretry.DeliveriesFor(jsretry.DefaultBackoff, stream.OutageRetryWindow), info.Config.MaxDeliver,
+		"the shared default must not reach this lane")
+	assert.GreaterOrEqual(t, jsretry.MinWindow(jsretry.DefaultBackoff, info.Config.MaxDeliver), stream.OutageRetryWindow,
+		"the stored budget must outlast a peer outage")
 }

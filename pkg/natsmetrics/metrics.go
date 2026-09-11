@@ -22,6 +22,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+
+	"github.com/hmchangw/chat/pkg/jsretry"
 )
 
 // ScopeName is the instrumentation scope for every instrument in this package.
@@ -443,7 +445,7 @@ func IsFinalDeliveryFromContext(ctx context.Context) bool {
 // IsFinalDelivery reports whether metadata proves this is the configured last
 // attempt. Missing metadata returns false rather than guessing.
 func (m *Message) IsFinalDelivery() bool {
-	return m.maxDeliver > 0 && m.numDelivered > 0 && m.numDelivered >= uint64(m.maxDeliver)
+	return jsretry.IsLastAttempt(m.numDelivered, m.maxDeliver)
 }
 
 func (m *Message) Ack() error { err := m.Msg.Ack(); m.finish(OutcomeAck, err); return err }

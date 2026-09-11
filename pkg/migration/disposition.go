@@ -4,7 +4,11 @@
 // turns a handler result into a JetStream disposition.
 package migration
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/hmchangw/chat/pkg/jsretry"
+)
 
 // ErrPoison marks an event that can never succeed (unmappable doc). The consume
 // loop Terms these instead of redelivering, so one bad event never wedges the stream.
@@ -51,9 +55,8 @@ func Classify(err error, isFinal bool) Action {
 
 // IsFinalDelivery reports whether numDelivered has reached maxDeliver, so a further Nak
 // would be a silent drop. maxDeliver <= 0 means unlimited (never final).
+//
+// Delegates so the transformers and the workers cannot drift on one server rule.
 func IsFinalDelivery(numDelivered uint64, maxDeliver int) bool {
-	if maxDeliver <= 0 {
-		return false
-	}
-	return numDelivered >= uint64(maxDeliver)
+	return jsretry.IsLastAttempt(numDelivered, maxDeliver)
 }

@@ -232,3 +232,14 @@ func DeliveriesFor(schedule []time.Duration, want time.Duration) int {
 	}
 	return n
 }
+
+// IsLastAttempt reports whether this delivery is the last one the server will
+// make. A nak on it is discarded rather than scheduling a redelivery, so a
+// consumer that wants its give-up logged has to Term on this delivery instead.
+// maxDeliver <= 0 is unlimited, so no delivery is ever the last.
+func IsLastAttempt(numDelivered uint64, maxDeliver int) bool {
+	if maxDeliver <= 0 {
+		return false
+	}
+	return numDelivered >= uint64(maxDeliver)
+}
