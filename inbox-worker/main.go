@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -867,6 +868,11 @@ func main() {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
+	// The cap settleFederated terms against: what the server acknowledged storing,
+	// so its own normalization cannot leave us terming at a count it does not
+	// enforce. Read once — an older replica that rewrites this shared durable later
+	// drops the event before the term can fire.
+	maxDeliver := cons.CachedInfo().Config.MaxDeliver
 
 	// Empty VALKEY_ADDRS disables the badge cache and the subauthcache L2 bust
 	// — both become no-ops (nil-checked in handler.go).
@@ -945,7 +951,7 @@ func main() {
 		jobguard.Run(m.msg, func() {
 			msg := m.msg
 			handlerCtx, _ := logctx.ConsumeContext(m.ctx, msg.Headers(), msg.Subject(), msg.Data())
-			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Data()))
+			settleFederated(handlerCtx, msg, maxDeliver, handler.HandleEvent(handlerCtx, msg.Data()))
 		})
 	}
 
@@ -991,7 +997,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("inbox-worker started", "site", cfg.SiteID)
+	slog.Info("inbox-worker started", "site", cfg.SiteID, "max_deliver", maxDeliver)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error {
@@ -1038,9 +1044,65 @@ func isMembershipSubject(subj, siteID string) bool {
 // inbox-worker. The site-scoped FilterSubjects keeps inbox-worker on the
 // cross-site `external.>` lane only; same-site internal publishes are
 // reserved for search-sync-worker.
+//
+// It takes the outage retry budget: 17 deliveries under DefaultBackoff today,
+// which keeps a failing event retrying for at least an hour (2h nominal) instead
+// of the ~6 minutes the package default guarantees. The count is derived from
+// stream.OutageRetryWindow, so it tracks that constant rather than this number.
+// An event here waits on another one — a role_updated on the member_added that
+// creates its subscription — and after a peer outage that dependency sits in the
+// peer's backlog far longer than six minutes.
+//
+// The cost: a parked event holds its ack-pending slot for that full hour, on one
+// durable shared by every peer. Raise CONSUMER_MAX_ACK_PENDING if a peer's backlog
+// can park more than it allows, or healthy peers stall behind it.
 func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff))
 	cc.Durable = "inbox-worker"
 	cc.FilterSubjects = []string{subject.InboxExternalAll(siteID)}
 	return cc
+}
+
+// federatedMsg is jsretry.Msg plus what the give-up needs: Subject for the log
+// line, Term for the explicit drop.
+type federatedMsg interface {
+	jsretry.Msg
+	Subject() string
+	Term() error
+}
+
+// settleFederated settles one delivery. Below the cap it naks through jsretry for
+// a later retry; on the last delivery it logs the give-up at ERROR and Terms, so
+// the event is still dropped but the drop is on the record. A nak there would be
+// discarded by the server instead, and the event would vanish unrecorded.
+func settleFederated(ctx context.Context, msg federatedMsg, maxDeliver int, err error) {
+	if !lastAttemptFailed(msg, maxDeliver, err) {
+		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		return
+	}
+	slog.ErrorContext(ctx, "dropping federated event after too many retries",
+		"subject", msg.Subject(), "max_deliver", maxDeliver, "error", err,
+		"request_id", natsutil.RequestIDFromContext(ctx))
+	if termErr := msg.Term(); termErr != nil {
+		slog.ErrorContext(ctx, "failed to drop message", "error", termErr,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	}
+}
+
+// lastAttemptFailed reports whether the failure in hand arrived on the last
+// delivery, leaving nothing to retry into — true is settleFederated's signal to
+// give up rather than nak. Permanent errors belong to jsretry's ack-drop, and
+// unreadable metadata prefers another nak to a premature give-up, so both are false.
+func lastAttemptFailed(msg federatedMsg, maxDeliver int, err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, permanent := errcode.IsPermanent(err); permanent {
+		return false
+	}
+	meta, metaErr := msg.Metadata()
+	if metaErr != nil || meta == nil {
+		return false
+	}
+	return jsretry.IsLastAttempt(meta.NumDelivered, maxDeliver)
 }
