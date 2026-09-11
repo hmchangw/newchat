@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
@@ -155,5 +156,25 @@ func signalSelf(t *testing.T) {
 	}
 	if err := p.Signal(os.Interrupt); err != nil {
 		t.Errorf("signal self: %v", err)
+	}
+}
+
+// Signals must return a channel that is already armed and buffered, so a
+// worker can arm it BEFORE starting a loop able to raise SIGTERM on itself: an
+// early signal is latched in the buffer instead of killing the process.
+func TestSignals_LatchesASignalRaisedBeforeWaitOn(t *testing.T) {
+	skipOnWindows(t)
+	sig := shutdown.Signals()
+	defer signal.Stop(sig)
+
+	p, err := os.FindProcess(os.Getpid())
+	require.NoError(t, err, "find self")
+	assert.NoError(t, p.Signal(syscall.SIGTERM))
+
+	select {
+	case got := <-sig:
+		assert.Equal(t, syscall.SIGTERM, got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Signals must deliver a SIGTERM raised after it was armed")
 	}
 }

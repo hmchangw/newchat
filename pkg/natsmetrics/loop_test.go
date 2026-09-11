@@ -133,7 +133,8 @@ func TestStart_RegistersLoopBeforeReturning(t *testing.T) {
 
 	Start(context.Background(), iter, c, 4, 5, &wg,
 		func(jetstream.Msg) EventType { return EventCreated },
-		func(_ context.Context, tracked *Message) { require.NoError(t, tracked.Ack()) })
+		func(_ context.Context, tracked *Message) { require.NoError(t, tracked.Ack()) },
+		nil)
 
 	waited := make(chan struct{})
 	go func() { wg.Wait(); close(waited) }()
@@ -156,4 +157,41 @@ func TestStart_RegistersLoopBeforeReturning(t *testing.T) {
 			return false
 		}
 	}, 2*time.Second, 10*time.Millisecond, "wg.Wait() did not return after the loop exited")
+}
+
+// A terminal Next failure ends the loop for good; nothing else observes that,
+// so Start must hand the cause to the caller's stopped hook, which is what
+// turns a silently dead consumer into a readiness failure and a restart.
+func TestStart_ReportsTerminalErrorToStoppedHook(t *testing.T) {
+	m, _ := newTestMetrics(t)
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "stream", Consumer: "consumer"})
+	c.LoopStarted(context.Background())
+	iterErr := errors.New("consumer deleted")
+	got := make(chan error, 1)
+	var wg sync.WaitGroup
+
+	Start(context.Background(), failingIterator{err: iterErr}, c, 4, 5, &wg,
+		func(jetstream.Msg) EventType { return EventCreated },
+		func(context.Context, *Message) { t.Fatal("no message should be processed") },
+		func(err error) { got <- err })
+	wg.Wait()
+
+	select {
+	case err := <-got:
+		assert.ErrorIs(t, err, iterErr)
+	default:
+		t.Fatal("Start must report the terminal iterator error to the stopped hook")
+	}
+}
+
+// Consume returns the terminal error so a hand-rolled loop can report it too.
+func TestConsume_ReturnsTerminalError(t *testing.T) {
+	m, _ := newTestMetrics(t)
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "stream", Consumer: "consumer"})
+	iterErr := errors.New("consumer deleted")
+	var wg sync.WaitGroup
+
+	err := Consume(context.Background(), failingIterator{err: iterErr}, c, 4, 5, &wg, nil, nil)
+
+	assert.ErrorIs(t, err, iterErr)
 }

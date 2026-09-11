@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -301,10 +302,15 @@ func main() {
 		slog.Error("canonical member event iterator failed", "error", err)
 		os.Exit(1)
 	}
+	// Armed before either consume loop starts: a dying loop raises SIGTERM on
+	// this process, and a signal raised before the handler exists is fatal.
+	sig := shutdown.Signals()
+	invalLoop := loopguard.New("invalidation-loop", loopguard.SelfShutdown)
 	go func() {
 		for {
 			_, msg, err := invalIter.Next()
 			if err != nil {
+				invalLoop.Stopped(err)
 				return
 			}
 			var evt model.CanonicalMemberEvent
@@ -334,6 +340,7 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	wg.Add(1)
 	go func() {
 		// The loop itself is counted so shutdown, which stops the iterator and
@@ -344,6 +351,7 @@ func main() {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
 				consumerMetrics.LoopFailed(context.Background(), err)
+				loop.Stopped(err)
 				return
 			}
 			sem <- struct{}{}
@@ -380,6 +388,8 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
+		invalLoop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -396,7 +406,9 @@ func main() {
 		"user_settings_enabled", cfg.UserSettingsEnabled,
 	)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
+		// Both guards, before either iterator is stopped below.
+		func(_ context.Context) error { loop.BeginShutdown(); invalLoop.BeginShutdown(); return nil },
 		func(_ context.Context) error {
 			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()
