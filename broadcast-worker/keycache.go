@@ -36,7 +36,10 @@ type cacheRecorder interface {
 //
 // Negative results (nil, nil — meaning the room has no provisioned key)
 // are deliberately not cached, so a freshly-provisioned key is picked up
-// on the next call rather than being shadowed for up to TTL.
+// on the next call rather than being shadowed for up to TTL. A key the
+// handler mints through SetIfAbsent is cached immediately: the store
+// returns the committed key (the caller's own, or a racer's), so the entry
+// is exactly what a fresh Get would read back.
 //
 // No Valkey L2 is layered beneath this cache (unlike pkg/roommetacache).
 // Two reasons: the key is the single source of truth in the room's Mongo
@@ -130,4 +133,19 @@ func keyCacheTTLSafe(ttl, grace time.Duration) bool {
 // retiredTTLSafe: retention must outlast a cached key, which can be stamped at the end of its life.
 func retiredTTLSafe(retiredTTL, cacheTTL time.Duration) bool {
 	return retiredTTL >= 2*cacheTTL
+}
+
+// SetIfAbsent installs pair at version 0 when the room has no current key
+// and caches whichever key the inner store holds afterwards, so the message
+// that triggered the mint and every one after it are served from L1. An
+// inner failure caches nothing; the next Get retries the store.
+func (c *CachedKeyProvider) SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+	key, err := c.inner.SetIfAbsent(ctx, roomID, pair)
+	if err != nil {
+		return nil, fmt.Errorf("set room key if absent for %q: %w", roomID, err)
+	}
+	if key != nil {
+		c.lru.Add(roomID, key)
+	}
+	return key, nil
 }

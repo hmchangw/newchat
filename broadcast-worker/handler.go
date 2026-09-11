@@ -26,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
+	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -43,7 +44,8 @@ const maxSiteFanout = 8
 // message is not.
 const mentionFanoutTimeout = 5 * time.Second
 
-// errNoCurrentKey is returned when a room has no encryption key in its room document.
+// errNoCurrentKey is returned when a room still has no encryption key after the
+// worker tried to mint one — the provider broke the SetIfAbsent contract.
 var errNoCurrentKey = errors.New("no current key")
 
 // Publisher abstracts NATS publishing so the handler is testable.
@@ -51,11 +53,15 @@ type Publisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
-// RoomKeyProvider fetches the current encryption key for a room.
-// Defined here (not imported from pkg/roomkeystore directly) to keep the
-// handler's dependency contract narrow — only Get is used.
+// RoomKeyProvider fetches the current encryption key for a room and mints one
+// when the room has none. Defined here (not imported from pkg/roomkeystore
+// directly) to keep the handler's dependency contract narrow — only Get and
+// SetIfAbsent are used.
 type RoomKeyProvider interface {
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
+	// SetIfAbsent installs pair at version 0 only when the room has no current
+	// key and returns whichever key the room holds afterwards. Never (nil, nil).
+	SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error)
 }
 
 // ParentMessageInfo is the subset of a thread's parent message the channel fan-out
@@ -1006,17 +1012,41 @@ func (h *Handler) encryptEditedContent(ctx context.Context, roomID string, edite
 	return nil
 }
 
-// currentRoomKey fetches the room's encryption key, treating a missing key as
-// an error (the room is configured for encryption but no key is provisioned).
+// currentRoomKey returns the room's encryption key, minting and persisting a
+// fresh v0 key when the store holds none. A key-absent channel is a legacy /
+// pre-encryption room (channels created since carry their key in the CreateRoom
+// insert); without the mint every message into it would be NAKed until a member
+// add ran room-worker's own heal. The mint is going-forward only — it cannot
+// recover history a lost key had encrypted — and clients that lack it fetch it
+// through key.get on their first decrypt failure. SetIfAbsent (not Set)
+// converges concurrent minters — a sibling replica, a redelivery, or
+// room-worker's member-add heal — on one key, and the worker encrypts with
+// whatever the store committed, never with its own losing candidate.
+// RecordKeyAbsent fires on the mint so ops can spot a lost-key event.
 func (h *Handler) currentRoomKey(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error) {
 	key, err := h.keyStore.Get(ctx, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("get room key for room %s: %w", roomID, err)
 	}
-	if key == nil {
-		return nil, fmt.Errorf("get room key for room %s: %w", roomID, errNoCurrentKey)
+	if key != nil {
+		return key, nil
 	}
-	return key, nil
+	roomkeymetrics.RecordKeyAbsent(ctx, "")
+	fresh, err := roomkeystore.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generate room key for room %s: %w", roomID, err)
+	}
+	committed, err := h.keyStore.SetIfAbsent(ctx, roomID, *fresh)
+	if err != nil {
+		roomkeymetrics.RecordStoreError(ctx, "SetIfAbsent")
+		return nil, fmt.Errorf("mint room key for room %s: %w", roomID, err)
+	}
+	if committed == nil {
+		return nil, fmt.Errorf("mint room key for room %s: %w", roomID, errNoCurrentKey)
+	}
+	slog.WarnContext(ctx, "broadcast-worker minted key for key-absent room",
+		"room_id", roomID, "key_version", committed.Version)
+	return committed, nil
 }
 
 // encryptRoomEvent applies room encryption to evt if h.encrypt is true,

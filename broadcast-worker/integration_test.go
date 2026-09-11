@@ -69,6 +69,14 @@ func (f *fakeRoomKeyProvider) Get(_ context.Context, _ string) (*roomkeystore.Ve
 	return f.pair, nil
 }
 
+// SetIfAbsent mirrors the store contract: install at v0 when absent, else return the held key.
+func (f *fakeRoomKeyProvider) SetIfAbsent(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+	if f.pair == nil {
+		f.pair = &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: pair}
+	}
+	return f.pair, nil
+}
+
 func TestBroadcastWorker_ChannelRoom_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()

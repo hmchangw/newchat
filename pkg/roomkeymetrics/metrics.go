@@ -66,7 +66,7 @@ var storeOpAttrs = func() map[string]metric.MeasurementOption {
 
 // keyAbsentOpAttrs bounds KeyAbsentErrors' op label the same way. Only
 // room-service names an operation — it separates "retention was too short" from
-// room-worker's unrelated use of the same counter, which passes nothing.
+// the self-heal mints in room-worker and broadcast-worker, which pass nothing.
 var keyAbsentOpAttrs = func() map[string]metric.MeasurementOption {
 	ops := []string{"GetByVersion"}
 	built := make(map[string]metric.MeasurementOption, len(ops))
@@ -103,8 +103,8 @@ func RecordStoreError(ctx context.Context, op string) {
 }
 
 // RecordKeyAbsent counts a room key the store reported as absent, against its
-// bounded operation name. An empty op — room-worker has no operation to name —
-// or an unrecognised one records without the label rather than minting a series.
+// bounded operation name. An empty op — the self-heal mints have no operation to
+// name — or an unrecognised one records without the label rather than minting a series.
 func RecordKeyAbsent(ctx context.Context, op string) {
 	if opt, ok := keyAbsentOpAttrs[op]; ok {
 		KeyAbsentErrors.Add(ctx, 1, opt)

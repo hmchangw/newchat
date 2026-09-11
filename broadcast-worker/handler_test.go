@@ -26,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
+	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -582,7 +583,73 @@ func TestHandler_HandleMessage_DMRoom_PublishError(t *testing.T) {
 func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 	msgTime := time.Date(2026, 3, 26, 10, 0, 0, 0, time.UTC)
 
-	t.Run("keystore returns nil key", func(t *testing.T) {
+	// A key-absent channel (legacy / pre-encryption room) is healed in place:
+	// the worker mints a v0 key via SetIfAbsent and encrypts with whatever the
+	// store holds afterwards, so the message is delivered instead of NAKed
+	// forever. Clients that lack the key recover it through key.get.
+	t.Run("keystore returns nil key: mints via SetIfAbsent and publishes", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		us := NewMockUserStore(ctrl)
+		pub := &mockPublisher{}
+
+		minted := testRoomKey(t)
+		minted.Version = 0
+		keyStore := NewMockRoomKeyProvider(ctrl)
+		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, nil)
+		keyStore.EXPECT().SetIfAbsent(gomock.Any(), "room-1", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+				assert.NotEmpty(t, pair.PrivateKey, "mint must carry freshly generated key bytes")
+				return minted, nil
+			})
+
+		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
+		require.NoError(t, err)
+
+		require.Len(t, pub.records, 1)
+		var evt model.RoomEvent
+		require.NoError(t, json.Unmarshal(pub.records[0].data, &evt))
+		require.Nil(t, evt.Message)
+		var env roomcrypto.EncryptedMessage
+		require.NoError(t, json.Unmarshal(evt.EncryptedMessage, &env))
+		assert.Equal(t, 0, env.Version, "encrypted with the key the store committed")
+	})
+
+	// A racing minter (room-worker's member-add heal, or a sibling replica) may
+	// win: SetIfAbsent returns the winner's key and the worker must encrypt with
+	// that, never with its own losing candidate.
+	t.Run("keystore returns nil key: encrypts with the key SetIfAbsent returns", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		us := NewMockUserStore(ctrl)
+		pub := &mockPublisher{}
+
+		winner := testRoomKey(t)
+		winner.Version = 3
+		keyStore := NewMockRoomKeyProvider(ctrl)
+		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, nil)
+		keyStore.EXPECT().SetIfAbsent(gomock.Any(), "room-1", gomock.Any()).Return(winner, nil)
+
+		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
+		require.NoError(t, err)
+
+		require.Len(t, pub.records, 1)
+		var evt model.RoomEvent
+		require.NoError(t, json.Unmarshal(pub.records[0].data, &evt))
+		var env roomcrypto.EncryptedMessage
+		require.NoError(t, json.Unmarshal(evt.EncryptedMessage, &env))
+		assert.Equal(t, 3, env.Version)
+	})
+
+	t.Run("keystore returns nil key: SetIfAbsent error is transient, nothing published", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
 		us := NewMockUserStore(ctrl)
@@ -590,6 +657,30 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, nil)
+		keyStore.EXPECT().SetIfAbsent(gomock.Any(), "room-1", gomock.Any()).Return(nil, errors.New("mongo down"))
+
+		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mongo down")
+		assert.NotErrorIs(t, err, errNoCurrentKey)
+		assert.Empty(t, pub.records)
+	})
+
+	// The store contract says SetIfAbsent never returns (nil, nil); if a
+	// provider breaks it, fail loudly rather than encrypt with a nil key.
+	t.Run("keystore returns nil key: SetIfAbsent (nil, nil) is errNoCurrentKey", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		us := NewMockUserStore(ctrl)
+		pub := &mockPublisher{}
+
+		keyStore := NewMockRoomKeyProvider(ctrl)
+		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, nil)
+		keyStore.EXPECT().SetIfAbsent(gomock.Any(), "room-1", gomock.Any()).Return(nil, nil)
 
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)

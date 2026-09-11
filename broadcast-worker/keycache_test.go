@@ -29,6 +29,9 @@ type fakeKeyStore struct {
 	err     error
 	block   chan struct{} // when non-nil, Get blocks on it before returning
 	entered chan struct{} // signaled (non-blocking) on every Get entry
+
+	setIfAbsentCalls int
+	setIfAbsentErr   error
 }
 
 func newFakeKeyStore() *fakeKeyStore {
@@ -84,6 +87,24 @@ func (f *fakeKeyStore) Get(_ context.Context, roomID string) (*roomkeystore.Vers
 	return key, nil
 }
 
+// SetIfAbsent installs pair at version 0 when the room holds no key and returns
+// whichever key the room holds afterwards, mirroring the Mongo store contract.
+// setIfAbsentErr, when set, fails the call before any write.
+func (f *fakeKeyStore) SetIfAbsent(_ context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setIfAbsentCalls++
+	if f.setIfAbsentErr != nil {
+		return nil, f.setIfAbsentErr
+	}
+	if existing := f.byRoom[roomID]; existing != nil {
+		return existing, nil
+	}
+	minted := &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: pair}
+	f.byRoom[roomID] = minted
+	return minted, nil
+}
+
 // makeKey returns a deterministic VersionedKeyPair for tests.
 func makeKey(version int) *roomkeystore.VersionedKeyPair {
 	return &roomkeystore.VersionedKeyPair{
@@ -95,6 +116,68 @@ func makeKey(version int) *roomkeystore.VersionedKeyPair {
 }
 
 var _ RoomKeyProvider = (*CachedKeyProvider)(nil)
+
+// A mint must land in the cache: the worker encrypts with the minted key on
+// this message and every following one must be served from L1, not refetched.
+func TestCachedKeyProvider_SetIfAbsent_MintPopulatesCache(t *testing.T) {
+	inner := newFakeKeyStore()
+	c := NewCachedKeyProvider(inner, testCacheSize, time.Minute)
+
+	// Cold miss: no key in inner, nothing cached (negative results never are).
+	got, err := c.Get(context.Background(), "room1")
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	pair := roomkeystore.RoomKeyPair{PrivateKey: []byte("fresh")}
+	minted, err := c.SetIfAbsent(context.Background(), "room1", pair)
+	require.NoError(t, err)
+	require.NotNil(t, minted)
+	assert.Equal(t, 0, minted.Version)
+	assert.Equal(t, pair, minted.KeyPair)
+	assert.Equal(t, 1, inner.setIfAbsentCalls)
+
+	// Served from cache: inner.Get count stays at the single cold miss.
+	for i := 0; i < 5; i++ {
+		got, err := c.Get(context.Background(), "room1")
+		require.NoError(t, err)
+		assert.Equal(t, minted, got)
+	}
+	assert.Equal(t, 1, inner.callCount("room1"))
+}
+
+// When a racer already installed a key, the cache adopts the winner's key so
+// a later Get cannot serve a candidate the store never committed.
+func TestCachedKeyProvider_SetIfAbsent_AdoptsExistingKey(t *testing.T) {
+	inner := newFakeKeyStore()
+	winner := makeKey(4)
+	inner.set("room1", winner)
+	c := NewCachedKeyProvider(inner, testCacheSize, time.Minute)
+
+	got, err := c.SetIfAbsent(context.Background(), "room1", roomkeystore.RoomKeyPair{PrivateKey: []byte("loser")})
+	require.NoError(t, err)
+	assert.Equal(t, winner, got)
+
+	cached, err := c.Get(context.Background(), "room1")
+	require.NoError(t, err)
+	assert.Equal(t, winner, cached)
+	assert.Equal(t, 0, inner.callCount("room1"), "adopted key must be served from cache")
+}
+
+// An inner failure propagates and caches nothing, so the next Get retries inner.
+func TestCachedKeyProvider_SetIfAbsent_ErrorCachesNothing(t *testing.T) {
+	inner := newFakeKeyStore()
+	inner.setIfAbsentErr = errors.New("mongo down")
+	c := NewCachedKeyProvider(inner, testCacheSize, time.Minute)
+
+	got, err := c.SetIfAbsent(context.Background(), "room1", roomkeystore.RoomKeyPair{PrivateKey: []byte("fresh")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mongo down")
+	assert.Nil(t, got)
+
+	_, err = c.Get(context.Background(), "room1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, inner.callCount("room1"), "nothing cached, Get must reach inner")
+}
 
 func TestCachedKeyProvider_MissPopulatesCacheAndReturnsValue(t *testing.T) {
 	inner := newFakeKeyStore()

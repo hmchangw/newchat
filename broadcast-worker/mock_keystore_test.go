@@ -55,3 +55,18 @@ func (mr *MockRoomKeyProviderMockRecorder) Get(ctx, roomID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockRoomKeyProvider)(nil).Get), ctx, roomID)
 }
+
+// SetIfAbsent mocks base method.
+func (m *MockRoomKeyProvider) SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetIfAbsent", ctx, roomID, pair)
+	ret0, _ := ret[0].(*roomkeystore.VersionedKeyPair)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SetIfAbsent indicates an expected call of SetIfAbsent.
+func (mr *MockRoomKeyProviderMockRecorder) SetIfAbsent(ctx, roomID, pair any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetIfAbsent", reflect.TypeOf((*MockRoomKeyProvider)(nil).SetIfAbsent), ctx, roomID, pair)
+}
