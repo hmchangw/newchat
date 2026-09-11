@@ -51,6 +51,45 @@ addition, since that is the failure neither current probe catches.)
 `HEALTH_ADDR` is a standard `caarlos0/env` var; override per deployment if
 `:8081` clashes with another container port.
 
+## Valkey is never a startup gate
+
+`valkeyutil` probes the cluster with `PING` at dial time but does not gate on
+it: an unreachable Valkey is logged and a usable client returned. This mirrors
+the readiness reasoning above. A shared datastore is the same for every replica,
+so making it fatal at startup means a Valkey outage overlapping a rollout,
+scale-up or node drain crashloops every pod at once — including the message
+path — and the crashloop outlives the outage. go-redis dials lazily and
+self-heals per call, so a pod that starts during an outage recovers on its own.
+
+`valkeyutil.WithRequireReachable()` restores fail-fast, and only the one-shot
+CLI `tools/seed-sample-data` uses it: it has no fallback and no next call to
+self-heal into, so aborting the run beats seeding half the data.
+
+The `Connect`/`ConnectRaw` error branches remain — they now cover construction
+and instrumentation failures, not reachability.
+
+### What degrades, and how
+
+| Consumer | Behaviour while Valkey is down |
+|---|---|
+| The L2 tiers (`subauthcache`, `roommetacache`, `sessioncache`, `atrest`, `roomsubcache`, `userstore`, `roomtimescache`) and the search restricted-rooms cache | Fall through to the source of truth — MongoDB, Cassandra or Elasticsearch. Correct results, higher latency and load. |
+| `botplatform-service` rate limit + idempotency | **Fail open** — bot requests are admitted unthrottled and without duplicate suppression. Bots are critical, so a lost ceiling beats a dead bot. |
+| `user-presence-service` | No fallback exists — Valkey is the store of record, so presence RPCs error until it returns. `user-service` degrades `/me` to `presence: "offline"` rather than failing. |
+
+Cache invalidation (`BustKeys`, the tier slides) is best-effort, so a write
+during an outage can leave a stale entry until its TTL expires. The
+authoritative write itself still lands in the source of truth.
+
+### What to watch
+
+- `bot_control_bypassed_total{control}` — non-zero means bot rate limiting or
+  duplicate suppression is currently off. This is the only durable signal that
+  those controls were skipped; alert on it.
+- Valkey fallback logs are throttled: the first occurrence of a message is a
+  `WARN`, repeats within 30s drop to `DEBUG`, and the window reopens so a
+  sustained outage keeps a periodic heartbeat. Raise the level to `DEBUG` to see
+  every occurrence.
+
 ## Optional pprof profiling surface
 
 The ten message-pipeline NATS services (`broadcast-worker`, `history-service`,

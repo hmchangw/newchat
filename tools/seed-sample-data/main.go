@@ -137,7 +137,11 @@ func run(reset bool, site, mongoDBFlag string) error {
 	// writeSideStores provisions their keys.
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), 5*time.Minute)
 
-	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword)
+	// One-shot CLI: unlike the long-running services, this has no fallback and no
+	// next call to self-heal into, so an unreachable Valkey should abort the run
+	// rather than seed half the data.
+	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyutil.WithRequireReachable())
 	if err != nil {
 		return fmt.Errorf("valkey client connect: %w", err)
 	}

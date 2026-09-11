@@ -19,6 +19,10 @@ type Observability interface {
 type connectConfig struct {
 	obs       Observability
 	redisOpts []o11yredis.Option
+	profile   Profile
+	// requireReachable makes the startup probe fatal. Off by default: see
+	// WithRequireReachable.
+	requireReachable bool
 }
 
 // Option configures ConnectCluster. The zero config attaches no instrumentation
@@ -56,7 +60,10 @@ func WithIgnoredCommands(names ...string) Option {
 }
 
 func newConnectConfig(opts ...Option) connectConfig {
-	var cfg connectConfig
+	// CacheProfile rather than the zero Profile: an unbounded client is the trap
+	// this package exists to close, so a caller that passes no profile still gets
+	// a bounded one.
+	cfg := connectConfig{profile: CacheProfile}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)

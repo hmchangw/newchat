@@ -21,6 +21,7 @@ import (
 type fakeIncr struct {
 	counts map[string]int64
 	err    error
+	errKey string // when set, only this key errors
 	calls  int32
 }
 
@@ -28,7 +29,7 @@ func newFakeIncr() *fakeIncr { return &fakeIncr{counts: map[string]int64{}} }
 
 func (f *fakeIncr) IncrEx(_ context.Context, key string, _ time.Duration) (int64, error) {
 	atomic.AddInt32(&f.calls, 1)
-	if f.err != nil {
+	if f.err != nil && (f.errKey == "" || f.errKey == key) {
 		return 0, f.err
 	}
 	f.counts[key]++
@@ -111,15 +112,49 @@ func TestBotRateLimit(t *testing.T) {
 		assert.Equal(t, "rate_limited_global", body["reason"])
 	})
 
-	t.Run("valkey error is 500 (internal)", func(t *testing.T) {
+	// Bots are critical: an unreachable Valkey must not take them down. Losing
+	// the ceiling is the accepted cost — an unthrottled caller beats a caller
+	// that cannot send at all.
+	t.Run("caller-counter error fails open and admits the request", func(t *testing.T) {
 		client := newFakeIncr()
 		client.err = errors.New("boom")
 		r, seen := mountRLTest(t, client, 10, 100)
 
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req())
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-		assert.Equal(t, int32(0), *seen)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, int32(1), *seen, "handler must run when the limiter is unavailable")
+	})
+
+	t.Run("global-counter error fails open and admits the request", func(t *testing.T) {
+		client := newFakeIncr()
+		client.err = errors.New("boom")
+		client.errKey = "botrl:global"
+		r, seen := mountRLTest(t, client, 10, 100)
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req())
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, int32(1), *seen)
+		assert.Equal(t, int64(1), client.counts["botrl:caller:bot-user-id"],
+			"caller counter succeeded before the global counter failed")
+	})
+
+	// Fail-open admits because the counter is unreadable, not because the caller
+	// is under its limit — a caller already over the ceiling is admitted too.
+	t.Run("outage does not preserve an already-exceeded ceiling", func(t *testing.T) {
+		client := newFakeIncr()
+		r, seen := mountRLTest(t, client, 1, 100)
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req())
+		require.Equal(t, http.StatusOK, w.Code)
+
+		client.err = errors.New("boom")
+		w2 := httptest.NewRecorder()
+		r.ServeHTTP(w2, req())
+		assert.Equal(t, http.StatusOK, w2.Code)
+		assert.Equal(t, int32(2), *seen)
 	})
 
 	t.Run("zero limits disable the middleware (feature-off)", func(t *testing.T) {

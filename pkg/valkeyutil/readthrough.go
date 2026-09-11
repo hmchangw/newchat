@@ -205,7 +205,7 @@ func (t *Tier[K, V]) write(ctx context.Context, id K, v V) {
 	}
 	box := Box[V]{V: v, CachedAt: t.now().UnixMilli()}
 	if err := SetJSONWithTTL(ctx, t.cfg.Client, t.cfg.Key(id), box, t.cfg.TTL); err != nil {
-		slog.WarnContext(ctx, t.cfg.Label+" L2 write failed (TTL will reconcile)", "error", err)
+		LogDegraded(ctx, t.cfg.Label+" L2 write failed (TTL will reconcile)", err)
 	}
 }
 

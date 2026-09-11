@@ -241,8 +241,20 @@ func TestIncrExFakeSemantics(t *testing.T) {
 	})
 }
 
+// The startup probe no longer gates the dial: an unreachable cluster yields a
+// usable client that self-heals when Valkey returns, because gating startup on a
+// shared datastore crashloops every replica at once during an outage. The
+// fail-fast contract survives behind WithRequireReachable, for the one-shot CLI.
+func TestConnectCluster_UnreachableIsNotFatalByDefault(t *testing.T) {
+	client, err := valkeyutil.ConnectCluster(context.Background(), []string{"127.0.0.1:1"}, "")
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	t.Cleanup(func() { valkeyutil.Disconnect(client) })
+}
+
 func TestConnectCluster_ErrorPath(t *testing.T) {
-	_, err := valkeyutil.ConnectCluster(context.Background(), []string{"127.0.0.1:1"}, "")
+	_, err := valkeyutil.ConnectCluster(context.Background(), []string{"127.0.0.1:1"}, "",
+		valkeyutil.WithRequireReachable())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "valkey cluster connect")
 }
