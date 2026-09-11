@@ -167,6 +167,12 @@ DEV_MODE=true
 #UPLOAD_SERVICE_HOST_PORT=8086
 #TCARD_SERVICE_HOST_PORT=8087
 #SEARCH_SERVICE_HOST_PORT=19090
+#CASSANDRA_WEB_HOST_PORT=8083     # Cassandra data browser (bound to 127.0.0.1)
+#CASSANDRA_WEB_READ_ONLY=false    # true protects data but disables the Query page
+#CASSANDRA_WEB_HOST=cassandra     # viewer endpoint; defaults to the local container
+#CASSANDRA_WEB_PORT=9042
+#CASSANDRA_WEB_USERNAME=          # viewer-only role (e.g. SELECT-only); falls
+#CASSANDRA_WEB_PASSWORD=          # back to CASSANDRA_USERNAME/PASSWORD
 #
 # Stack-wide settings.
 #SITE_ID=site-local            # also drives ES index names, buckets, site URLs
@@ -178,6 +184,8 @@ DEV_MODE=true
 #MONGO_URI=mongodb://mongodb:27017
 #MONGO_DB=chat
 #CASSANDRA_HOSTS=cassandra
+#CASSANDRA_USERNAME=            # set both if the cluster needs auth;
+#CASSANDRA_PASSWORD=            # services and cassandra-web share them
 #CASSANDRA_KEYSPACE=chat
 #VALKEY_ADDRS=valkey:6379
 #SEARCH_URL=http://elasticsearch:9200

@@ -112,6 +112,85 @@ services:
     networks:
       - chat-local
 
+  # Browse the Cassandra data at http://localhost:8083 — keyspaces, tables,
+  # schema, row browser and a CQL Query page. Nothing seeds these tables, so on
+  # a fresh stack they are empty until messages flow through the services.
+  #
+  # `chat.pinned_messages_by_room` is the message table to open first in the row
+  # browser: it has no reactions column, so it lists normally.
+  #
+  # KNOWN LIMITATION — the *row browser* cannot list chat.messages_by_room,
+  # chat.messages_by_id or chat.thread_messages_by_thread. Those carry
+  # `reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>`, and gocql's
+  # untyped row API (Iter.SliceMap, which any generic browser must use) builds
+  # the Go map type with reflect.MapOf — a UDT decodes to map[string]interface{},
+  # which is not a valid Go map key, so the request panics and the table renders
+  # empty with no error — indistinguishable from a genuinely empty table, so
+  # never read it as "Cassandra has no messages". This is not a version lag: it
+  # reproduces identically on
+  # gocql v1.7.0 (the version this repo pins) and on the newest
+  # apache/cassandra-gocql-driver v2.1.2, so no driver bump fixes it.
+  #
+  # The Query page reads those tables fine, reactions included, by asking
+  # Cassandra to serialize server-side so the driver only ever sees TEXT:
+  #   SELECT JSON * FROM chat.messages_by_room WHERE room_id='r-general' AND bucket=...;
+  #   SELECT message_id, msg, toJson(reactions) FROM chat.messages_by_id LIMIT 20;
+  # Only a bare `SELECT reactions`/`SELECT *` hits the panic.
+  #
+  # Message bodies do not arrive readable: ATREST_ENABLED defaults to true, so
+  # message-worker puts the body in enc_payload as ciphertext and leaves msg
+  # NULL. See the README's "Messages reach Cassandra encrypted".
+  #
+  # READ_ONLY is off by default: the build rejects *every* Query-page statement
+  # when it is on, plain SELECTs included, which would disable the one path that
+  # reads these tables. Set CASSANDRA_WEB_READ_ONLY=true in docker-local/.env to
+  # keep the UI's truncate/import/delete buttons from reaching real data, at the
+  # cost of the Query page. Against a cluster with auth, a SELECT-only role is
+  # the better lock: Cassandra refuses the write and the Query page keeps
+  # working. See the README's "Connecting to a Cassandra that needs auth".
+  cassandra-web:
+    image: ipushc/cassandra-web:v1.1.6
+    container_name: chat-local-cassandra-web
+    # Bound to 127.0.0.1, following the same rule the obs stack uses for its
+    # dev-only UIs. Upstream's last release is Aug 2024, built on Go 1.20.2;
+    # `govulncheck -mode=binary` reports 59 reachable stdlib advisories in it,
+    # mostly DoS-class in net/http and html/template. Fine for a viewer only
+    # the developer can reach, not something to expose on a shared network.
+    ports:
+      - "127.0.0.1:${CASSANDRA_WEB_HOST_PORT:-8083}:8083"
+    environment:
+      # Browser-specific endpoint, defaulting to the container above. Pointing
+      # the Go services at another cluster via CASSANDRA_HOSTS would otherwise
+      # leave the viewer reading the local one and showing stale or empty state
+      # with no error. CASSANDRA_HOSTS is a comma-separated host:port list and
+      # this image takes a single host plus port, so it gets its own pair
+      # rather than a parse of that one.
+      - CASSANDRA_HOST=${CASSANDRA_WEB_HOST:-cassandra}
+      - CASSANDRA_PORT=${CASSANDRA_WEB_PORT:-9042}
+      - HOST_PORT=:8083
+      # Dedicated credentials, falling back to the service-wide pair. They are
+      # separate because the roles differ: the browser wants SELECT only, while
+      # message-worker and the other writers need MODIFY. Sharing one pair
+      # forces a choice between a write-capable browser and a stack that cannot
+      # write. Empty is correct for the local Cassandra, which runs
+      # AllowAllAuthenticator; against an authenticating cluster the container
+      # exits 1 at startup with "authentication required" rather than serving a
+      # broken UI.
+      - CASSANDRA_USERNAME=${CASSANDRA_WEB_USERNAME:-${CASSANDRA_USERNAME:-}}
+      - CASSANDRA_PASSWORD=${CASSANDRA_WEB_PASSWORD:-${CASSANDRA_PASSWORD:-}}
+      - READ_ONLY=${CASSANDRA_WEB_READ_ONLY:-false}
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8083/keyspace >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - chat-local
+
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
     container_name: chat-local-elasticsearch

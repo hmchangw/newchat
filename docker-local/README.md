@@ -6,7 +6,7 @@ startable, and all five can run at once.
 
 | Stack | File | Targets | What |
 |---|---|---|---|
-| deps | `compose.deps.yaml` | `deps-up` / `deps-down` | NATS, MongoDB, Cassandra, Elasticsearch, Valkey, Keycloak, Vault, MinIO |
+| deps | `compose.deps.yaml` | `deps-up` / `deps-down` | NATS, MongoDB, Cassandra, cassandra-web, Elasticsearch, Valkey, Keycloak, Vault, MinIO |
 | services | `compose.services.yaml` | `up` / `up-detached` / `down` | Every Go microservice + the Traefik `/api/v1` gateway |
 | ui | `compose.ui.yaml` | `ui-up` / `ui-down` | chat-frontend, admin-frontend |
 | o11y | `compose.o11y.yaml` | `o11y-up` / `o11y-down` | OTLP collector, Tempo, Loki, Prometheus, Grafana |
@@ -354,6 +354,210 @@ brings it up first should check, and correct this README where reality differs:
    the parked forwards in `OUTBOX-site-local` should drain to ivan on their
    own — `outbox-worker` retries indefinitely (`MaxDeliver=-1`).
 
+## Browsing Cassandra
+
+`cassandra-web` ships with the deps stack at **http://localhost:8083** —
+keyspaces, tables, schema, a row browser and a CQL Query page. It is a
+prebuilt upstream image wired up with a handful of environment variables;
+there is no code of ours behind it.
+
+It is a community project, not an official Apache or DataStax tool — no such
+web UI exists. `ipushc/cassandra-web:v1.1.6` is the newest release; `latest`
+and `v1.1.5` resolve to the same image content, and the pinned version tag is
+preferred over `latest` for the usual reasons. Upstream has been quiet since
+August 2024, and the binary is built on Go 1.20.2, which
+`govulncheck -mode=binary` flags for 59 reachable stdlib advisories (mostly
+DoS-class in `net/http` and `html/template`). That is why the port is bound to
+`127.0.0.1` rather than every interface: it is a local viewer, not a service.
+If that trade stops being acceptable, Apache Zeppelin's Cassandra interpreter
+is the nearest maintained substitute, at a much larger footprint.
+
+Nothing seeds the Cassandra tables, so on a fresh stack they are empty until
+messages flow through the services. `make seed` populates MongoDB and Valkey
+only.
+
+**Which tab reads what** — the tool has two ways to show rows, and they do not
+have the same reach:
+
+| | Row browser (click a table) | Query page (type CQL) |
+|---|---|---|
+| `pinned_messages_by_room`, non-message tables | works | works |
+| `messages_by_room`, `messages_by_id`, `thread_messages_by_thread` | renders empty, always | works |
+| the `reactions` column | never | works, via `SELECT JSON` / `toJson` |
+
+So reactions **are** readable in the browser; they are just not readable from
+the row browser tab, which is the tab that cannot open those three tables at
+all. Both sections below say one half of that.
+
+> **An empty row browser proves nothing.** For those three tables the failure
+> mode and the genuinely-empty case render identically — a table with no rows
+> and no error. Never read it as "Cassandra has no messages". Confirm a count
+> from the Query page or `cqlsh` instead:
+>
+> ```sql
+> SELECT count(*) FROM chat.messages_by_id WHERE message_id = '<id>';
+> ```
+>
+> Or unrestricted, accepting the scan, only because the local dataset is tiny:
+> `docker exec chat-local-cassandra cqlsh -e "SELECT count(*) FROM chat.messages_by_id"`.
+
+`READ_ONLY` is **off** by default. This build rejects every Query-page
+statement when it is on — plain `SELECT`s included, with
+`"Update/Insert action are not allowed"` — and the Query page is the only path
+that reads the message tables (below). Set `CASSANDRA_WEB_READ_ONLY=true` in
+`docker-local/.env` to keep the UI's truncate/import/delete buttons away from
+real data, accepting that the Query page stops working.
+
+### Why the row browser cannot list the three message tables
+
+The row browser issues `SELECT *`, and that is what fails — not reactions
+specifically, and not the Query page. It fails *silently*, which is the part
+that bites: see the warning above before concluding a table is empty.
+
+This is not fixable from our side without owning a fork. The image is prebuilt
+upstream, the row browser has no per-table opt-out, and it surfaces a dropped
+connection as an empty result rather than an error. Patching it to select
+columns explicitly, or to render the failure, means maintaining a fork of a
+project last released in August 2024 — see the provenance note above. The
+documented Query-page route is the trade we took instead.
+
+`messages_by_room`, `messages_by_id` and `thread_messages_by_thread` carry
+`reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>`. Any generic
+browser has to read rows through gocql's untyped API (`Iter.SliceMap`), which
+builds the Go map type with `reflect.MapOf` — and a UDT decodes to
+`map[string]interface{}`, which is not a valid Go map key. The request panics
+server-side, the connection drops, and the table renders **empty with no
+error**. The other tabs (columns, definition) work normally.
+
+This is not a version lag, and bumping the driver does not fix it: the panic
+reproduces identically on gocql `v1.7.0` (what this repo pins) and on the
+newest `apache/cassandra-gocql-driver v2.1.2`. Our own services are unaffected
+because they scan the column into a typed `map[ReactionKey]ReactorInfo`, which
+gocql handles fine — the limitation is specific to the untyped path.
+
+`pinned_messages_by_room` has no reactions column, so `SELECT *` succeeds and
+it browses normally.
+
+### Reading the message tables, reactions included
+
+This is the part that works. Use the **Query** page and let *Cassandra* serialize the row, so the driver
+only ever sees `TEXT`. This is the standard way to read a UDT-keyed map from a
+driver that cannot represent one, and it needs no patched driver:
+
+Restrict every example to its full partition key — `message_id` for
+`messages_by_id`, `room_id` plus `bucket` for `messages_by_room`. A bare
+`LIMIT` caps the rows returned, not the token ranges and tombstones Cassandra
+walks to find them, so an unrestricted read is a cluster-wide scan even when it
+comes back empty:
+
+```sql
+-- whole rows, every column, reactions included
+SELECT JSON * FROM chat.messages_by_id WHERE message_id = '<id>';
+SELECT JSON * FROM chat.messages_by_room WHERE room_id = 'r-general' AND bucket = 1776816000000;
+
+-- or keep the row tabular and JSON-ify just the awkward column
+SELECT message_id, msg, sender, toJson(reactions) AS reactions_json
+  FROM chat.messages_by_id WHERE message_id = '<id>';
+```
+
+`SELECT JSON *` returns one `[json]` column holding the whole row. Only a bare
+`SELECT reactions` or `SELECT *` hits the panic — naming other columns
+explicitly is fine too:
+
+```sql
+SELECT room_id, created_at, message_id, msg, sender, tcount
+  FROM chat.messages_by_room WHERE room_id = 'r-general' AND bucket = 1776816000000;
+```
+
+`bucket` is `floor(created_at_unix_ms / windowMs) * windowMs`; the window comes
+from `MESSAGE_BUCKET_HOURS` (default 360) and the math lives in
+`pkg/msgbucket`. To find a room's populated buckets without scanning, read
+`lastMsgAt` off the room document in MongoDB and convert, or take the
+`message_id` from there and point-read `messages_by_id`.
+
+### Connecting to a Cassandra that needs auth
+
+The local Cassandra runs `AllowAllAuthenticator`, so no credentials are passed
+and none are needed. Pointing the stack at a cluster with
+`PasswordAuthenticator` needs the service-wide pair in `docker-local/.env`:
+
+```sh
+CASSANDRA_USERNAME=chatapp
+CASSANDRA_PASSWORD=...
+```
+
+Those are the names the Go services already read (`pkg/cassutil`), and
+cassandra-web falls back to them, so one pair is enough to get everything
+connected. The compose entry forwards them explicitly, because that container
+takes no `env_file`.
+
+The viewer also has its own pair, which takes precedence when set:
+
+```sh
+CASSANDRA_WEB_USERNAME=browser
+CASSANDRA_WEB_PASSWORD=...
+```
+
+Use it whenever the browser should not have the services' privileges — see the
+SELECT-only role below, which is exactly that case. `CASSANDRA_WEB_HOST` and
+`CASSANDRA_WEB_PORT` work the same way for the endpoint, defaulting to the
+`cassandra` container; without them, repointing the services with
+`CASSANDRA_HOSTS` would leave the viewer reading the old cluster and quietly
+showing stale state.
+
+Getting it wrong fails loudly rather than quietly: with auth on and no
+credentials the container **exits 1** during startup with
+`gocql: unable to create session: ... authentication required (using
+"org.apache.cassandra.auth.PasswordAuthenticator")`, so `make deps-up` stops
+on it instead of handing you a broken UI.
+
+**A SELECT-only role is a better lock than `READ_ONLY`.** `READ_ONLY=true`
+disables the Query page, which is the only way to read the message tables.
+Granting the browser's role reads alone keeps the Query page working and still
+refuses every write — Cassandra rejects it, and the UI surfaces the refusal:
+
+```sql
+CREATE ROLE browser WITH PASSWORD = '...' AND LOGIN = true;
+GRANT SELECT ON KEYSPACE chat TO browser;
+```
+
+Give that role to `CASSANDRA_WEB_USERNAME`/`CASSANDRA_WEB_PASSWORD`, **not** to
+the service-wide pair. The services share those, and message-worker needs
+`MODIFY`; pointing the whole stack at a SELECT-only role locks the browser down
+and stops every write in the system.
+
+A `TRUNCATE` or `INSERT` typed into the Query page then comes back as
+`User browser has no MODIFY permission on <table chat.messages_by_room>`,
+with nothing written. This needs `authorizer: CassandraAuthorizer`; with
+`AllowAllAuthorizer` every authenticated role can write regardless of grants.
+
+### Messages reach Cassandra encrypted
+
+`ATREST_ENABLED` defaults to **true** (`pkg/atrest`, wired in
+`message-worker/deploy/docker-compose.yml` and `history-service`'s), so
+message-worker writes the body to `enc_payload` as AES-GCM ciphertext with the
+nonce in `enc_meta` and leaves `msg` NULL. No browser can decrypt that —
+cassandra-web shows a base64 blob, which is the point of the feature. Every
+other column (sender, timestamps, thread counters, reactions) is plaintext and
+reads normally.
+
+To get readable bodies, put `ATREST_ENABLED=false` in `docker-local/.env` and
+restart the services — then message-worker takes the plaintext path. Vault also
+has to be reachable for the encrypted path to work at all; see "Vault and
+encrypted rooms" below for the DEK reset after a Vault restart.
+
+`cqlsh` is the other way in, and renders UDTs and maps directly with no JSON
+wrapper:
+
+```sh
+docker exec chat-local-cassandra cqlsh -e \
+  "SELECT message_id, reactions FROM chat.messages_by_id WHERE message_id='...'"
+```
+
+Under the federated stack one `cassandra-web` serves both sites, since
+`compose.fed-deps.yaml` homes `chat` and `chat_remote` in the one shared
+Cassandra.
+
 ## Logging in
 
 `make seed` writes `chat.users` and the `chat.hr_employee` enrichment rows that
@@ -431,6 +635,7 @@ the `local` column, since both sites run at once.
 | 7778 | | NATS Prometheus exporter | localhost-only |
 | 8080 | **8190** | auth-service | also reachable as `{baseUrl}/api/v1/auth`; site-remote is `+110`, not `+100`, because 8180 is Keycloak |
 | 8082 | 8182 | admin-service | admin-frontend talks here directly |
+| 8083 | shared | cassandra-web | Cassandra data browser; localhost-only |
 | 8085 | 8185 | portal-service | portal-direct, deliberately not behind the gateway |
 | 8086 | 8186 | upload-service | also `{baseUrl}/api/v1/file` |
 | 8087 | 8187 | tcard-service | |
