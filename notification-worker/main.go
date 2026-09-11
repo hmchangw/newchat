@@ -421,19 +421,11 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
 
-// notifyProcessor is the per-message body both lanes run, so the home lane and
+// notifyHandler is the per-message body both lanes run, so the home lane and
 // the buddy lane settle a message identically — a failover-lane event is still
 // this site's event.
-// notifyHandler is notifyProcessor for callers that hand back a plain
-// jetstream.Msg — the failover binder's handler shape.
 func notifyHandler(handler *Handler, domainMetrics *notificationMetrics) func(context.Context, jetstream.Msg) {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
-		notifySettle(msgCtx, msg, handler, domainMetrics)
-	}
-}
-
-func notifyProcessor(handler *Handler, domainMetrics *notificationMetrics) natsmetrics.ProcessMessage {
-	return func(msgCtx context.Context, msg *natsmetrics.Message) {
 		notifySettle(msgCtx, msg, handler, domainMetrics)
 	}
 }
