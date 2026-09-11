@@ -84,8 +84,9 @@ subscriptions: {siteId, roomType: "channel", open: {$ne: false},
                 origin: {$ne: "teams"}}
              → group by u.account, isBot = $max(u.isBot)
              → match isBot != true          ← AFTER the group, see below
-             → match _id not empty and not matching /\.bot$/
-             → sort ascending, then limit
+             → sort ascending
+   then, walking the cursor: keep the accounts a run can connect as,
+   stop at --limit, count what it walked past
 ```
 
 Mirrors user-service's own `subscription.list` match, narrowed to `channel`:
@@ -115,8 +116,59 @@ other condition above is legitimately true of it. clientsim cannot connect as
 one: bots authenticate over HTTP through `pkg/botauth`, not the user JWT path,
 and a dotted `.bot` account spans subject tokens, which panics
 `subject.UserSubscriptionList` before a request is made. The query drops them
-on the stored flag so the bulk never leaves the server; a second pass in Go
-drops them on the account shape, catching a row whose flag was never stored.
+on the stored flag so the bulk never leaves the server; the Go pass below
+catches a row whose flag was never stored, on the account's own shape.
+
+**The shape rule runs in Go, not in the aggregation.** Any account carrying a
+dot, wildcard, whitespace or control rune panics `subject.UserSubscriptionList`
+inside the pod, and not all of them are bots: `k6.test-1.user` is a leftover
+subscription row from another load tool, with no `isBot` flag and no `.bot`
+suffix to mark it as anything else. Such a row used to fail the **whole** export
+at `pkg/poolartifact`'s validator — one stale record blocking every run against
+that site. It is now skipped like any other account clientsim cannot connect as.
+
+Why the rule is not a `$match` regex, which would keep those rows off the wire:
+
+- **A regex is a second dialect of `subject.IsValidAccountToken`**, evaluated by
+  another engine (MongoDB runs PCRE2, and `\s` does not mean the same thing in
+  every one). Two spellings of one rule can only drift, and the account that
+  panics a pod is exactly the one they disagree about.
+- **The layer that bounds `--limit` has to be the layer that judges
+  eligibility.** The bound counts whatever reaches it, so an account removed
+  afterwards has already consumed a slot and `--limit N` quietly delivers fewer.
+- **The layer that judges is the only one that can report.** Filtering
+  server-side hides the row from every counter downstream: the WARN, the result
+  and the manifest would all read zero while the pool silently shrank.
+
+So the cursor is walked rather than `$limit`ed — each account checked with the
+validator, usable ones accumulating until the bound, the rest counted with a
+bounded sample. The Job's heap holds the bound, not the population. The cost is
+a `$sort` the server cannot cap at top-N (over the grouped keys `$group` already
+materialised) and unusable rows crossing the wire, a rounding error beside the
+population itself.
+
+The `isBot` flag stays a query filter because it defines *which subscriptions
+count* — like `roomType`, `open` and `origin` — rather than judging an account
+string. What it removes is the population's definition, not a skip.
+
+**Skipping is not silent.** A `WARN` with the count and up to five examples,
+`skippedAccounts` in the manifest (always written, including zero — an absent
+field cannot tell a clean site from a version that never counted), and — when a
+site's whole population is unusable — a failure that names what was dropped,
+which is a different fix from a site nobody uses.
+
+Read the count as *what this export walked past*, not as a site total. A
+bounded export stops at `--limit` and never sees what sorts after the last
+account it took, so `skippedAccounts: 0` with a `limit` beside it means "none in
+the part that was read". Only an unbounded export walks the whole population,
+and only there is the count the site's. The alternative — walking on to total
+the junk — would make every run a full census of a collection the bound exists
+to avoid reading.
+
+A row whose `u.account` is absent or empty is counted like any other candidate
+(it groups under null, and the walk reads it as a pointer rather than letting a
+`$match` hide it), but never quoted in the sample: `""` names no leftover to
+clean up, sorts first, and would take a slot from the names that do.
 
 The sort is load-bearing, not cosmetic — see the sharding note above.
 
@@ -147,7 +199,9 @@ healthy zero, and this is the last place that can say why.
 ### The manifest
 
 `pool-manifest.json` records `runId`, `siteId`, `configDigest`, the account
-count, the limit, the query, and the export time. The artifact says *who*
+count, `skippedAccounts` (always written, including zero — and counting what
+this export walked past, not the site; see above), the limit, the query, and
+the export time. The artifact says *who*
 connected; the manifest says how that set was chosen, which is what makes a
 run reproducible months later rather than merely identifiable.
 

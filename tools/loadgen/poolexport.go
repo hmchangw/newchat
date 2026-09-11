@@ -17,22 +17,49 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/poolartifact"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// poolAccountSource yields the accounts a clientsim run should connect as.
-// limit is the caller's --limit (0 = unbounded); a source is free to push it
-// down rather than materialise the whole population first.
-type poolAccountSource interface {
-	channelSubscriberAccounts(ctx context.Context, siteID string, limit int) ([]string, error)
+// poolCandidates is what a source found: the accounts a run can connect as,
+// and what it left behind getting there. The two travel together because they
+// are decided together — a source that filtered for itself and reported
+// nothing would make the WARN and the manifest's skippedAccounts a fiction,
+// which is worse than not recording them at all.
+type poolCandidates struct {
+	// Accounts are usable, sorted, and already bounded by the caller's limit —
+	// bounded by USABLE accounts, so --limit N means N connections.
+	Accounts []string
+	// Skipped counts what the source rejected as unusable and Sample quotes a
+	// few — a count and a bounded sample rather than the list, because a site
+	// can hold more junk rows than pool and neither a log line nor an error
+	// should scale with it.
+	//
+	// It counts what the source WALKED PAST, which is the whole population
+	// only for an unbounded export. A bounded one stops at the limit, so junk
+	// sorting after the last account taken is never seen — reading it as a
+	// site-wide total would overstate what the export can know.
+	Skipped int
+	Sample  []string
 }
 
-// cursorLimit converts --limit into the server-side bound. The pipeline
-// filters bots before this bound applies, so the bound counts only accounts
-// that will survive to the artifact — no headroom needed.
+// poolAccountSource yields the accounts a clientsim run should connect as.
+// limit is the caller's --limit (0 = unbounded). A source applies both the
+// usability rule and the bound itself, in that order: whichever layer decides
+// what counts against the bound is the only one that can report what it
+// dropped, so they cannot be split without one of them lying.
+type poolAccountSource interface {
+	channelSubscriberAccounts(ctx context.Context, siteID string, limit int) (poolCandidates, error)
+}
+
+// cursorLimit converts --limit into the bound collectUsableAccounts stops at.
+// It is a count of USABLE accounts, not of rows: the aggregation carries no
+// $limit stage, deliberately, because only the client side knows which
+// candidates a run can connect as. Reinstating one there would bound rows that
+// are then dropped, and --limit N would quietly deliver fewer than N.
 //
 // An unbounded export still gets a bound: maxAccounts+1, so a population over
-// the artifact cap is still DETECTED (by the extra row) rather than silently
-// truncated to it.
+// the artifact cap is still DETECTED (by the extra account) rather than
+// silently truncated to it.
 func cursorLimit(limit int) int {
 	if limit > 0 && limit <= poolartifact.MaxAccounts {
 		return limit
@@ -84,8 +111,8 @@ const (
 // would connect cleanly and then measure nothing.
 const poolExportQuery = `subscriptions: match {siteId, roomType: "channel", open: {$ne: false}, origin: {$ne: "teams"}} ` +
 	`-> group by u.account with isBot = $max(u.isBot) ` +
-	`-> match {isBot: {$ne: true}, _id: not empty and not /\.bot$/} ` +
-	`-> sort _id asc -> limit`
+	`-> match {isBot: {$ne: true}} -> sort _id asc ` +
+	`-> keep accounts usable as NATS subject tokens, until limit`
 
 type poolExportOptions struct {
 	RunID  string
@@ -102,20 +129,39 @@ type poolExportResult struct {
 	ConfigDigest string
 	ArtifactKey  string
 	ManifestKey  string
+	// Skipped counts every account excluded as unusable while this pool was
+	// selected — by the source as it walked candidates, and by the belt below
+	// it — and SkippedSample quotes a few, so the caller can say what shrank
+	// the pool and which leftover to clean up.
+	//
+	// "While this pool was selected" is the exact claim: a bounded export stops
+	// at --limit and never sees what sorts after it. Only an unbounded export's
+	// count is the site's total.
+	Skipped       int
+	SkippedSample []string
 }
 
 // poolManifest explains an export. The artifact says WHO connected; this says
 // how that set was chosen, which is what makes the run reproducible rather
 // than merely identifiable.
 type poolManifest struct {
-	RunID        string    `json:"runId"`
-	SiteID       string    `json:"siteId"`
-	ConfigDigest string    `json:"configDigest"`
-	Accounts     int       `json:"accounts"`
-	Limit        int       `json:"limit,omitempty"`
-	Query        string    `json:"query"`
-	Source       string    `json:"source"`
-	ExportedAt   time.Time `json:"exportedAt"`
+	RunID        string `json:"runId"`
+	SiteID       string `json:"siteId"`
+	ConfigDigest string `json:"configDigest"`
+	Accounts     int    `json:"accounts"`
+	// SkippedAccounts is how many unusable accounts this export walked past —
+	// the gap between the candidates read and the accounts published — so a
+	// shrinking pool is visible in the record rather than only in a log line
+	// nobody kept. Always written, including zero: an absent field cannot tell
+	// a clean site from a version that never counted.
+	//
+	// A bounded export stops at --limit, so this counts what it saw getting
+	// there, not the site. Limit is right beside it, which is what says which.
+	SkippedAccounts int       `json:"skippedAccounts"`
+	Limit           int       `json:"limit,omitempty"`
+	Query           string    `json:"query"`
+	Source          string    `json:"source"`
+	ExportedAt      time.Time `json:"exportedAt"`
 }
 
 // poolDigest fingerprints the POPULATION, not the seed parameters: a Mongo
@@ -131,45 +177,105 @@ func poolDigest(accounts []string) string {
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
-// dropUnusable removes accounts a clientsim run cannot connect as. A bot that
-// owns a room holds a genuine channel subscription (bot-room-service/handler.go:213-216
-// writes IsBot:true with RoomTypeChannel, and its $setOnInsert never sets
-// `open`, so the open filter passes it too), so every condition the query
-// matches on is legitimately true of it.
+// accountUsable reports whether a clientsim run can connect as this account.
+// One predicate, used by the source that bounds --limit and by the belt that
+// re-checks it, so the layer doing the bounding and the layer doing the
+// reporting cannot disagree about what "usable" means.
 //
-// clientsim cannot connect as one either way: bots authenticate over HTTP
-// through pkg/botauth rather than the user JWT path, and a dotted ".bot"
-// account spans subject tokens — subject.UserSubscriptionList panics on it
-// before a request is made.
+// Two kinds are not usable, for one shared reason — the account becomes a NATS
+// subject token:
 //
-// Belt to the query's braces, and not redundant with it: the query keys on the
-// stored u.isBot flag, this keys on the account shape, and a row written
-// without the flag is caught only here. Cheap — the population is already in
-// memory and sorted.
-func dropUnusable(accounts []string) []string {
-	kept := accounts[:0:0]
+//   - Bots. A bot that owns a room holds a genuine channel subscription
+//     (bot-room-service/handler.go:213-216 writes IsBot:true with
+//     RoomTypeChannel, and its $setOnInsert never sets `open`), so every
+//     condition the query matches on is legitimately true of it. clientsim
+//     cannot connect as one either way: bots authenticate over HTTP through
+//     pkg/botauth rather than the user JWT path.
+//   - Anything that is not a valid subject token — a dot, wildcard, whitespace
+//     or control rune, and the empty account. subject.UserSubscriptionList
+//     PANICS on one, so such an account is not a degraded pod but a dead one.
+//     Real sites carry them: "k6.test-1.user" is a leftover subscription row
+//     from another load tool, with no isBot flag and no ".bot" suffix to mark
+//     it as anything else.
+//
+// The rule lives in Go rather than in the aggregation, deliberately. A regex
+// approximating subject.IsValidAccountToken is a second dialect of the same
+// rule — evaluated by a different engine, with its own reading of \s — and the
+// two can only ever drift apart. The cost is that unusable rows travel to the
+// client; they are a rounding error beside the population itself.
+func accountUsable(account string) bool {
+	return !model.IsBot(account) && subject.IsValidAccountToken(account)
+}
+
+// dropUnusable splits accounts by accountUsable. It is the belt under a source
+// that already applied the same rule: it must find nothing on the Mongo path,
+// and it keeps the guarantee for any source that does less. Whatever it does
+// find is returned rather than dropped quietly, so the caller's count stays
+// the whole truth.
+func dropUnusable(accounts []string) (kept, skipped []string) {
+	kept = accounts[:0:0]
 	for _, a := range accounts {
-		// An empty account builds subjects like chat.user..event.room, which
-		// subscribe cleanly and receive nothing; poolartifact refuses it too.
-		if a == "" || model.IsBot(a) {
+		if !accountUsable(a) {
+			skipped = append(skipped, a)
 			continue
 		}
 		kept = append(kept, a)
 	}
-	return kept
+	return kept, skipped
+}
+
+// skipSample bounds what a log line or an error quotes from a skipped set: a
+// site that churns out thousands of unusable rows must not turn one warning
+// into thousands of lines. The count carries the scale; the sample carries the
+// shape, which is what tells an operator WHICH leftover to clean up.
+const skipSample = 5
+
+// appendSkipSample adds account to a bounded sample of skipped accounts.
+//
+// Blank names are counted but never quoted. A row whose u.account is empty or
+// absent is malformed rather than misnamed: printing "" tells an operator
+// nothing and, since it sorts first, would take a slot from the names that do
+// — "k6.test-1.user" is the whole point of quoting any.
+func appendSkipSample(sample []string, account string) []string {
+	if account == "" || len(sample) >= skipSample {
+		return sample
+	}
+	return append(sample, account)
 }
 
 // exportPool reads the population, publishes the artifact the fleet consumes
 // and the manifest that explains it.
 func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, opts poolExportOptions) (poolExportResult, error) {
-	accounts, err := src.channelSubscriberAccounts(ctx, opts.SiteID, opts.Limit)
+	cand, err := src.channelSubscriberAccounts(ctx, opts.SiteID, opts.Limit)
 	if err != nil {
 		return poolExportResult{}, fmt.Errorf("list channel subscribers for %s: %w", opts.SiteID, err)
 	}
-	accounts = dropUnusable(accounts)
+	// The source reports what it skipped while bounding the run; the belt adds
+	// anything it let through. Summed, because either alone under-reports.
+	accounts, beltSkipped := dropUnusable(cand.Accounts)
+	skipped := cand.Skipped + len(beltSkipped)
+	// The belt's catches take the sample slots first. They are the ones a
+	// source did NOT report, so they are evidence that its own filtering and
+	// its own counting disagree — appending them after a full source sample
+	// would drop exactly the names worth reading.
+	var sample []string
+	for _, a := range beltSkipped {
+		sample = appendSkipSample(sample, a)
+	}
+	for _, a := range cand.Sample {
+		sample = appendSkipSample(sample, a)
+	}
 	// The failure this export exists to prevent: a fleet that starts against
 	// nobody reports a healthy zero. Fail here, in the tool that can say why.
 	if len(accounts) == 0 {
+		if skipped > 0 {
+			// A different failure from an unused site, and a different fix:
+			// these rows exist, they are just unusable. Name them, or the
+			// operator is left guessing which tool left them behind.
+			return poolExportResult{}, fmt.Errorf(
+				"site %q has %d channel subscribers but none a clientsim run can connect as (e.g. %q)",
+				opts.SiteID, skipped, sample)
+		}
 		return poolExportResult{}, fmt.Errorf("site %q has no accounts with a channel subscription", opts.SiteID)
 	}
 	if opts.Limit > 0 && len(accounts) > opts.Limit {
@@ -213,7 +319,7 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 	manifestKey := pub.Key(opts.SiteID, opts.RunID, poolManifestName)
 	if err := pub.PutJSON(ctx, manifestKey, poolManifest{
 		RunID: opts.RunID, SiteID: opts.SiteID, ConfigDigest: digest,
-		Accounts: len(accounts), Limit: opts.Limit,
+		Accounts: len(accounts), SkippedAccounts: skipped, Limit: opts.Limit,
 		Query: poolExportQuery, Source: "mongodb",
 		ExportedAt: time.Now().UTC(),
 	}); err != nil {
@@ -236,6 +342,7 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 	return poolExportResult{
 		Accounts: len(accounts), ConfigDigest: digest,
 		ArtifactKey: artifactKey, ManifestKey: manifestKey,
+		Skipped: skipped, SkippedSample: sample,
 	}, nil
 }
 
@@ -243,7 +350,7 @@ func exportPool(ctx context.Context, src poolAccountSource, pub poolPublisher, o
 // collection.
 type mongoPoolSource struct{ db *mongo.Database }
 
-func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID string, limit int) ([]string, error) {
+func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID string, limit int) (poolCandidates, error) {
 	// $group, not $lookup — no join, and it projects to the single field the
 	// export needs. $sort after the group makes the order stable, which is
 	// what shardSlice depends on: every clientsim pod slices the same array,
@@ -266,37 +373,25 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 			// so it fails safe in the same direction as roomGlobal.
 			"origin": bson.M{"$ne": model.OriginTeams},
 		}}},
-		// Bots hold channel subscriptions like anyone else; see dropUnusable for
-		// why they cannot be in a clientsim pool. The exclusion runs AFTER the
-		// group, on the account, not before it on the row: an account with one
-		// flagged row and one row whose flag was never written would otherwise
-		// have the flagged row filtered out and survive on the other — the
-		// exact hole the two layers exist to close, reopened by filter order.
+		// Bots hold channel subscriptions like anyone else; see accountUsable
+		// for why they cannot be in a clientsim pool. The exclusion runs AFTER
+		// the group, on the account, not before it on the row: an account with
+		// one flagged row and one row whose flag was never written would
+		// otherwise have the flagged row filtered out and survive on the other.
 		// $max over the group returns true if ANY row carries the flag.
+		//
+		// This is the population's definition — which subscriptions count —
+		// not a judgement about the account string. Everything of that second
+		// kind is decided below, in Go, where it can also be counted.
 		{{Key: "$group", Value: bson.M{"_id": "$u.account", "isBot": bson.M{"$max": "$u.isBot"}}}},
 		{{Key: "$match", Value: bson.M{"isBot": bson.M{"$ne": true}}}},
-		// The ".bot" suffix is excluded HERE too, not only in dropUnusable. The
-		// $limit below bounds whatever reaches it, so a legacy account the
-		// flag never marked would otherwise be counted against --limit and
-		// then dropped in Go — the caller asks for N, the site holds more than
-		// N eligible accounts, and the run still gets fewer. Filtering before
-		// the bound makes the bound mean what it says. dropUnusable stays as the
-		// belt for any other source.
-		// Both exclusions sit before the bound, for one reason: $limit counts
-		// whatever reaches it. An empty account sorts FIRST, so leaving it to
-		// the Go pass lets it consume a --limit slot and then vanish — a site
-		// with eligible accounts reports none. Same for a ".bot" suffix the
-		// flag never marked.
-		{{Key: "$match", Value: bson.M{
-			"_id": bson.M{"$nin": bson.A{"", nil}, "$not": bson.Regex{Pattern: `\.bot$`}},
-		}}},
 		{{Key: "$sort", Value: bson.M{"_id": 1}}},
-		// Bound the cursor server-side. cur.All materialises whatever comes
-		// back, so applying --limit only afterwards holds the WHOLE site
-		// population in the Job's heap first — and an unbounded export has no
-		// ceiling at all until the artifact's own account cap rejects it, long
-		// after the memory was spent. maxAccounts+1 keeps that cap detectable.
-		{{Key: "$limit", Value: int64(cursorLimit(limit))}},
+		// No $limit stage. The bound counts USABLE accounts, and only Go knows
+		// which those are, so bounding here would count rows that are then
+		// dropped — the caller asks for N and the run gets fewer. The cursor
+		// below stops early instead, so the Job's heap holds the bound, not
+		// the population. The cost is a $sort the server cannot cap at top-N;
+		// it sorts the grouped keys, which the $group already materialised.
 	}
 	// $group and $sort are blocking stages with a per-stage memory limit; a
 	// site large enough to be worth load-testing is exactly the one that
@@ -304,26 +399,87 @@ func (m mongoPoolSource) channelSubscriberAccounts(ctx context.Context, siteID s
 	cur, err := m.db.Collection("subscriptions").Aggregate(ctx, pipeline,
 		options.Aggregate().SetAllowDiskUse(true))
 	if err != nil {
-		return nil, fmt.Errorf("aggregate channel subscribers: %w", err)
+		return poolCandidates{}, fmt.Errorf("aggregate channel subscribers: %w", err)
 	}
 	defer cur.Close(ctx) //nolint:errcheck // read-only cursor
-	var rows []struct {
-		Account string `bson:"_id"`
-	}
-	if err := cur.All(ctx, &rows); err != nil {
-		return nil, fmt.Errorf("read channel subscribers: %w", err)
-	}
-	accounts := make([]string, 0, len(rows))
-	for _, r := range rows {
-		// An empty account builds subjects like chat.user..event.room, which
-		// subscribe cleanly and receive nothing. poolartifact.Write refuses
-		// them too; dropping here keeps the count in the manifest honest.
-		if r.Account == "" {
+
+	// An unbounded export still gets a bound — maxAccounts+1, so a population
+	// over the artifact cap is DETECTED by the extra account rather than
+	// silently truncated to it.
+	return collectUsableAccounts(ctx, cur, cursorLimit(limit))
+}
+
+// accountRows is the slice of *mongo.Cursor collectUsableAccounts needs.
+// Declared here, in the consumer, so the walk that decides the bound and the
+// skip evidence can be tested without a database — it is the part of this file
+// most worth getting wrong quietly.
+type accountRows interface {
+	Next(ctx context.Context) bool
+	Decode(v any) error
+	Err() error
+}
+
+// collectUsableAccounts walks sorted candidates and stops once want USABLE
+// accounts are in hand, counting everything it passed over.
+//
+// The bound is applied here rather than as a $limit for two reasons that are
+// really one: only this layer knows which accounts a run can connect as, so a
+// server-side bound would count rows that are then dropped (--limit N quietly
+// delivering fewer), and a server-side filter would hide those rows from the
+// only layer that can report them. Stopping early keeps the Job's heap sized
+// by the bound rather than by the site.
+func collectUsableAccounts(ctx context.Context, rows accountRows, want int) (poolCandidates, error) {
+	var out poolCandidates
+	for rows.Next(ctx) {
+		// A pointer, because a row whose u.account is absent groups under null
+		// and a string field cannot decode it. Reading it here rather than
+		// excluding it in the pipeline keeps the aggregation free of any
+		// judgement about the account — and a row with no account is then
+		// counted like any other candidate a run cannot connect as, instead of
+		// being the one kind that disappears silently.
+		var row struct {
+			Account *string `bson:"_id"`
+		}
+		if err := rows.Decode(&row); err != nil {
+			return poolCandidates{}, fmt.Errorf("decode channel subscriber: %w", err)
+		}
+		var account string
+		if row.Account != nil {
+			account = *row.Account
+		}
+		if !accountUsable(account) {
+			// Counted, not passed over in silence: this walk is the only place
+			// that ever sees "k6.test-1.user", so if it says nothing, nothing
+			// downstream can.
+			out.Skipped++
+			out.Sample = appendSkipSample(out.Sample, account)
 			continue
 		}
-		accounts = append(accounts, r.Account)
+		out.Accounts = append(out.Accounts, account)
+		if len(out.Accounts) >= want {
+			// The bound is the caller's, so the walk ends here — and with it
+			// what this export can claim to know: junk sorting after the last
+			// account taken is never read, and never counted. Walking on to
+			// total it would trade the caller's bound for a census.
+			break
+		}
 	}
-	return accounts, nil
+	if err := rows.Err(); err != nil {
+		return poolCandidates{}, fmt.Errorf("read channel subscribers: %w", err)
+	}
+	return out, nil
+}
+
+// logSkippedAccounts is the operator-facing half of the skip evidence. Not an
+// error — one stale row must not block a run the rest of the site can serve —
+// but not silent either: the day this count stops being a handful of load-tool
+// leftovers, the pool is quietly shrinking and this is where it shows.
+func logSkippedAccounts(siteID string, skipped int, sample []string) {
+	if skipped == 0 {
+		return
+	}
+	slog.Warn("skipped accounts a clientsim run cannot connect as",
+		"siteId", siteID, "skipped", skipped, "sample", sample)
 }
 
 func runPoolExport(ctx context.Context, cfg *config, args []string) int {
@@ -376,8 +532,10 @@ func runPoolExport(ctx context.Context, cfg *config, args []string) int {
 		slog.Error("pool export", "error", err)
 		return 1
 	}
+	logSkippedAccounts(cfg.SiteID, res.Skipped, res.SkippedSample)
 	slog.Info("pool exported",
 		"runId", *runID, "siteId", cfg.SiteID, "accounts", res.Accounts,
+		"skipped", res.Skipped,
 		"configDigest", res.ConfigDigest,
 		"artifactKey", res.ArtifactKey, "manifestKey", res.ManifestKey)
 	return 0
