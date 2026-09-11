@@ -13,11 +13,14 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// PublishFunc publishes data; non-empty msgID sets Nats-Msg-Id for JetStream stream-level dedup.
-type PublishFunc func(ctx context.Context, subj string, data []byte, msgID string) error
+// PublishFunc publishes data; non-empty msgID sets Nats-Msg-Id for JetStream
+// stream-level dedup. Aliased to the pkg/outbox type so the handler and
+// ForwardWithFailover cannot drift apart.
+type PublishFunc = outbox.PublishFunc
 
 // Handler forwards federation relay events off the OUTBOX stream to their
 // destination sites' INBOX. It holds no store — it is a pure NATS→NATS relay.
@@ -59,12 +62,14 @@ func (h *Handler) HandleEvent(ctx context.Context, subj string, data []byte) err
 	// Redelivery is idempotent (DedupID), so a timed-out-but-delivered forward re-forwards safely.
 	pubCtx, cancel := context.WithTimeout(ctx, federationForwardTimeout)
 	defer cancel()
-	if err := h.publish(pubCtx, subject.InboxExternal(destSiteID, eventType), evt.Envelope, evt.DedupID); err != nil {
+	if err := outbox.ForwardWithFailover(pubCtx, h.publish, destSiteID, eventType, evt.Envelope, evt.DedupID); err != nil {
 		if errors.Is(err, nats.ErrMaxPayload) {
 			// Rejected client-side before the wire, so every redelivery fails the
-			// same way. This lane is MaxDeliver=-1 with MaxAckPending=1 per peer:
-			// a Nak would park every later event for that peer behind this one
-			// forever, so drop the single oversized event instead.
+			// same way — on the failover lane too, since the payload is what is
+			// oversized, not the destination. This lane is MaxDeliver=-1 with
+			// MaxAckPending=1 per peer: a Nak would park every later event for
+			// that peer behind this one forever, so drop the single oversized
+			// event instead.
 			return errcode.Permanent(errcode.Internal(
 				fmt.Sprintf("outbox %s event for %s exceeds broker max_payload", eventType, destSiteID)))
 		}

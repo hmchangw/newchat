@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
 
@@ -94,6 +95,7 @@ type config struct {
 
 	Consumer  stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	Buddy     natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
@@ -211,6 +213,16 @@ func main() {
 	// Mode gates which consumers this pod binds. "teams" runs only the
 	// MESSAGES-TEAMS migrated-history consumer; "default" runs everything else.
 	var collections []Collection
+	// The failover lane rides the default mode only, so these stay nil on a
+	// teams pod and the append below is a no-op there.
+	var (
+		buddyConn       *o11ynats.Conn
+		buddyJS         o11ynats.JetStream
+		failoverMsgColl *messageCollection
+	)
+	// Default mode only: a teams pod is a migration path with no standby stream,
+	// so it has no buddy lane and keeps the fail-fast home dial.
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile, sdk)
 	if cfg.Mode == "teams" {
 		// Bound to MESSAGES-TEAMS: message-worker's teams mode persists migrated Teams
 		// history with no .created event on the canonical stream, so this indexes off
@@ -231,6 +243,26 @@ func main() {
 		botMsgResolver.metrics = esMetrics.forCollection(botMsgColl.ConsumerName())
 		botMsgColl.parentResolver = botMsgResolver
 
+		// Fourth consumer over messageCollection, bound to the buddy-hosted
+		// MESSAGES-CANONICAL-FAILOVER. Messages this site validates while its own
+		// NATS is down still need indexing, and Elasticsearch is unaffected by that
+		// outage, so only the source stream differs. Default mode only: a teams pod
+		// is a migration path with no standby stream.
+		failoverMsgColl = newFailoverMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, cfg.DevMode)
+		failoverMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
+
+		// The buddy dial never fails startup — on any failure buddyJS stays nil, the
+		// failover collection is skipped and the home lanes keep indexing.
+		buddyConn = dialer.Bind(ctx,
+			func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+				if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(bjs),
+					stream.MessagesCanonicalFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+					return err
+				}
+				buddyJS = bjs
+				return nil
+			})
+
 		collections = []Collection{
 			msgColl,
 			botMsgColl,
@@ -238,6 +270,9 @@ func main() {
 			newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
 			newUserRoomCollection(cfg.UserRoomIndex, cfg.DevMode),
 		}
+	}
+	if buddyJS != nil {
+		collections = append(collections, failoverMsgColl)
 	}
 
 	for _, coll := range collections {
@@ -270,16 +305,12 @@ func main() {
 		}
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	// Lazy with a buddy: a pod that restarts while home NATS is down must still
+	// boot and index the failover collection, and join the home collections when
+	// home returns.
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-	// Local JetStream consumers use the o11y facade so Fetch deliveries carry consumer spans;
-	// the HR domain path below stays raw because the facade has no domain-scoped constructor.
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -297,73 +328,38 @@ func main() {
 
 	bulkFlushInterval := time.Duration(cfg.BulkFlushInterval) * time.Second
 	stopCh := make(chan struct{})
-	doneChs := make([]chan struct{}, 0, len(collections))
-
-	// Multiple collections can share the same stream (spotlight + user-room both consume INBOX);
-	// track which streams have already been created to avoid redundant CreateOrUpdateStream calls.
-	createdStreams := make(map[string]struct{}, len(collections))
+	// loops tracks every consumer loop so shutdown can wait for them. Guarded:
+	// the home collections are wired by a deferred bind that may land while
+	// shutdown is already reading the list.
+	var loops struct {
+		mu       sync.Mutex
+		stopping bool
+		done     []chan struct{}
+	}
 
 	// INBOX is owned by inbox-worker; HR is owned by hr-syncer. search-sync-worker is a pure consumer of both and must not create their schemas.
 	inboxName := stream.Inbox(cfg.SiteID).Name
 	hrName := stream.OrgSyncStream(cfg.HRCentralSiteID).Name
+	// The failover canonical stream lives on the buddy cluster and was already
+	// readied there; it must not be created against the home connection.
+	failoverStreamName := stream.MessagesCanonicalFailover(cfg.SiteID).Name
 
-	for _, coll := range collections {
-		streamCfg := coll.StreamConfig(cfg.SiteID)
-		// Skip INBOX and HR bootstrap — those streams are owned by other services (inbox-worker /
-		// hr-syncer); consumer creation still runs for collections that read from them.
-		if cfg.Bootstrap.Enabled && streamCfg.Name != inboxName && streamCfg.Name != hrName {
-			if _, alreadyCreated := createdStreams[streamCfg.Name]; !alreadyCreated {
-				if _, err := js.CreateOrUpdateStream(ctx, streamCfg); err != nil {
-					slog.Error("create stream failed", "stream", streamCfg.Name, "error", err)
-					os.Exit(1)
-				}
-				createdStreams[streamCfg.Name] = struct{}{}
-				slog.Info("stream bootstrapped", "stream", streamCfg.Name)
-			}
-		}
-
-		consumerCfg := buildConsumerConfig(cfg.Consumer, coll, cfg.SiteID)
-
-		// The HR (spotlight-org) collection reads OrgSyncStream; when a remote HR domain is configured,
-		// create its consumer against the domain-scoped context — every other collection uses the shared js.
-		var fetcher msgFetcher
-		if streamCfg.Name == hrName && hrJS != nil {
-			cons, err := hrJS.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
-			if err != nil {
-				slog.Error("create consumer failed",
-					"stream", streamCfg.Name,
-					"consumer", coll.ConsumerName(),
-					"domain", cfg.HRJetStreamDomain,
-					"error", err,
-				)
-				os.Exit(1)
-			}
-			fetcher = rawConsumerAdapter{cons}
-			slog.Info("HR consumer bound to remote JetStream domain",
-				"domain", cfg.HRJetStreamDomain,
-				"stream", streamCfg.Name,
-				"consumer", coll.ConsumerName(),
-			)
-		} else {
-			cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
-			if err != nil {
-				slog.Error("create consumer failed",
-					"stream", streamCfg.Name,
-					"consumer", coll.ConsumerName(),
-					"error", err,
-				)
-				os.Exit(1)
-			}
-			fetcher = o11yConsumerAdapter{cons}
-		}
-
+	// wire starts one collection's consumer loop over an already-bound fetcher.
+	wire := func(ctx context.Context, coll Collection, streamName string, consumerCfg jetstream.ConsumerConfig, fetcher msgFetcher) {
 		handler := NewHandler(&engineAdapter{engine: engine}, coll, cfg.BulkBatchSize)
 		handler.metrics = esMetrics.forCollection(coll.ConsumerName())
 		doneCh := make(chan struct{})
-		doneChs = append(doneChs, doneCh)
+		loops.mu.Lock()
+		if loops.stopping {
+			// Landed after shutdown began: nothing to start, nothing to wait for.
+			loops.mu.Unlock()
+			return
+		}
+		loops.done = append(loops.done, doneCh)
+		loops.mu.Unlock()
 
 		slog.Info("collection wired",
-			"stream", streamCfg.Name,
+			"stream", streamName,
 			"consumer", coll.ConsumerName(),
 			"filters", consumerCfg.FilterSubjects,
 		)
@@ -375,8 +371,88 @@ func main() {
 		}, stopCh, doneCh)
 	}
 
+	// The failover collection binds now, on the buddy: it is the one lane that
+	// must index while home is down. Its consumer failing leaves the home
+	// collections indexing rather than taking the process down for an optional
+	// standby lane.
+	failoverBound := false
+	if buddyJS != nil {
+		consumerCfg := buildConsumerConfig(cfg.Consumer, failoverMsgColl, cfg.SiteID)
+		cons, err := buddyJS.CreateOrUpdateConsumer(ctx, failoverStreamName, consumerCfg)
+		if err != nil {
+			slog.Warn("create failover consumer failed; indexing without the failover collection",
+				"stream", failoverStreamName, "consumer", failoverMsgColl.ConsumerName(), "error", err)
+		} else {
+			wire(ctx, failoverMsgColl, failoverStreamName, consumerCfg, o11yConsumerAdapter{cons})
+			failoverBound = true
+			slog.Info("failover consumer bound to the buddy cluster",
+				"stream", failoverStreamName, "consumer", failoverMsgColl.ConsumerName(),
+				"buddy_site_id", cfg.Buddy.SiteID)
+		}
+	}
+
+	// Home collections, bound once the home connection is up — immediately in
+	// the ordinary case, later if the pod booted during an outage. Dev-only
+	// stream bootstrap rides inside for the same reason: it needs the server.
+	homeLanes, err := natsutil.BindWhenConnected(ctx, nc, "search-sync", func(ctx context.Context) (func(), error) {
+		// Multiple collections can share the same stream (spotlight + user-room both consume INBOX);
+		// track which streams have already been created to avoid redundant CreateOrUpdateStream calls.
+		createdStreams := make(map[string]struct{}, len(collections))
+		for _, coll := range collections {
+			streamCfg := coll.StreamConfig(cfg.SiteID)
+			if streamCfg.Name == failoverStreamName {
+				continue
+			}
+			// Skip INBOX and HR bootstrap — those streams are owned by other services (inbox-worker /
+			// hr-syncer); consumer creation still runs for collections that read from them.
+			if cfg.Bootstrap.Enabled && streamCfg.Name != inboxName && streamCfg.Name != hrName {
+				if _, alreadyCreated := createdStreams[streamCfg.Name]; !alreadyCreated {
+					if _, err := js.CreateOrUpdateStream(ctx, streamCfg); err != nil {
+						return nil, fmt.Errorf("create stream %s: %w", streamCfg.Name, err)
+					}
+					createdStreams[streamCfg.Name] = struct{}{}
+					slog.Info("stream bootstrapped", "stream", streamCfg.Name)
+				}
+			}
+
+			consumerCfg := buildConsumerConfig(cfg.Consumer, coll, cfg.SiteID)
+
+			// The HR (spotlight-org) collection reads OrgSyncStream; when a remote HR domain is configured,
+			// create its consumer against the domain-scoped context — every other collection uses the shared js.
+			var fetcher msgFetcher
+			if streamCfg.Name == hrName && hrJS != nil {
+				cons, err := hrJS.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
+				if err != nil {
+					return nil, fmt.Errorf("create consumer %s on %s (domain %s): %w",
+						coll.ConsumerName(), streamCfg.Name, cfg.HRJetStreamDomain, err)
+				}
+				fetcher = rawConsumerAdapter{cons}
+				slog.Info("HR consumer bound to remote JetStream domain",
+					"domain", cfg.HRJetStreamDomain,
+					"stream", streamCfg.Name,
+					"consumer", coll.ConsumerName(),
+				)
+			} else {
+				cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
+				if err != nil {
+					return nil, fmt.Errorf("create consumer %s on %s: %w", coll.ConsumerName(), streamCfg.Name, err)
+				}
+				fetcher = o11yConsumerAdapter{cons}
+			}
+			wire(ctx, coll, streamCfg.Name, consumerCfg, fetcher)
+		}
+		// The loops stop through stopCh at shutdown; there is nothing lane-
+		// specific to stop here.
+		return func() {}, nil
+	})
+	if err != nil {
+		slog.Error("bind home collections failed", "error", err)
+		os.Exit(1)
+	}
+
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLanes.Ready, func() bool { return failoverBound }),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -397,12 +473,18 @@ func main() {
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error {
+		func(context.Context) error {
+			loops.mu.Lock()
+			loops.stopping = true
+			loops.mu.Unlock()
 			close(stopCh)
 			return nil
 		},
 		func(ctx context.Context) error {
-			for _, ch := range doneChs {
+			loops.mu.Lock()
+			done := append([]chan struct{}(nil), loops.done...)
+			loops.mu.Unlock()
+			for _, ch := range done {
 				select {
 				case <-ch:
 				case <-ctx.Done():
@@ -412,6 +494,7 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		// obsShutdown LAST so drain-window flush spans/logs are exported.

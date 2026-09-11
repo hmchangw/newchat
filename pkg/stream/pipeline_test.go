@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 func TestPipeline_UnmarshalText(t *testing.T) {
@@ -59,4 +60,70 @@ func TestResolve_Bot(t *testing.T) {
 	assert.Equal(t, "BOT-PUSH-NOTIFICATION-site-a", w.PushStream.Name)
 	assert.Equal(t, "chat.bot.notification.push.site-a.send", w.PushSendSubject)
 	assert.Equal(t, "chat.bot.notification.push.site-a.>", w.PushInputWildcard)
+}
+
+func TestResolve_UserPipelineHasFailover(t *testing.T) {
+	w := stream.Resolve(stream.PipelineUser, "site-a")
+
+	require.True(t, w.HasFailover())
+	assert.Equal(t, "MESSAGES-CANONICAL-FAILOVER-site-a", w.CanonicalFailoverStream.Name)
+	assert.Equal(t, "chat.failover.msg.canonical.site-a.created", w.CanonicalFailoverCreated)
+	assert.Equal(t, "chat.failover.msg.canonical.site-a.>", w.CanonicalFailoverWildcard)
+	assert.Equal(t, "PUSH-NOTIFICATION-FAILOVER-site-a", w.PushFailoverStream.Name)
+	assert.Equal(t, "chat.failover.push.site-a.send", w.PushFailoverSendSubject)
+	assert.Equal(t, "chat.failover.push.site-a.>", w.PushFailoverInputWildcard)
+}
+
+// Bots are not displaced users; the bot pipeline has no failover lane, and
+// HasFailover is how a service skips it without a mode check at each call site.
+func TestResolve_BotPipelineHasNoFailover(t *testing.T) {
+	w := stream.Resolve(stream.PipelineBot, "site-a")
+
+	assert.False(t, w.HasFailover())
+	assert.Empty(t, w.CanonicalFailoverStream.Name)
+	assert.Empty(t, w.PushFailoverStream.Name)
+}
+
+// Three services hand-rolled this suffix; the shared derivation is what keeps
+// them from drifting to different names on the same buddy cluster.
+func TestPipeline_FailoverConsumerName(t *testing.T) {
+	tests := []struct {
+		name string
+		p    stream.Pipeline
+		base string
+		want string
+	}{
+		{"user pipeline keeps the base", stream.PipelineUser, "broadcast-worker", "broadcast-worker-failover"},
+		{"bot pipeline keeps its prefix", stream.PipelineBot, "broadcast-worker", "bot-broadcast-worker-failover"},
+		{"user notification worker", stream.PipelineUser, "notification-worker", "notification-worker-failover"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.p.FailoverConsumerName(tt.base))
+		})
+	}
+}
+
+// The failover durable must never collide with the home one, on either
+// pipeline — a shared durable would have the two lanes clobber each other's
+// cursor on a single-server dev NATS.
+func TestPipeline_FailoverConsumerNameDiffersFromHome(t *testing.T) {
+	for _, p := range []stream.Pipeline{stream.PipelineUser, stream.PipelineBot} {
+		assert.NotEqual(t, p.ConsumerName("svc"), p.FailoverConsumerName("svc"))
+	}
+}
+
+// The push request subject is the one wiring value that differs per lane, so
+// notification-worker asks the wiring for it by lane rather than carrying the
+// raw subject string as a stand-in for lane identity.
+func TestWiring_PushSend(t *testing.T) {
+	w := stream.Resolve(stream.PipelineUser, "site-a")
+	assert.Equal(t, w.PushSendSubject, w.PushSend(subject.LaneHome))
+	assert.Equal(t, w.PushFailoverSendSubject, w.PushSend(subject.LaneFailover))
+	assert.NotEqual(t, w.PushSend(subject.LaneHome), w.PushSend(subject.LaneFailover))
+
+	// The bot pipeline has no failover lane; asking for it must not invent a subject.
+	bot := stream.Resolve(stream.PipelineBot, "site-a")
+	assert.Equal(t, bot.PushSendSubject, bot.PushSend(subject.LaneHome))
+	assert.Empty(t, bot.PushSend(subject.LaneFailover))
 }

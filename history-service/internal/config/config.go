@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomtimescache"
 	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -58,20 +59,24 @@ type NATSConfig struct {
 
 // Config is the top-level configuration for the history-service.
 type Config struct {
-	SiteID                  string          `env:"SITE_ID"                    envDefault:"site-local"`
-	HealthAddr              string          `env:"HEALTH_ADDR"                envDefault:":8081"`
-	PProfEnabled            bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr             string          `env:"METRICS_ADDR"               envDefault:":9090"`
-	Cassandra               CassandraConfig `envPrefix:"CASSANDRA_"`
-	Mongo                   MongoConfig     `envPrefix:"MONGO_"`
-	Pool                    mongoutil.PoolConfig
-	NATS                    NATSConfig `envPrefix:"NATS_"`
-	MessageBucketHours      int        `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
-	MessageReadMaxBuckets   int        `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
-	MessageHistoryFloorDays int        `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
-	LargeRoomThreshold      int        `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
-	MaxPinnedPerRoom        int        `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
-	PinEnabled              bool       `env:"PIN_ENABLED"                 envDefault:"true"`
+	SiteID       string          `env:"SITE_ID"                    envDefault:"site-local"`
+	HealthAddr   string          `env:"HEALTH_ADDR"                envDefault:":8081"`
+	PProfEnabled bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr  string          `env:"METRICS_ADDR"               envDefault:":9090"`
+	Cassandra    CassandraConfig `envPrefix:"CASSANDRA_"`
+	Mongo        MongoConfig     `envPrefix:"MONGO_"`
+	Pool         mongoutil.PoolConfig
+	NATS         NATSConfig `envPrefix:"NATS_"`
+	// Buddy is the cluster hosting this site's standby failover lanes. A second
+	// router binds there so a client displaced by this site's NATS outage still
+	// reaches this site's history, against this site's databases.
+	Buddy                   natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	MessageBucketHours      int                  `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
+	MessageReadMaxBuckets   int                  `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
+	MessageHistoryFloorDays int                  `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
+	LargeRoomThreshold      int                  `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
+	MaxPinnedPerRoom        int                  `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
+	PinEnabled              bool                 `env:"PIN_ENABLED"                 envDefault:"true"`
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`

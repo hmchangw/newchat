@@ -186,7 +186,7 @@ func TestHandleMessage_DispatchesByEvent(t *testing.T) {
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
 			}
 
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 			err = h.HandleMessage(context.Background(), data)
 
 			if tc.wantErr {
@@ -265,7 +265,7 @@ func TestHandler_HandleMessage_ChannelRoom(t *testing.T) {
 					Return([]model.User{senderUser}, nil)
 			}
 
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 			err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", tc.content, msgTime))
 			require.NoError(t, err)
 
@@ -361,7 +361,7 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 			}
 
 			keyStore := NewMockRoomKeyProvider(ctrl)
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 			err := h.HandleMessage(context.Background(), data)
 			require.NoError(t, err)
 
@@ -403,7 +403,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		us := NewMockUserStore(ctrl)
 		pub := &mockPublisher{}
 		keyStore := NewMockRoomKeyProvider(ctrl)
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 		err := h.HandleMessage(context.Background(), []byte("not json"))
 		require.Error(t, err)
@@ -425,7 +425,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 			Return(roommetacache.Meta{}, fmt.Errorf("get room meta: %w", mongo.ErrNoDocuments))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "get room meta")
@@ -446,7 +446,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // sender lookup
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
 		require.NoError(t, err)
 		assert.Empty(t, pub.records)
@@ -463,7 +463,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(nil, errors.New("db error"))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		evt := model.MessageEvent{
 			Event:  model.EventCreated,
 			SiteID: "site-a",
@@ -494,7 +494,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		// Single lookup: sender is both the message author and the mentioned account, so the deduped list is just ["sender"].
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return([]model.User{senderUser}, nil)
 
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hey @sender", msgTime))
 		require.NoError(t, err)
 
@@ -519,7 +519,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, errors.New("db error")) // sender lookup
 
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
 		require.NoError(t, err)
 
@@ -563,7 +563,7 @@ func TestHandler_HandleMessage_DMRoom_PublishError(t *testing.T) {
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil) // sender lookup
 
 	keyStore := NewMockRoomKeyProvider(ctrl)
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	evt := model.MessageEvent{
 		Event:  model.EventCreated,
 		SiteID: "site-a",
@@ -594,7 +594,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
 
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errNoCurrentKey)
@@ -613,7 +613,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
 
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "get room key")
@@ -634,7 +634,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return([]model.User{{ID: "u-sender", Account: "sender", EngName: "Sender Lin", ChineseName: "寄件者", SiteID: "site-a"}}, nil)
 
-		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
 		require.NoError(t, err)
 
@@ -718,7 +718,7 @@ func TestHandler_HandleMessage_MissingRoomIsFatal(t *testing.T) {
 		Return(roommetacache.Meta{}, fmt.Errorf("get room meta ghost-room: %w", mongo.ErrNoDocuments))
 
 	keyStore := NewMockRoomKeyProvider(ctrl)
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	err := h.HandleMessage(context.Background(), makeMessageEvent("ghost-room", "hello", msgTime))
 	require.Error(t, err)
@@ -756,7 +756,7 @@ func TestHandleUpdated_ChannelRoomScopedPublish(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1, "channel: single room-scoped publish")
@@ -799,7 +799,7 @@ func TestHandleUpdated_AttachesMentionsToEditEvent(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1)
@@ -835,7 +835,7 @@ func TestHandleUpdated_AttachesMentionAllToEditEvent(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1)
@@ -869,7 +869,7 @@ func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1)
@@ -906,7 +906,7 @@ func TestHandleDeleted_OmitsPreviewWhenNil(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1)
@@ -942,7 +942,7 @@ func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1, "channel: single room-scoped publish")
@@ -977,7 +977,7 @@ func TestHandleUpdated_MissingEditedAt_ReturnsError(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	err = h.HandleMessage(context.Background(), data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing EditedAt")
@@ -1012,7 +1012,7 @@ func TestHandleDeleted_ChannelRoomScopedPublish(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1, "channel: single room-scoped publish")
@@ -1073,7 +1073,7 @@ func TestBroadcast_GlobalMode_AlwaysGlobal(t *testing.T) {
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), buildDeletedEventData(t)))
 
 	capturedSubjects := subjectsOf(pub)
@@ -1091,7 +1091,7 @@ func TestBroadcast_LocalMode_SameSiteUsesLocal(t *testing.T) {
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteLocal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteLocal))
 	require.NoError(t, h.HandleMessage(context.Background(), buildDeletedEventData(t)))
 
 	capturedSubjects := subjectsOf(pub)
@@ -1109,7 +1109,7 @@ func TestBroadcast_DualMode_SameSitePublishesBoth(t *testing.T) {
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteDual)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteDual))
 	require.NoError(t, h.HandleMessage(context.Background(), buildDeletedEventData(t)))
 
 	capturedSubjects := subjectsOf(pub)
@@ -1135,7 +1135,7 @@ func TestHandler_publishRoomEvent(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pub := &mockPublisher{}
-			h := &Handler{pub: pub, routeMode: tc.mode}
+			h := &Handler{pub: pub, routes: fixedRoutes(tc.mode)}
 			require.NoError(t, h.publishRoomEvent(context.Background(), "r1", tc.crossSite, nil, []byte("{}"), "test"))
 			assert.Equal(t, tc.want, subjectsOf(pub))
 		})
@@ -1148,7 +1148,7 @@ func TestHandler_publishRoomEvent(t *testing.T) {
 // re-subscribes.
 func TestHandler_publishRoomEvent_TransitionGrace(t *testing.T) {
 	pub := &mockPublisher{}
-	h := &Handler{pub: pub, routeMode: subject.RouteLocal}
+	h := &Handler{pub: pub, routes: fixedRoutes(subject.RouteLocal)}
 	flip := time.Now().UTC() // just flipped → within grace
 	require.NoError(t, h.publishRoomEvent(context.Background(), "r1", ptrBool(true), &flip, []byte("{}"), "test"))
 	assert.Equal(t, []string{"chat.local.room.r1.event", "chat.room.r1.event"}, subjectsOf(pub),
@@ -1161,7 +1161,7 @@ func TestHandler_publishRoomEvent_TransitionGrace(t *testing.T) {
 // JetStream redelivers.
 func TestHandler_publishRoomEvent_DualPartialFailure(t *testing.T) {
 	pub := &mockPublisher{failOn: map[string]error{"chat.local.room.r1.event": errors.New("local lane down")}}
-	h := &Handler{pub: pub, routeMode: subject.RouteDual}
+	h := &Handler{pub: pub, routes: fixedRoutes(subject.RouteDual)}
 
 	err := h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test")
 
@@ -1182,7 +1182,7 @@ func TestBroadcast_CrossSiteRoomAlwaysGlobal(t *testing.T) {
 			room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(true)}
 			store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, mode)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(mode))
 			require.NoError(t, h.HandleMessage(context.Background(), buildDeletedEventData(t)))
 
 			capturedSubjects := subjectsOf(pub)
@@ -1208,7 +1208,7 @@ func TestBroadcast_UnclassifiedRoomAlwaysGlobal(t *testing.T) {
 			room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"} // CrossSite unset (nil)
 			store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, mode)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(mode))
 			require.NoError(t, h.HandleMessage(context.Background(), buildDeletedEventData(t)))
 
 			capturedSubjects := subjectsOf(pub)
@@ -1235,7 +1235,7 @@ func TestHandleDeleted_MissingUpdatedAt_ReturnsError(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	err = h.HandleMessage(context.Background(), data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing UpdatedAt")
@@ -1277,7 +1277,7 @@ func TestHandleUpdated_DMRoom_FansOutToBothMembers(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2, "per-user fan-out: one publish per DM member")
@@ -1332,7 +1332,7 @@ func TestHandleDeleted_DMRoom_FansOutToBothMembers(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2, "per-user fan-out: one publish per DM member")
@@ -1388,7 +1388,7 @@ func TestHandleUpdated_BotDMRoom_SkipsBotAccount(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1, "botDM: only the human recipient gets the live event")
@@ -1441,7 +1441,7 @@ func TestHandler_HandleMessage_ChannelEncryptionDisabled(t *testing.T) {
 			}
 
 			// nil keyStore — handler must NOT dereference it when encrypt=false
-			h := NewHandler(store, us, pub, nil, defaultParentFetcher, false, subject.RouteGlobal)
+			h := NewHandler(store, us, pub, nil, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 			err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", tc.content, msgTime))
 			require.NoError(t, err)
 
@@ -1503,7 +1503,7 @@ func TestHandleReacted_ChannelRoomScopedPublish(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2, "channel: room-scoped publish + author notification")
@@ -1553,7 +1553,7 @@ func TestHandleReacted_DMFanOut(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 3, "DM: one event per non-bot account + author notification")
@@ -1587,7 +1587,7 @@ func TestHandleReacted_MissingDelta_LogsAndDrops(t *testing.T) {
 	}
 	data, _ := json.Marshal(&evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	var err error
 	terminal := terminalCountFor(t, "invalid_payload", func(ctx context.Context) {
 		err = h.HandleMessage(ctx, data)
@@ -1620,7 +1620,7 @@ func TestHandleReacted_MissingUpdatedAt_LogsAndDrops(t *testing.T) {
 	}
 	data, _ := json.Marshal(&evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	var err error
 	terminal := terminalCountFor(t, "invalid_payload", func(ctx context.Context) {
 		err = h.HandleMessage(ctx, data)
@@ -1684,7 +1684,7 @@ func TestHandleReacted_AuthorNotificationPolicy(t *testing.T) {
 			data, err := json.Marshal(&evt)
 			require.NoError(t, err)
 
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 			require.NoError(t, h.HandleMessage(context.Background(), data))
 
 			notif := findPublishRecord(pub.records, subject.Notification(tc.authorAccount))
@@ -1746,7 +1746,7 @@ func TestHandleReacted_AuthorNotification_RoomType(t *testing.T) {
 			data, err := json.Marshal(&evt)
 			require.NoError(t, err)
 
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 			require.NoError(t, h.HandleMessage(context.Background(), data))
 
 			notif := findPublishRecord(pub.records, subject.Notification("bob"))
@@ -1806,7 +1806,7 @@ func TestHandleReacted_AuthorPublishFailure_RoomFanOutStillSucceeds(t *testing.T
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data),
 		"author-notify failure must not NAK the canonical event")
 	require.NotNil(t, findPublishRecord(pub.records, subject.RoomEvent(roomID, true)),
@@ -1842,7 +1842,7 @@ func TestHandlePinned_ChannelRoomScopedPublish(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1)
@@ -1891,7 +1891,7 @@ func TestHandlePinned_DMRoom_FansOutToBothMembers(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2)
@@ -1924,7 +1924,7 @@ func TestHandlePinned_MissingPinnedAt_ReturnsError(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	err = h.HandleMessage(context.Background(), data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing PinnedAt")
@@ -1957,7 +1957,7 @@ func TestHandleUnpinned_ChannelRoomScopedPublish(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1)
@@ -2003,7 +2003,7 @@ func TestHandleUnpinned_DMRoom_FansOutToBothMembers(t *testing.T) {
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2)
@@ -2138,7 +2138,7 @@ func TestHandleServerBroadcast_ThreadReplyAdded_FansOutBadge(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	h.HandleServerBroadcast(context.Background(), data)
 
 	require.Len(t, pub.records, 1)
@@ -2184,7 +2184,7 @@ func TestHandleServerBroadcast_ThreadReplyAdded_PropagatesNewTlm(t *testing.T) {
 	data, err := json.Marshal(evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	h.HandleServerBroadcast(context.Background(), data)
 
 	require.Len(t, pub.records, 1)
@@ -2223,7 +2223,7 @@ func TestHandleServerBroadcast_ThreadReplyAdded_NilNewTlm_NoFieldInOutput(t *tes
 	data, err := json.Marshal(evt)
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	h.HandleServerBroadcast(context.Background(), data)
 
 	require.Len(t, pub.records, 1)
@@ -2261,7 +2261,7 @@ func TestHandleServerBroadcast_ThreadReplyAdded_MissingNewTCount_Skips(t *testin
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	h.HandleServerBroadcast(context.Background(), data)
 	assert.Empty(t, pub.records)
 }
@@ -2290,7 +2290,7 @@ func TestHandleServerBroadcast_ThreadReplyAdded_MissingParentMessageID_Skips(t *
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	h.HandleServerBroadcast(context.Background(), data)
 	assert.Empty(t, pub.records)
 }
@@ -2322,7 +2322,7 @@ func TestHandleServerBroadcast_ThreadReplyAdded_GetRoomError_LogsAndContinues(t 
 	data, _ := json.Marshal(evt)
 
 	// HandleServerBroadcast is fire-and-forget: errors are logged, not returned.
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	h.HandleServerBroadcast(context.Background(), data)
 	assert.Empty(t, pub.records)
 }
@@ -2361,7 +2361,7 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	// bob and carol (followers) + alice (sender) included for multi-device parity
@@ -2410,7 +2410,7 @@ func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testin
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 	// No other followers → sender still receives their own echo (multi-device parity).
 	require.Len(t, pub.records, 1)
@@ -2455,7 +2455,7 @@ func TestHandleThreadCreated_ChannelRoom_ParentAuthorFannedOutBeforeThreadRoomEx
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, parentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, parentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2497,7 +2497,7 @@ func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2, "DM thread reply fans out to all members")
@@ -2540,7 +2540,7 @@ func TestHandleThreadCreated_BotDMRoom_EmitsNewThreadMessage(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.NotEmpty(t, pub.records, "botDM thread reply fans out per member")
@@ -2584,7 +2584,7 @@ func TestHandleThreadCreated_DMRoom_WithMention(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 	require.Len(t, pub.records, 2)
 }
@@ -2625,7 +2625,7 @@ func TestHandleThreadCreated_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2683,7 +2683,7 @@ func TestHandleThreadCreated_ChannelRoom_UsesEventParent_SkipsFetch(t *testing.T
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, parentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, parentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2736,7 +2736,7 @@ func TestHandleThreadCreated_ChannelRoom_MissingSenderAccount_FallsBackToFetch(t
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, parentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, parentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2785,7 +2785,7 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	// bob and carol (followers) + alice (sender) included for multi-device parity
@@ -2841,7 +2841,7 @@ func TestHandleThreadUpdated_AttachesMentionsToEditEvent(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.NotEmpty(t, pub.records)
@@ -2895,7 +2895,7 @@ func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2943,7 +2943,7 @@ func TestHandleThreadDeleted_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2988,7 +2988,7 @@ func TestHandleThreadUpdated_ChannelRoom_GetThreadFollowersError(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	err := h.HandleMessage(context.Background(), data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "thread fan-out")
@@ -3031,7 +3031,7 @@ func TestHandleThreadUpdated_DMRoom_FansOutToAllMembers(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2)
@@ -3083,7 +3083,7 @@ func TestHandleThreadDeleted_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	// bob and carol (followers) + alice (sender) included for multi-device parity
@@ -3139,7 +3139,7 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	// delete events to bob (follower) + alice (sender, multi-device parity) + 1 badge update (to room channel)
@@ -3201,7 +3201,7 @@ func TestHandleThreadDeleted_DMRoom_FansOutToAllMembers(t *testing.T) {
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 2)
@@ -3224,7 +3224,7 @@ func TestPublishToThreadAccounts_AllFail_ReturnsError(t *testing.T) {
 	us := NewMockUserStore(ctrl)
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	h := NewHandler(store, us, failPub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, failPub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	err := h.publishToThreadAccounts(context.Background(), []string{"alice", "bob"}, []byte(`{}`), "parent-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "all 2 thread account publishes failed")
@@ -3239,7 +3239,7 @@ func TestPublishToThreadAccounts_PartialFail_ReturnsNil(t *testing.T) {
 	us := NewMockUserStore(ctrl)
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	h := NewHandler(store, us, failPub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, failPub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	// alice succeeds, bob fails — partial failure must not trigger redelivery.
 	err := h.publishToThreadAccounts(context.Background(), []string{"alice", "bob"}, []byte(`{}`), "parent-1")
 	require.NoError(t, err)
@@ -3252,7 +3252,7 @@ func TestPublishToThreadAccounts_Empty_NoOp(t *testing.T) {
 	pub := &mockPublisher{}
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.publishToThreadAccounts(context.Background(), nil, []byte(`{}`), "parent-1"))
 	assert.Empty(t, pub.records)
 }
@@ -3297,7 +3297,7 @@ func TestHandleCreated_NonRename_NoRoomRenamedEvent(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime)))
 
 	require.Len(t, pub.records, 1, "normal message: exactly one publish")
@@ -3414,7 +3414,7 @@ func TestHandleThreadCreated_PublishesThreadViewSubject(t *testing.T) {
 			store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 			us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
-			h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, tt.mode,
+			h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(tt.mode),
 				withThreadViewSubject(true))
 			require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
 
@@ -3433,7 +3433,7 @@ func TestHandleThreadCreated_ThreadViewPayloadMatchesFollowerPayload(t *testing.
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
 
@@ -3464,7 +3464,7 @@ func TestHandleThreadCreated_ThreadViewSubjectDisabled(t *testing.T) {
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
 
 	assert.Empty(t, pub.threadViewSubjects())
@@ -3491,7 +3491,7 @@ func TestHandleThreadCreated_EmptyFanOutStillPublishesThreadViewSubject(t *testi
 	})
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
@@ -3506,7 +3506,7 @@ func TestHandleThreadUpdated_PublishesThreadViewSubject(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventUpdated, msgTime)))
 
@@ -3521,7 +3521,7 @@ func TestHandleThreadDeleted_PublishesThreadViewSubject(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventDeleted, msgTime)))
 
@@ -3541,7 +3541,7 @@ func TestHandleThreadCreated_ThreadViewPublishFailureDoesNotFailHandler(t *testi
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	assert.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
 }
@@ -3561,7 +3561,7 @@ func TestPublishThreadViewEvent_Skips(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			pub := &mockPublisher{}
 			h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), pub, NewMockRoomKeyProvider(ctrl),
-				defaultParentFetcher, false, subject.RouteGlobal, withThreadViewSubject(tt.enabled))
+				defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal), withThreadViewSubject(tt.enabled))
 
 			h.publishThreadViewEvent(context.Background(), "room-1", tt.parentMsgID, nil, nil, tt.payload)
 
@@ -3590,7 +3590,7 @@ func TestHandleThreadCreated_DMRoom_PublishesNoThreadViewSubject(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
@@ -3642,7 +3642,7 @@ func TestHandleThreadCreated_ThreadViewSubjectIsEncrypted(t *testing.T) {
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
 
@@ -3668,7 +3668,7 @@ func TestHandleThreadUpdated_ThreadViewSubjectEncryptsEditedContent(t *testing.T
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventUpdated, msgTime)))
 
@@ -3697,7 +3697,7 @@ func TestHandleThreadCreated_ThreadViewSubjectSkippedWhenEncryptionFails(t *test
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, errors.New("keystore down"))
 
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal),
 		withThreadViewSubject(true))
 	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
 
@@ -3826,9 +3826,9 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 
 			var opts []handlerOption
 			if !tc.noFederate {
-				opts = append(opts, withOutboxFederation("site-a", rec.publish))
+				opts = append(opts, withOutboxFederation("site-a", rec.publish, subject.LaneHome))
 			}
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal, opts...)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal), opts...)
 
 			ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
 			require.NoError(t, h.HandleMessage(ctx, makeMessageEvent("room-1", tc.content, msgTime)))
@@ -3896,8 +3896,8 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), tc.wantLookup).Return(tc.users, tc.lookupErr)
 			}
 
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
-				withOutboxFederation("site-a", rec.publish))
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal),
+				withOutboxFederation("site-a", rec.publish, subject.LaneHome))
 
 			data, err := json.Marshal(model.MessageEvent{
 				Event:  model.EventUpdated,
@@ -4033,7 +4033,7 @@ func TestEventShapeViolations_ArePermanent(t *testing.T) {
 	newHandler := func(t *testing.T) *Handler {
 		ctrl := gomock.NewController(t)
 		return NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{},
-			NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+			NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	}
 
 	baseMsg := func() model.Message {
@@ -4145,7 +4145,7 @@ func TestChannelThreadFanOut_ParentFetchClassification(t *testing.T) {
 			data, err := json.Marshal(evt)
 			require.NoError(t, err)
 
-			h := NewHandler(store, us, pub, keyStore, stubParentFetcher{err: tc.fetchErr}, false, subject.RouteGlobal)
+			h := NewHandler(store, us, pub, keyStore, stubParentFetcher{err: tc.fetchErr}, false, fixedRoutes(subject.RouteGlobal))
 			err = h.HandleMessage(trackedDelivery(t, tc.attempt, 6), data)
 
 			require.Error(t, err)
@@ -4186,7 +4186,7 @@ func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
 func TestHandler_PublishMutation_MarshalFailureIsPermanent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{},
-		NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+		NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 	room := &model.Room{ID: "room-1", Type: model.RoomTypeChannel}
 
 	// A channel is unrepresentable in JSON: the encoder rejects it every time.
@@ -4209,7 +4209,7 @@ func TestHandler_PublishRoomEvent_OversizedPayloadIsPermanent(t *testing.T) {
 		pub.failOn[subj] = nats.ErrMaxPayload
 	}
 	h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), pub,
-		NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+		NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	err := h.publishRoomEvent(context.Background(), roomID, nil, nil, []byte(`{}`), "message_deleted event")
 
@@ -4217,4 +4217,58 @@ func TestHandler_PublishRoomEvent_OversizedPayloadIsPermanent(t *testing.T) {
 	ec, perm := errcode.IsPermanent(err)
 	require.True(t, perm, "an oversized publish can never succeed on redelivery")
 	assert.Equal(t, errcode.CodeInternal, ec.Code)
+}
+
+// A same-site room's events must go to the GLOBAL root when the message arrived
+// on the failover lane — every client of a site whose NATS is down sits on some
+// other cluster, and chat.local.> is filtered from gateway interest, so a local
+// publish would reach nobody.
+func TestHandler_publishRoomEvent_FailoverLaneForcesGlobal(t *testing.T) {
+	pub := &mockPublisher{}
+	h := &Handler{pub: pub, routes: subject.NewLaneRouter(
+		subject.RouteLocal, subject.LaneFailover, nil, subject.DefaultFailoverRevertGrace)}
+
+	require.NoError(t, h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test"))
+
+	assert.Equal(t, []string{"chat.room.r1.event"}, subjectsOf(pub))
+}
+
+// The control: home-lane work with no outage behind it keeps the configured
+// routing exactly as before, so the local namespace keeps saving gateway
+// interest in steady state.
+func TestHandler_publishRoomEvent_HomeLaneKeepsConfiguredRouting(t *testing.T) {
+	pub := &mockPublisher{}
+	h := &Handler{pub: pub, routes: subject.NewLaneRouter(
+		subject.RouteLocal, subject.LaneHome, nil, subject.DefaultFailoverRevertGrace)}
+
+	require.NoError(t, h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test"))
+
+	assert.Equal(t, []string{"chat.local.room.r1.event"}, subjectsOf(pub))
+}
+
+// Inside the revert grace window the home lane must emit to BOTH roots, or
+// clients that have not yet reverted go silent during recovery.
+func TestHandler_publishRoomEvent_HomeLaneDualPublishesInGraceWindow(t *testing.T) {
+	pub := &mockPublisher{}
+	restored := time.Now().UTC().Add(-1 * time.Minute)
+	h := &Handler{pub: pub, routes: subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome,
+		func() time.Time { return restored }, subject.DefaultFailoverRevertGrace)}
+
+	require.NoError(t, h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test"))
+
+	assert.Equal(t, []string{"chat.local.room.r1.event", "chat.room.r1.event"}, subjectsOf(pub),
+		"local first, then global, matching the existing locality-flip convention")
+}
+
+// Past the window the home lane is back to configured routing on its own, with
+// no operator action.
+func TestHandler_publishRoomEvent_HomeLaneRevertsAfterTheGraceWindow(t *testing.T) {
+	pub := &mockPublisher{}
+	restored := time.Now().UTC().Add(-2 * subject.DefaultFailoverRevertGrace)
+	h := &Handler{pub: pub, routes: subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome,
+		func() time.Time { return restored }, subject.DefaultFailoverRevertGrace)}
+
+	require.NoError(t, h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test"))
+
+	assert.Equal(t, []string{"chat.local.room.r1.event"}, subjectsOf(pub))
 }

@@ -8,7 +8,16 @@
 // NATS subject builders — mirrors Go pkg/subject/subject.go
 // Keep in sync with the Go definitions when adding new subjects.
 
+import { isFailoverMode } from './failover'
+
+// msgSend is the message-publish subject. In failover mode a `failover` token
+// is inserted before `msg`, routing the send to MESSAGES-FAILOVER on the buddy
+// cluster — the live stream sits on the cluster that is down, so a send
+// published there would go nowhere. Mirrors pkg/subject::FailoverMsgSend.
 export function msgSend(account: string, roomId: string, siteId: string): string {
+  if (isFailoverMode()) {
+    return `chat.user.${account}.room.${roomId}.${siteId}.failover.msg.send`
+  }
   return `chat.user.${account}.room.${roomId}.${siteId}.msg.send`
 }
 
@@ -37,7 +46,13 @@ export function msgDelete(account: string, roomId: string, siteId: string): stri
 // local one so a down remote peer can't affect same-site delivery. Fail-safe:
 // only an explicit `false` routes to the site-local (leaf-filtered) namespace;
 // true/undefined/missing → global, matching the server-side default.
+//
+// In failover mode the local root is skipped entirely: this client is on a peer
+// cluster, and the local root does not cross a gateway, so a same-site room's
+// events would never arrive. The server forces global on the same condition.
+// Applied here rather than per-subject so the thread lane inherits it.
 function roomBase(roomId: string, crossSite: boolean): string {
+  if (isFailoverMode()) return `chat.room.${roomId}`
   return crossSite === false ? `chat.local.room.${roomId}` : `chat.room.${roomId}`
 }
 

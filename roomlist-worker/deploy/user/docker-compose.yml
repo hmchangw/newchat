@@ -12,6 +12,13 @@ services:
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
       - MODE=user
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (standby stream readiness, consumer bind, dual-lane drain)
+      # still runs. Placement is not asserted here — a single-server NATS
+      # reports no cluster. No buddy for the bot pipeline: it has no standby
+      # stream, so the lane is gated out there.
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}

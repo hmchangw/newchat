@@ -48,3 +48,41 @@ func TestInboxConfig(t *testing.T) {
 		"chat.inbox.site-a.external.>",
 	}, cfg.Subjects)
 }
+
+func TestInboxFailover(t *testing.T) {
+	c := stream.InboxFailover("site-a")
+	assert.Equal(t, "INBOX-FAILOVER-site-a", c.Name)
+	assert.Equal(t, []string{"chat.failover.inbox.site-a.external.>"}, c.Subjects)
+}
+
+// The stream is named for the ORIGIN site, never the hosting buddy — names are
+// unique supercluster-wide, and naming by host would collide if a cluster ever
+// buddied for more than one peer.
+func TestInboxFailover_NamedForOriginSite(t *testing.T) {
+	assert.NotEqual(t, stream.InboxFailover("site-a").Name, stream.InboxFailover("site-b").Name)
+	assert.Contains(t, stream.InboxFailover("site-a").Name, "site-a")
+}
+
+func TestMessagePathFailoverStreams(t *testing.T) {
+	tests := []struct {
+		name     string
+		got      stream.Config
+		wantName string
+		wantSubj string
+	}{
+		{"messages", stream.MessagesFailover("site-a"), "MESSAGES-FAILOVER-site-a",
+			"chat.user.*.room.*.site-a.failover.msg.>"},
+		{"canonical", stream.MessagesCanonicalFailover("site-a"), "MESSAGES-CANONICAL-FAILOVER-site-a",
+			"chat.failover.msg.canonical.site-a.>"},
+		{"push", stream.PushNotificationFailover("site-a"), "PUSH-NOTIFICATION-FAILOVER-site-a",
+			"chat.failover.push.site-a.>"},
+		{"outbox", stream.OutboxFailover("site-a"), "OUTBOX-FAILOVER-site-a",
+			"chat.failover.outbox.site-a.>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantName, tt.got.Name)
+			assert.Equal(t, []string{tt.wantSubj}, tt.got.Subjects)
+		})
+	}
+}
