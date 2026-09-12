@@ -1428,18 +1428,18 @@ func TestIntegration_ListRooms(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Run("returns only the requested site's rooms", func(t *testing.T) {
-		results, total, err := st.ListRooms(ctx, "site-a", "", 1, 10)
+	t.Run("returns every room in the database", func(t *testing.T) {
+		// The listing is scoped by which database admin-service is pointed at,
+		// not by a siteId predicate — room-b1 carries a foreign siteId and is
+		// still listed, because it sits in this deployment's rooms collection.
+		results, total, err := st.ListRooms(ctx, "", 1, 10)
 		require.NoError(t, err)
-		assert.Equal(t, int64(3), total)
-		require.Len(t, results, 3)
-		for _, r := range results {
-			assert.NotEqual(t, "room-b1", r.ID, "another site's room must not appear")
-		}
+		assert.Equal(t, int64(4), total)
+		require.Len(t, results, 4)
 	})
 
 	t.Run("projects the console fields", func(t *testing.T) {
-		results, _, err := st.ListRooms(ctx, "site-a", "", 1, 10)
+		results, _, err := st.ListRooms(ctx, "", 1, 10)
 		require.NoError(t, err)
 		require.NotEmpty(t, results)
 		assert.Equal(t, "room-a1", results[0].ID)
@@ -1453,20 +1453,20 @@ func TestIntegration_ListRooms(t *testing.T) {
 	})
 
 	t.Run("pages by _id in a stable order", func(t *testing.T) {
-		first, total, err := st.ListRooms(ctx, "site-a", "", 1, 2)
+		first, total, err := st.ListRooms(ctx, "", 1, 2)
 		require.NoError(t, err)
-		assert.Equal(t, int64(3), total)
+		assert.Equal(t, int64(4), total)
 		require.Len(t, first, 2)
 		assert.Equal(t, []string{"room-a1", "room-a2"}, []string{first[0].ID, first[1].ID})
 
-		second, _, err := st.ListRooms(ctx, "site-a", "", 2, 2)
+		second, _, err := st.ListRooms(ctx, "", 2, 2)
 		require.NoError(t, err)
-		require.Len(t, second, 1)
-		assert.Equal(t, "room-a3", second[0].ID)
+		require.Len(t, second, 2)
+		assert.Equal(t, []string{"room-a3", "room-b1"}, []string{second[0].ID, second[1].ID})
 	})
 
 	t.Run("a query selects exactly the room with that id", func(t *testing.T) {
-		results, total, err := st.ListRooms(ctx, "site-a", "room-a3", 1, 10)
+		results, total, err := st.ListRooms(ctx, "room-a3", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), total)
 		require.Len(t, results, 1)
@@ -1476,7 +1476,7 @@ func TestIntegration_ListRooms(t *testing.T) {
 	t.Run("a partial id matches nothing", func(t *testing.T) {
 		// The whole point of the exact match: "room-a" is a prefix of three ids,
 		// and a substring/regex filter would return all three.
-		results, total, err := st.ListRooms(ctx, "site-a", "room-a", 1, 10)
+		results, total, err := st.ListRooms(ctx, "room-a", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, results)
@@ -1485,7 +1485,7 @@ func TestIntegration_ListRooms(t *testing.T) {
 	t.Run("the id is matched case-sensitively", func(t *testing.T) {
 		// Room ids are base62, so case carries meaning — a case-folded match
 		// could resolve two distinct ids to the same room.
-		results, total, err := st.ListRooms(ctx, "site-a", "ROOM-A3", 1, 10)
+		results, total, err := st.ListRooms(ctx, "ROOM-A3", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, results)
@@ -1493,32 +1493,33 @@ func TestIntegration_ListRooms(t *testing.T) {
 
 	t.Run("a room name is not searchable", func(t *testing.T) {
 		// room-a1 is named "general"; only its id resolves it.
-		results, total, err := st.ListRooms(ctx, "site-a", "general", 1, 10)
+		results, total, err := st.ListRooms(ctx, "general", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, results)
 	})
 
-	t.Run("a query stays inside the site", func(t *testing.T) {
-		// room-b1 exists, but at site-b: a filter that replaced the siteId clause
-		// instead of joining it would hand this site another site's room.
-		results, total, err := st.ListRooms(ctx, "site-a", "room-b1", 1, 10)
+	t.Run("a foreign-siteId room resolves by id like any other", func(t *testing.T) {
+		// Same rule as the listing: no siteId predicate, so room-b1 is reachable.
+		results, total, err := st.ListRooms(ctx, "room-b1", 1, 10)
 		require.NoError(t, err)
-		assert.Equal(t, int64(0), total)
-		assert.Empty(t, results)
+		assert.Equal(t, int64(1), total)
+		require.Len(t, results, 1)
+		assert.Equal(t, "room-b1", results[0].ID)
 	})
 
 	t.Run("an unknown id returns an empty page", func(t *testing.T) {
-		results, total, err := st.ListRooms(ctx, "site-a", "no-such-room", 1, 10)
+		results, total, err := st.ListRooms(ctx, "no-such-room", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, results)
 	})
 
-	t.Run("a site with no rooms returns an empty slice", func(t *testing.T) {
-		results, total, err := st.ListRooms(ctx, "site-zzz", "", 1, 10)
+	t.Run("a page past the end returns an empty slice, not nil", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "", 99, 10)
 		require.NoError(t, err)
-		assert.Equal(t, int64(0), total)
+		assert.Equal(t, int64(4), total)
+		assert.NotNil(t, results)
 		assert.Empty(t, results)
 	})
 }

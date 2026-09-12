@@ -34,16 +34,15 @@ type roomMemberView struct {
 	IsBot   bool   `json:"isBot"`
 }
 
-// listRooms handles GET /rooms — the rooms homed at this site, paged, and
-// narrowed by an optional `q` holding one exact room id. Trimmed, because the
-// console sends the box verbatim on a debounce and a pasted id often carries
-// surrounding space.
+// listRooms handles GET /rooms — this deployment's rooms, paged, and narrowed by
+// an optional `q` holding one exact room id. Trimmed, because the console sends
+// the box verbatim on a debounce and a pasted id often carries surrounding space.
 func (h *Handler) listRooms(c *gin.Context) {
 	ctx := c.Request.Context()
 	q := strings.TrimSpace(c.Query("q"))
 	page, limit := parsePaging(c, 1, 20)
 
-	rooms, total, err := h.store.ListRooms(ctx, h.cfg.SiteID, q, page, limit)
+	rooms, total, err := h.store.ListRooms(ctx, q, page, limit)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("list rooms: %w", err))
 		return

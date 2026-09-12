@@ -168,13 +168,17 @@ var roomProjection = bson.M{
 // _id is excluded explicitly — Mongo returns it by default and nothing reads it.
 var roomMemberProjection = bson.M{"u.account": 1, "u.isBot": 1, "_id": 0}
 
-// ListRooms pages this site's rooms ordered by _id — the _id index serves the
-// sort for free, so paging stays stable without a blocking in-memory sort.
+// ListRooms pages the rooms collection ordered by _id — the _id index serves the
+// sort for free, so paging stays stable without a blocking in-memory sort. There
+// is no siteId predicate: every site runs its own MongoDB, so this collection is
+// already the site's rooms, and an unfiltered page can stop at skip+limit instead
+// of examining rows it will discard.
+//
 // A search term is an exact room id, so it resolves through that same index as a
 // point lookup rather than a scan: no regex to escape, and unlike SearchUsers no
 // case folding, because a base62 id's case is part of the id.
-func (s *storeMongo) ListRooms(ctx context.Context, siteID, q string, page, limit int) ([]model.Room, int64, error) {
-	filter := bson.M{"siteId": siteID}
+func (s *storeMongo) ListRooms(ctx context.Context, q string, page, limit int) ([]model.Room, int64, error) {
+	filter := bson.M{}
 	if q != "" {
 		filter["_id"] = q
 	}

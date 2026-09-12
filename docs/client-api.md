@@ -8305,13 +8305,13 @@ published upload is reported as a failure.
 **Endpoint:** `GET /v1/admin/rooms`
 **Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
 
-Lists the rooms homed at admin-service's own site, ordered by `_id` and paged. Site-scoped, unlike [§9.1 List users](#91-list-users), which spans every site: a room is managed only where it lives, and the duty toggle (§9.12) is same-site only. Each row is projected to the fields the admin console renders — no message previews, no member arrays, no room keys.
+Lists the rooms in this deployment's database, ordered by `_id` and paged. There is no `siteId` filter: every site runs its own MongoDB, so the collection is already the site's rooms — the endpoint is scoped by which database admin-service is pointed at, not by a query predicate. Each row is projected to the fields the admin console renders — no message previews, no member arrays, no room keys.
 
 #### Query parameters
 
 | Param | Type | Required | Notes |
 |---|---|---|---|
-| `q` | string | no | One exact room `_id`, matched case-sensitively — selects at most one room, and a partial id matches nothing. Surrounding whitespace is trimmed, so a blank value returns all rooms. Room names are not searchable. |
+| `q` | string | no | One exact room `_id`, matched case-sensitively — selects at most one room, and a partial id matches nothing. Surrounding whitespace is trimmed, so a blank value returns every room. Room names are not searchable. |
 | `page` | integer | no | 1-based page. Defaults to `1`; a non-numeric or `< 1` value is ignored. |
 | `limit` | integer | no | Rows per page. Defaults to `20`, capped at `100`. |
 
@@ -8322,7 +8322,7 @@ Lists the rooms homed at admin-service's own site, ordered by `_id` and paged. S
 | Field | Type | Notes |
 |---|---|---|
 | `rooms` | [AdminRoomView](#adminroomview)[] | This page of rooms. Empty array when the site has none. |
-| `total` | integer | Rooms at this site matching `q`, unpaged — `0` or `1` when `q` is set. |
+| `total` | integer | Rooms matching `q`, unpaged — `0` or `1` when `q` is set. |
 
 ##### AdminRoomView
 

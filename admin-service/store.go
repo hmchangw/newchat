@@ -73,10 +73,12 @@ type AdminStore interface {
 	// Returns the post-write doc projected to the fanout fields.
 	DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error)
 
-	// ListRooms returns the rooms homed at siteID, ordered by _id, projected to
-	// the admin-console columns only. A non-empty q is an exact room id, so it
-	// selects at most one room. Also returns the unpaged match count.
-	ListRooms(ctx context.Context, siteID, q string, page, limit int) ([]model.Room, int64, error)
+	// ListRooms pages this deployment's rooms collection, ordered by _id and
+	// projected to the admin-console columns only. Scoping is the database the
+	// service is pointed at — each site runs its own MongoDB — so there is no
+	// siteId predicate. A non-empty q is an exact room id, so it selects at most
+	// one room. Also returns the unpaged match count.
+	ListRooms(ctx context.Context, q string, page, limit int) ([]model.Room, int64, error)
 
 	// ListRoomMembers returns the subscribed account of every member of roomID.
 	// Reads the same collection room-service's membership check consults, so an
