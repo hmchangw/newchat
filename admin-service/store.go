@@ -74,8 +74,8 @@ type AdminStore interface {
 	DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error)
 
 	// ListRooms returns the rooms homed at siteID, ordered by _id, projected to
-	// the admin-console columns only. A non-empty q narrows to rooms whose name
-	// or id contains it, case-insensitively. Also returns the unpaged match count.
+	// the admin-console columns only. A non-empty q is an exact room id, so it
+	// selects at most one room. Also returns the unpaged match count.
 	ListRooms(ctx context.Context, siteID, q string, page, limit int) ([]model.Room, int64, error)
 
 	// ListRoomMembers returns the subscribed account of every member of roomID.

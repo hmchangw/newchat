@@ -58,7 +58,7 @@ export interface AdminRoomMember {
 }
 
 export interface ListRoomsParams {
-  /** Substring matched against the room name or id, case-insensitively. */
+  /** One exact room id, matched case-sensitively; selects at most one room. */
   q?: string
   page?: number
   limit?: number

@@ -847,12 +847,12 @@ describe('listRooms', () => {
     expect(result).toEqual({ rooms: [ROOM], total: 1 })
   })
 
-  it('sends the search term as q', async () => {
+  it('sends the room id as q', async () => {
     const fetchMock = stubFetch(200, { rooms: [ROOM], total: 1 })
 
-    await listRooms('tok', { q: 'gener', page: 1, limit: 20 })
+    await listRooms('tok', { q: 'aB3xY9kLmN2pQ7rS4', page: 1, limit: 20 })
 
-    expect(new URL(fetchMock.mock.calls[0][0]).searchParams.get('q')).toBe('gener')
+    expect(new URL(fetchMock.mock.calls[0][0]).searchParams.get('q')).toBe('aB3xY9kLmN2pQ7rS4')
   })
 
   it('omits q entirely when the search box is empty', async () => {

@@ -72,19 +72,19 @@ describe('RoomsPage', () => {
     expect(screen.getByText('r-on')).toBeInTheDocument()
   })
 
-  it('re-queries with {q} after the search input debounces', async () => {
+  it('re-queries with {q} after the room id input debounces', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       render(<RoomsPage />)
       await waitFor(() => expect(listRooms).toHaveBeenCalledWith('tok', { page: 1, limit: 20 }))
 
-      fireEvent.change(screen.getByLabelText(/search rooms/i), { target: { value: 'gener' } })
+      fireEvent.change(screen.getByLabelText(/room id/i), { target: { value: 'aB3xY9kLmN2pQ7rS4' } })
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400)
       })
 
       await waitFor(() =>
-        expect(listRooms).toHaveBeenCalledWith('tok', { q: 'gener', page: 1, limit: 20 }),
+        expect(listRooms).toHaveBeenCalledWith('tok', { q: 'aB3xY9kLmN2pQ7rS4', page: 1, limit: 20 }),
       )
     } finally {
       vi.useRealTimers()
@@ -95,9 +95,9 @@ describe('RoomsPage', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       render(<RoomsPage />)
-      const box = await screen.findByLabelText(/search rooms/i)
+      const box = await screen.findByLabelText(/room id/i)
 
-      fireEvent.change(box, { target: { value: 'gener' } })
+      fireEvent.change(box, { target: { value: 'aB3xY9kLmN2pQ7rS4' } })
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400)
       })
@@ -114,13 +114,13 @@ describe('RoomsPage', () => {
     }
   })
 
-  it('keeps the search term when paging', async () => {
+  it('keeps the room id when paging', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       listRooms.mockResolvedValue({ rooms: [OPEN, ONDUTY], total: 40 })
       render(<RoomsPage />)
-      fireEvent.change(await screen.findByLabelText(/search rooms/i), {
-        target: { value: 'gener' },
+      fireEvent.change(await screen.findByLabelText(/room id/i), {
+        target: { value: 'aB3xY9kLmN2pQ7rS4' },
       })
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400)
@@ -129,7 +129,7 @@ describe('RoomsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: /next/i }))
 
       await waitFor(() =>
-        expect(listRooms).toHaveBeenLastCalledWith('tok', { q: 'gener', page: 2, limit: 20 }),
+        expect(listRooms).toHaveBeenLastCalledWith('tok', { q: 'aB3xY9kLmN2pQ7rS4', page: 2, limit: 20 }),
       )
     } finally {
       vi.useRealTimers()

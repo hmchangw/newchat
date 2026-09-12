@@ -16,7 +16,7 @@ const PAGE_SIZE = 20
 
 const DEFAULT_FILTERS = { q: '' }
 
-// Only include the term when the admin actually typed one — mirrors Permissions'
+// Only include the id when the admin actually pasted one — mirrors Permissions'
 // buildFilterParams so an unfiltered listing stays `{page, limit}` on the wire.
 function buildFilterParams(filters) {
   return filters.q ? { q: filters.q } : {}
@@ -24,7 +24,7 @@ function buildFilterParams(filters) {
 
 // Settings → Rooms console. Owns which duty dialog is open; the toggle returns only
 // {status:"ok"}, so a landed change is picked up by refetching rather than by
-// patching the row in place. Paging, the debounced search and the not_admin
+// patching the row in place. Paging, the debounced id lookup and the not_admin
 // branch all come from usePagedAdminList.
 export default function RoomsPage() {
   const { session } = useAuth()
@@ -63,11 +63,15 @@ export default function RoomsPage() {
   return (
     <div className="rooms-page">
       <div className="rooms-page-header">
+        {/* Room ids are opaque base62, so this is a paste-one-id lookup rather
+            than a name search: admin-service matches `q` against `_id` exactly. */}
         <input
           type="search"
           className="rooms-search-input"
-          placeholder="Search rooms…"
-          aria-label="Search rooms"
+          placeholder="Paste a room ID…"
+          aria-label="Room ID"
+          autoComplete="off"
+          spellCheck="false"
           value={filters.q}
           onChange={(e) => updateFilter('q', e.target.value)}
         />

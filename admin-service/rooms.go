@@ -35,8 +35,9 @@ type roomMemberView struct {
 }
 
 // listRooms handles GET /rooms — the rooms homed at this site, paged, and
-// narrowed by an optional `q` substring. Trimmed, because the console sends
-// the search box verbatim on a debounce and a lone space is not a search.
+// narrowed by an optional `q` holding one exact room id. Trimmed, because the
+// console sends the box verbatim on a debounce and a pasted id often carries
+// surrounding space.
 func (h *Handler) listRooms(c *gin.Context) {
 	ctx := c.Request.Context()
 	q := strings.TrimSpace(c.Query("q"))

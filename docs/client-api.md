@@ -8311,7 +8311,7 @@ Lists the rooms homed at admin-service's own site, ordered by `_id` and paged. S
 
 | Param | Type | Required | Notes |
 |---|---|---|---|
-| `q` | string | no | Case-insensitive substring matched against the room's `name` or `id`. Surrounding whitespace is trimmed, so a blank value returns all rooms; regex metacharacters are matched literally. |
+| `q` | string | no | One exact room `_id`, matched case-sensitively — selects at most one room, and a partial id matches nothing. Surrounding whitespace is trimmed, so a blank value returns all rooms. Room names are not searchable. |
 | `page` | integer | no | 1-based page. Defaults to `1`; a non-numeric or `< 1` value is ignored. |
 | `limit` | integer | no | Rows per page. Defaults to `20`, capped at `100`. |
 
@@ -8322,7 +8322,7 @@ Lists the rooms homed at admin-service's own site, ordered by `_id` and paged. S
 | Field | Type | Notes |
 |---|---|---|
 | `rooms` | [AdminRoomView](#adminroomview)[] | This page of rooms. Empty array when the site has none. |
-| `total` | integer | Rooms at this site matching `q`, unpaged. |
+| `total` | integer | Rooms at this site matching `q`, unpaged — `0` or `1` when `q` is set. |
 
 ##### AdminRoomView
 

@@ -158,18 +158,28 @@ func TestHandler_listRooms(t *testing.T) {
 			},
 		},
 		{
-			name:  "passes the search query through to the store",
-			query: "?q=gen&page=2",
+			name:  "passes the room id through to the store",
+			query: "?q=aB3xY9kLmN2pQ7rS4",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListRooms(gomock.Any(), "site-A", "gen", 2, 20).
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "aB3xY9kLmN2pQ7rS4", 1, 20).
 					Return([]model.Room{{
-						ID: "r1", Name: "general", Type: model.RoomTypeChannel, UserCount: 7,
+						ID: "aB3xY9kLmN2pQ7rS4", Name: "general", Type: model.RoomTypeChannel, UserCount: 7,
 					}}, int64(1), nil)
 			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any) {
-				assert.Equal(t, "general", firstRoom(t, body)["name"])
+				assert.Equal(t, "aB3xY9kLmN2pQ7rS4", firstRoom(t, body)["id"])
 			},
+		},
+		{
+			name:  "surrounding whitespace is trimmed off a pasted id",
+			query: "?q=%20aB3xY9kLmN2pQ7rS4%20",
+			setupMock: func(m *MockAdminStore) {
+				// A copy-paste carrying a trailing space would otherwise match nothing.
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", "aB3xY9kLmN2pQ7rS4", 1, 20).
+					Return([]model.Room{}, int64(0), nil)
+			},
+			wantStatus: http.StatusOK,
 		},
 		{
 			name:  "a whitespace-only query is treated as no query",

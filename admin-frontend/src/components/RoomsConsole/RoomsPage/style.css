@@ -34,6 +34,9 @@
   border-radius: var(--radius-md);
   color: var(--text-primary);
   font: inherit;
+  /* After the `font` shorthand, which would otherwise reset it. Matches the id
+     column so a pasted id lines up with the row it finds. */
+  font-family: var(--font-mono);
 }
 
 .rooms-search-input:focus {
