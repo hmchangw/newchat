@@ -7645,7 +7645,7 @@ Returns audit entries for the admin's site, newest-first, with optional filterin
 |---|---|---|
 | `targetAccount` | string | Optional. Filter by the affected user's account. |
 | `actor` | string | Optional. Filter by actor account. |
-| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`, `permission.grant`, `permission.revoke`). |
+| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`, `permission.grant`, `permission.revoke`, `room.onduty.set`, `room.onduty.unset`). |
 | `page` | integer | Page number, 1-based. Defaults to `1`. |
 | `limit` | integer | Page size. Defaults to `20`. |
 
@@ -7777,7 +7777,9 @@ Lets the logged-in admin change their own password. Verifies `oldPassword` again
 
 Toggles a channel room's on-duty state. On-duty staff work off the company network, so `onDuty: true` narrows who may change the roster (`restricted` — only owners may add members) and permits the connection from outside (`externalAccess`); `onDuty: false` clears both. No room or subscription field named `onDuty` exists — the parameter maps onto those two flags, which are owned by room-service.
 
-**Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything. No audit row is written — room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, is the only durable server-side record.
+**Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything.
+
+One `admin_audit` entry is written once the switch has landed — a rejected call writes none. `action` is `room.onduty.set` or `room.onduty.unset`, `details` is `{"roomId": "<room id>"}`, and `targetAccount` is the designated owner (empty when turning duty off, which leaves roles alone). An audit write that fails is logged and does not fail the request: the room has already changed. room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, remains as the finer-grained trail.
 
 Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to the plain `user` role. Turning duty **off** sends no owner, so roles are left exactly as they are.
 
@@ -8142,7 +8144,7 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `id` | string | Audit entry ID. |
 | `actorUserId` | string | Internal user ID of the admin who performed the action. |
 | `actorAccount` | string | Account of the admin. |
-| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`, `permission.grant`, `permission.revoke`. |
+| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`, `permission.grant`, `permission.revoke`, `room.onduty.set`, `room.onduty.unset`. |
 | `targetUserId` | string | Internal ID of the affected user. Omitted when not applicable. |
 | `targetAccount` | string | Account of the affected user. Omitted when not applicable. |
 | `details` | map<string, string> | Non-secret context for the action (e.g. `{"account":"bob"}`). Omitted when empty. Never contains passwords, hashes, or tokens. |
