@@ -101,11 +101,12 @@ func TestBuildConsumerConfig(t *testing.T) {
 			// stops being applied under test.
 			MaxDeliver:    stream.DefaultMaxDeliver,
 			MaxWaiting:    512,
-			MaxAckPending: 1000,
+			MaxAckPending: stream.DefaultMaxAckPending,
 		}, siteID)
 
 		assert.Equal(t, "inbox-worker", cc.Durable)
-		assert.Equal(t, 1000, cc.MaxAckPending)
+		assert.Equal(t, federationMaxAckPending, cc.MaxAckPending,
+			"left at the default, the lane widens it to match the longer park window")
 		assert.Equal(t, []string{subject.InboxExternalAll(siteID)}, cc.FilterSubjects)
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 		assert.Equal(t, 30*time.Second, cc.AckWait)
@@ -147,11 +148,13 @@ func TestBuildConsumerConfig(t *testing.T) {
 type fakeFederatedMsg struct {
 	subject      string
 	numDelivered uint64
+	streamSeq    uint64
 	metaErr      error
 	termErr      error
 	acked        bool
 	naked        bool
 	termed       bool
+	termReason   string
 }
 
 func (m *fakeFederatedMsg) Subject() string { return m.subject }
@@ -159,11 +162,17 @@ func (m *fakeFederatedMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	if m.metaErr != nil {
 		return nil, m.metaErr
 	}
-	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
+	return &jetstream.MsgMetadata{
+		NumDelivered: m.numDelivered,
+		Sequence:     jetstream.SequencePair{Stream: m.streamSeq},
+	}, nil
 }
 func (m *fakeFederatedMsg) Ack() error                       { m.acked = true; return nil }
 func (m *fakeFederatedMsg) NakWithDelay(time.Duration) error { m.naked = true; return nil }
-func (m *fakeFederatedMsg) Term() error                      { m.termed = true; return m.termErr }
+func (m *fakeFederatedMsg) TermWithReason(reason string) error {
+	m.termed, m.termReason = true, reason
+	return m.termErr
+}
 
 func TestSettleFederated(t *testing.T) {
 	const deliverCap = 6
@@ -230,6 +239,10 @@ func TestSettleFederated(t *testing.T) {
 			assert.Equal(t, tt.wantAck, msg.acked)
 			assert.Equal(t, tt.wantExhausted, msg.termed)
 			assert.Equal(t, !tt.wantAck && !tt.wantExhausted, msg.naked)
+			if tt.wantExhausted {
+				assert.Equal(t, "max deliver exhausted", msg.termReason,
+					"the reason reaches the MSG_TERMINATED advisory")
+			}
 		})
 	}
 }
@@ -240,4 +253,61 @@ func TestSettleFederated_UnlimitedBudgetNeverTerms(t *testing.T) {
 	settleFederated(context.Background(), msg, -1, errors.New("unknown user"))
 	assert.True(t, msg.naked)
 	assert.False(t, msg.termed)
+}
+
+// A budget equal to the package default reads as "unset", so the lane widens its own
+// ack-pending ceiling; anything the operator chose is left alone.
+func TestBuildConsumerConfig_AckPendingHeadroom(t *testing.T) {
+	const siteID = "site-a"
+	base := stream.ConsumerSettings{
+		AckWait: 30 * time.Second, MaxDeliver: stream.DefaultMaxDeliver,
+		MaxWaiting: 512, BackOffSteps: 5, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+	}
+
+	t.Run("the default is widened to match the longer park window", func(t *testing.T) {
+		s := base
+		s.MaxAckPending = stream.DefaultMaxAckPending
+		cc := buildConsumerConfig(s, siteID)
+		assert.Equal(t, federationMaxAckPending, cc.MaxAckPending)
+		assert.Greater(t, cc.MaxAckPending, stream.DefaultMaxAckPending)
+	})
+
+	t.Run("an operator's choice is left alone", func(t *testing.T) {
+		s := base
+		s.MaxAckPending = 250
+		cc := buildConsumerConfig(s, siteID)
+		assert.Equal(t, 250, cc.MaxAckPending)
+	})
+}
+
+// Unreadable metadata must not be mistaken for a last attempt — a premature term
+// would drop an event that still had retries left.
+func TestLastAttemptFailed(t *testing.T) {
+	subj := subject.InboxExternal("site-a", model.InboxRoleUpdated)
+	boom := errors.New("subscription not found")
+
+	tests := []struct {
+		name         string
+		numDelivered uint64
+		metaErr      error
+		err          error
+		wantLast     bool
+		wantMeta     bool
+	}{
+		{name: "success is not a failed attempt", err: nil},
+		{name: "below the cap", numDelivered: 3, err: boom, wantMeta: true},
+		{name: "at the cap", numDelivered: 6, err: boom, wantLast: true, wantMeta: true},
+		{name: "permanent errors belong to the ack-drop", numDelivered: 6,
+			err: errcode.Permanent(errcode.BadRequest("empty roles"))},
+		{name: "unreadable metadata prefers another nak", numDelivered: 6,
+			metaErr: errors.New("not a jetstream message"), err: boom},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &fakeFederatedMsg{subject: subj, numDelivered: tt.numDelivered, metaErr: tt.metaErr}
+			meta, last := lastAttemptFailed(context.Background(), msg, 6, tt.err)
+			assert.Equal(t, tt.wantLast, last)
+			assert.Equal(t, tt.wantMeta, meta != nil, "metadata is returned so the give-up can name the message")
+		})
+	}
 }
