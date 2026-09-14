@@ -45,6 +45,7 @@ func (s *UserService) SetAppSubscription(c *natsrouter.Context, req models.SetAp
 		if err := s.subs.SetAppSubscribed(c, account, botName, false, true); err != nil {
 			return nil, fmt.Errorf("unsubscribe app: %w", err)
 		}
+		s.bustMemberCache(c, existing.RoomID)
 		s.publishAppSubscriptionRemoved(c, account, existing)
 		return &models.OKResponse{Success: true}, nil
 	}
@@ -59,10 +60,22 @@ func (s *UserService) SetAppSubscription(c *natsrouter.Context, req models.SetAp
 	if err := s.subs.SetAppSubscribed(c, account, botName, true, false); err != nil {
 		return nil, fmt.Errorf("reactivate app: %w", err)
 	}
+	s.bustMemberCache(c, existing.RoomID)
 	if !wasSubscribed { // emit only on a real unsubscribed→subscribed transition, not an idempotent re-subscribe
 		s.publishAppSubscriptionReactivated(c, account, existing, app)
 	}
 	return &models.OKResponse{Success: true}, nil
+}
+
+// bustMemberCache drops the room's shared roomsubcache entry after isSubscribed
+// has been written. Best-effort and post-commit, like every other tier's
+// invalidation: without it, broadcast-worker's botDM gate reads the stale flag
+// for up to ROOMSUBCACHE_TTL (90m by default).
+func (s *UserService) bustMemberCache(c *natsrouter.Context, roomID string) {
+	if s.members == nil || roomID == "" {
+		return
+	}
+	s.members.Invalidate(c, roomID)
 }
 
 // Tell the user's other devices to drop the botDM (mirrors room-worker's removed event; best-effort).

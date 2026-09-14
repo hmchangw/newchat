@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -302,4 +303,80 @@ func TestListAppCategories_RepoError(t *testing.T) {
 
 	_, err := svc.ListAppCategories(ctx("alice", "site-a"))
 	requireCode(t, err, errcode.CodeInternal)
+}
+
+// fakeMemberCache records the rooms whose shared roomsubcache entry was busted.
+type fakeMemberCache struct{ busted []string }
+
+func (f *fakeMemberCache) Invalidate(_ context.Context, roomID string) {
+	f.busted = append(f.busted, roomID)
+}
+
+// broadcast-worker gates botDM fan-out on the cached Member.IsSubscribed, and
+// ROOMSUBCACHE_TTL is 90m. Without an explicit bust here a re-subscribed user
+// would receive no live botDM events for up to that long — the flag flips in
+// Mongo while every fan-out worker keeps reading the stale cached copy.
+func TestSetAppSubscription_BustsMemberCache(t *testing.T) {
+	tests := []struct {
+		name       string
+		subscribed bool
+		existing   *model.Subscription
+		wantBusted []string
+	}{
+		{
+			name:       "unsubscribe busts the room",
+			subscribed: false,
+			existing:   appSub(false),
+			wantBusted: []string{"room1"},
+		},
+		{
+			name:       "reactivate busts the room",
+			subscribed: true,
+			existing:   appSub(true),
+			wantBusted: []string{"room1"},
+		},
+		{
+			// No subscription, no write — so there is nothing stale to bust.
+			name:       "no-op unsubscribe busts nothing",
+			subscribed: false,
+			existing:   nil,
+			wantBusted: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &fakeMemberCache{}
+			svc, subs, _, apps, rooms, _, pub := newSvcWith(t, WithMemberCache(members))
+
+			apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+			subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(tc.existing, nil)
+			if tc.existing != nil {
+				subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", tc.subscribed, !tc.subscribed).Return(nil)
+				rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return([]model.RoomInfo{{RoomID: "room1", Found: true, SiteID: "site-a", Name: "Test Bot"}}, nil).AnyTimes()
+				pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			}
+
+			resp, err := svc.SetAppSubscription(ctx("alice", "site-a"),
+				models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: tc.subscribed})
+			require.NoError(t, err)
+			assert.True(t, resp.Success)
+			assert.Equal(t, tc.wantBusted, members.busted,
+				"the shared roomsubcache entry must be busted exactly when isSubscribed is written")
+		})
+	}
+}
+
+// A service built without a member cache (Valkey unconfigured) must not panic.
+func TestSetAppSubscription_NilMemberCache_NoPanic(t *testing.T) {
+	svc, subs, _, apps, _, _, pub := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(appSub(false), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", false, true).Return(nil)
+	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"),
+		models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: false})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
 }

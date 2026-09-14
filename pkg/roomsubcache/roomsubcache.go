@@ -13,8 +13,9 @@
 //
 //   - Writers must fill every Member field. NewMongoLoader is the only
 //     sanctioned production loader; a partial writer would silently unmute
-//     muted users and widen history access windows for the services that gate
-//     on Muted and HistorySharedSince.
+//     muted users, widen history access windows, and resurrect unsubscribed
+//     botDMs for the services that gate on Muted, HistorySharedSince and
+//     IsSubscribed.
 //   - Readers should configure the same TTL (ROOMSUBCACHE_TTL), since whichever
 //     service writes an entry sets the staleness bound every other one gets.
 //

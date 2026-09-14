@@ -31,6 +31,7 @@ import (
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/restyutil"
+	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-service/config"
@@ -210,6 +211,16 @@ func main() {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
+	// Invalidation only — user-service never fills this tier, so it needs no
+	// ROOMSUBCACHE_TTL of its own. It writes isSubscribed, which broadcast-worker
+	// gates botDM fan-out on, so the shared entry must be busted on the spot.
+	var memberOpts []service.Option
+	if valkeyClient != nil {
+		memberOpts = append(memberOpts, service.WithMemberCache(roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))))
+	} else {
+		slog.Warn("roomsubcache invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
+
 	// A zero Budget disables trimming, so the toggle needs no handler branch.
 	pageBudget := pagefit.Budget{}
 	if cfg.PageTrimming {
@@ -218,7 +229,7 @@ func main() {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
 	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg,
-		service.WithPageBudget(pageBudget))
+		append([]service.Option{service.WithPageBudget(pageBudget)}, memberOpts...)...)
 
 	// A second service instance over the HTTP-only Mongo pool. Everything else --
 	// the NATS clients, publishers, badge cache -- is shared and stateless. It is
@@ -230,7 +241,7 @@ func main() {
 			mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts)),
 		mongorepo.NewUserRepo(httpDB, readFromSecondary), mongorepo.NewAppRepo(httpDB, readFromSecondary), threadSubRepo,
 		roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc),
-		publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
+		publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg, memberOpts...)
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.

@@ -1190,6 +1190,14 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		if isBot(account) {
 			continue
 		}
+		// A botDM the member unsubscribed from is gone from their room list —
+		// user-service's active-subscription filter requires isSubscribed for
+		// roomType botDM. Delivering here would resurrect a room they removed.
+		// Gated on the row's own type, never the room's: only the human side of
+		// a botDM carries the flag, and plain DM rows never set it.
+		if subs[i].RoomType == model.RoomTypeBotDM && !subs[i].IsSubscribed {
+			continue
+		}
 		_, hasMention := mentionSet[account]
 
 		evt := buildRoomEvent(meta, clientMsg, timestamp)

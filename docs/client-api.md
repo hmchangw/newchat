@@ -3458,7 +3458,7 @@ See [Error envelope](#6-error-envelope-reference). Errors:
 An `EditRoomEvent` is fanned out by `broadcast-worker`. The subject depends on room type:
 
 - **Channel rooms — `chat.room.{roomID}.event`** — one publish to the room stream.
-- **DM/botDM rooms — `chat.user.{recipient}.event.room`** — published once per non-bot member.
+- **DM/botDM rooms — `chat.user.{recipient}.event.room`** — published once per non-bot member; an unsubscribed botDM member is skipped.
 
 The payload is flat (no zero-valued room fields):
 
@@ -3558,7 +3558,7 @@ A `DeleteRoomEvent` is fanned out by `broadcast-worker` (not published when the 
 - **Top-level channel message — `chat.room.{roomID}.event`** — one publish to the room stream; all room subscribers receive it.
 - **Thread reply (TShow=false) in a channel** — `chat.user.{recipient}.event.room` — published once per thread subscriber (followers + @-mentioned accounts). Non-subscribers do not receive this event. Also published on `chat.room.{roomID}.thread.{parentMessageID}.event` for clients with the thread panel open — see [§4.2 Thread View Subject](#42-thread-view-subject).
 - **Thread reply (TShow=true) in a channel** — `chat.room.{roomID}.event` — visible in the main channel, so the full room stream receives it.
-- **DM/botDM message — `chat.user.{recipient}.event.room`** — published once per non-bot member.
+- **DM/botDM message — `chat.user.{recipient}.event.room`** — published once per non-bot member; an unsubscribed botDM member is skipped.
 
 The payload is flat:
 
@@ -6467,7 +6467,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 
 #### Triggered events — success path
 
-After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
+After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). It also skips a member whose botDM row is **unsubscribed** (`isSubscribed: false`): that room is hidden from their `subscription.list`, so delivering a live event would resurrect a room they removed. This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
 
 **1. For channel rooms — `chat.room.{roomID}.event`** (`publishChannelEvent`)
 
@@ -6627,7 +6627,7 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 | Room type | Subject |
 |-----------|---------|
 | Channel | `chat.room.{roomID}.event` |
-| DM / botDM | `chat.user.{account}.event.room` — published once per non-bot member |
+| DM / botDM | `chat.user.{account}.event.room` — published once per non-bot member; an unsubscribed botDM member is skipped |
 
 #### Payload
 

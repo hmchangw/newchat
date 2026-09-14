@@ -359,7 +359,7 @@ Retain past versions for history scrolling (server grace window: at least 24h).
 | Room type | Subject |
 |---|---|
 | Channel | `chat.room.{roomID}.event` |
-| DM / botDM | `chat.user.{account}.event.room` — published per non-bot member |
+| DM / botDM | `chat.user.{account}.event.room` — published per non-bot member; an unsubscribed botDM member is skipped |
 
 The `type` field discriminates the event. All payloads carry `type`, `roomId`,
 `siteId`, and `timestamp`.
@@ -374,7 +374,8 @@ replies publish [`new_thread_message`](#new_thread_message-roomevent) instead.
 
 **botDM rooms fan out to the human member, not the bot** — `broadcast-worker` publishes the
 `RoomEvent` to each non-bot member and skips the bot account (`isBot`); the bot side consumes
-messages through a separate backend path.
+messages through a separate backend path. A member whose botDM row is **unsubscribed**
+(`isSubscribed: false`) is skipped too — that room is hidden from their `subscription.list`.
 
 | Field | Type | Notes |
 |---|---|---|
