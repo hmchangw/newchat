@@ -499,7 +499,7 @@ func (m *Message) finish(want Outcome, err error) {
 	if err != nil {
 		outcome = OutcomeLeftPending
 	}
-	if want == OutcomeNak && m.maxDeliver > 0 && m.numDelivered >= uint64(m.maxDeliver) {
+	if want == OutcomeNak && m.IsFinalDelivery() {
 		m.MarkTerminal(m.ctx, TerminalMaxDeliver)
 	}
 	// An explicit Term is a deliberate drop. A handler that already classified
