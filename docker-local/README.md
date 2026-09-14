@@ -357,92 +357,73 @@ brings it up first should check, and correct this README where reality differs:
 ## Browsing Cassandra
 
 `cassandra-web` ships with the deps stack at **http://localhost:8083** —
-keyspaces, tables, schema, a row browser and a CQL Query page. It is a
-prebuilt upstream image wired up with a handful of environment variables;
-there is no code of ours behind it.
+keyspaces, tables, schema, a row browser and a CQL Query page. All four
+Cassandra tables browse normally, `reactions` included.
 
 It is a community project, not an official Apache or DataStax tool — no such
-web UI exists. `ipushc/cassandra-web:v1.1.6` is the newest release; `latest`
-and `v1.1.5` resolve to the same image content, and the pinned version tag is
-preferred over `latest` for the usual reasons. Upstream has been quiet since
-August 2024, and the binary is built on Go 1.20.2, which
-`govulncheck -mode=binary` flags for 59 reachable stdlib advisories (mostly
-DoS-class in `net/http` and `html/template`). That is why the port is bound to
-`127.0.0.1` rather than every interface: it is a local viewer, not a service.
-If that trade stops being acceptable, Apache Zeppelin's Cassandra interpreter
-is the nearest maintained substitute, at a much larger footprint.
+web UI exists. The image is our own build of
+[Joey0538/cassandra-web](https://github.com/Joey0538/cassandra-web), a fork of
+`orzhaha/cassandra-web`, published as `josephsylvan/cassandra-web`. The fork
+exists because the published upstream image cannot read three of our four
+tables at all (below), and because its binary is built on Go 1.20.2, which
+`govulncheck -mode=binary` flags for 59 reachable stdlib advisories. Ours is
+Go 1.26.8 with current `x/net` and `x/crypto`, and govulncheck reports no
+advisories the code calls.
+
+The port is still bound to `127.0.0.1` rather than every interface: the UI is
+unauthenticated and write-capable, so it is a local viewer, not a service.
 
 Nothing seeds the Cassandra tables, so on a fresh stack they are empty until
 messages flow through the services. `make seed` populates MongoDB and Valkey
 only.
 
-**Which tab reads what** — the tool has two ways to show rows, and they do not
-have the same reach:
-
-| | Row browser (click a table) | Query page (type CQL) |
-|---|---|---|
-| `pinned_messages_by_room`, non-message tables | works | works |
-| `messages_by_room`, `messages_by_id`, `thread_messages_by_thread` | renders empty, always | works |
-| the `reactions` column | never | works, via `SELECT JSON` / `toJson` |
-
-So reactions **are** readable in the browser; they are just not readable from
-the row browser tab, which is the tab that cannot open those three tables at
-all. Both sections below say one half of that.
-
-> **An empty row browser proves nothing.** For those three tables the failure
-> mode and the genuinely-empty case render identically — a table with no rows
-> and no error. Never read it as "Cassandra has no messages". Confirm a count
-> from the Query page or `cqlsh` instead:
->
-> ```sql
-> SELECT count(*) FROM chat.messages_by_id WHERE message_id = '<id>';
-> ```
->
-> Or unrestricted, accepting the scan, only because the local dataset is tiny:
-> `docker exec chat-local-cassandra cqlsh -e "SELECT count(*) FROM chat.messages_by_id"`.
-
 `READ_ONLY` is **off** by default. This build rejects every Query-page
 statement when it is on — plain `SELECT`s included, with
-`"Update/Insert action are not allowed"` — and the Query page is the only path
-that reads the message tables (below). Set `CASSANDRA_WEB_READ_ONLY=true` in
+`"Update/Insert action are not allowed"`. Set `CASSANDRA_WEB_READ_ONLY=true` in
 `docker-local/.env` to keep the UI's truncate/import/delete buttons away from
-real data, accepting that the Query page stops working.
+real data, accepting that the Query page stops working; the row browser is
+unaffected. Against a cluster with auth, a SELECT-only role is the better lock,
+because Cassandra refuses the write and the Query page keeps working.
 
-### Why the row browser cannot list the three message tables
-
-The row browser issues `SELECT *`, and that is what fails — not reactions
-specifically, and not the Query page. It fails *silently*, which is the part
-that bites: see the warning above before concluding a table is empty.
-
-This is not fixable from our side without owning a fork. The image is prebuilt
-upstream, the row browser has no per-table opt-out, and it surfaces a dropped
-connection as an empty result rather than an error. Patching it to select
-columns explicitly, or to render the failure, means maintaining a fork of a
-project last released in August 2024 — see the provenance note above. The
-documented Query-page route is the trade we took instead.
+### How reactions are rendered
 
 `messages_by_room`, `messages_by_id` and `thread_messages_by_thread` carry
-`reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>`. Any generic
-browser has to read rows through gocql's untyped API (`Iter.SliceMap`), which
-builds the Go map type with `reflect.MapOf` — and a UDT decodes to
-`map[string]interface{}`, which is not a valid Go map key. The request panics
-server-side, the connection drops, and the table renders **empty with no
-error**. The other tabs (columns, definition) work normally.
+`reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>` — a map whose *key*
+is a UDT. A generic browser reads rows through gocql's untyped API
+(`Iter.MapScan` / `Iter.SliceMap`), which derives the Go destination type from
+the CQL type: a UDT becomes `map[string]interface{}` and a map becomes
+`reflect.MapOf(key, elem)`. Asking `reflect` for a map keyed by a Go map panics
+with `invalid key type`, and because it panics rather than returning an error,
+gocql's error-returning variant cannot catch it either. In the upstream image
+the request died mid-response and the table rendered **empty with no error** —
+indistinguishable from a genuinely empty table.
 
-This is not a version lag, and bumping the driver does not fix it: the panic
-reproduces identically on gocql `v1.7.0` (what this repo pins) and on the
-newest `apache/cassandra-gocql-driver v2.1.2`. Our own services are unaffected
-because they scan the column into a typed `map[ReactionKey]ReactorInfo`, which
-gocql handles fine — the limitation is specific to the untyped path.
+Our build decodes CQL values straight from the wire instead of asking `reflect`
+to build that type, so the map is readable. A key that cannot be a Go map key
+is rendered as its JSON encoding:
 
-`pinned_messages_by_room` has no reactions column, so `SELECT *` succeeds and
-it browses normally.
+```json
+"reactions": {
+  "{\"emoji\":\"thumbsup\",\"user_account\":\"alice\"}": {
+    "account": "alice", "eng_name": "Alice", "user_id": "u1",
+    "reacted_at": "2026-09-14T03:23:28.19Z"
+  }
+}
+```
 
-### Reading the message tables, reactions included
+So each key is itself valid JSON you can parse back into the `reaction_key`
+fields. Lists, sets, tuples and nested UDTs decode the same way, and a decode
+failure now surfaces as a 500 rather than a dropped connection.
 
-This is the part that works. Use the **Query** page and let *Cassandra* serialize the row, so the driver
-only ever sees `TEXT`. This is the standard way to read a UDT-keyed map from a
-driver that cannot represent one, and it needs no patched driver:
+`DESCRIBE` is served over CQL rather than by shelling out to `cqlsh`, which
+that image can no longer install — its tarball 404s and it needs `python2`,
+dropped from Alpine after 3.16. This needs Cassandra 4.0 or newer; ours is 5.
+
+### Reading rows from the Query page
+
+The row browser is usually enough. The Query page is for anything it does not
+cover, and Cassandra can serialize server-side if you would rather read a whole
+row as one JSON blob:
 
 Restrict every example to its full partition key — `message_id` for
 `messages_by_id`, `room_id` plus `bucket` for `messages_by_room`. A bare
@@ -460,14 +441,7 @@ SELECT message_id, msg, sender, toJson(reactions) AS reactions_json
   FROM chat.messages_by_id WHERE message_id = '<id>';
 ```
 
-`SELECT JSON *` returns one `[json]` column holding the whole row. Only a bare
-`SELECT reactions` or `SELECT *` hits the panic — naming other columns
-explicitly is fine too:
-
-```sql
-SELECT room_id, created_at, message_id, msg, sender, tcount
-  FROM chat.messages_by_room WHERE room_id = 'r-general' AND bucket = 1776816000000;
-```
+`SELECT JSON *` returns one `[json]` column holding the whole row.
 
 `bucket` is `floor(created_at_unix_ms / windowMs) * windowMs`; the window comes
 from `MESSAGE_BUCKET_HOURS` (default 360) and the math lives in

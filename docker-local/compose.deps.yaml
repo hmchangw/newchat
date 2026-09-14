@@ -116,46 +116,51 @@ services:
   # schema, row browser and a CQL Query page. Nothing seeds these tables, so on
   # a fresh stack they are empty until messages flow through the services.
   #
-  # `chat.pinned_messages_by_room` is the message table to open first in the row
-  # browser: it has no reactions column, so it lists normally.
-  #
-  # KNOWN LIMITATION — the *row browser* cannot list chat.messages_by_room,
-  # chat.messages_by_id or chat.thread_messages_by_thread. Those carry
+  # Our own build of Joey0538/cassandra-web, not the published upstream image.
+  # Upstream cannot list chat.messages_by_room, chat.messages_by_id or
+  # chat.thread_messages_by_thread at all: they carry
   # `reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>`, and gocql's
-  # untyped row API (Iter.SliceMap, which any generic browser must use) builds
-  # the Go map type with reflect.MapOf — a UDT decodes to map[string]interface{},
-  # which is not a valid Go map key, so the request panics and the table renders
-  # empty with no error — indistinguishable from a genuinely empty table, so
-  # never read it as "Cassandra has no messages". This is not a version lag: it
-  # reproduces identically on
-  # gocql v1.7.0 (the version this repo pins) and on the newest
-  # apache/cassandra-gocql-driver v2.1.2, so no driver bump fixes it.
+  # untyped row API derives the Go type from the CQL type, so a UDT-keyed map
+  # asks reflect.MapOf for a map keyed by a Go map. That panics, and since it
+  # panics rather than erroring, the request died mid-response and the table
+  # rendered empty with no error — indistinguishable from an empty table. Our
+  # build decodes CQL values from the wire instead, renders a UDT key as its
+  # JSON encoding, and surfaces any decode failure as a 500. All four tables
+  # browse normally. See the README's "How reactions are rendered".
   #
-  # The Query page reads those tables fine, reactions included, by asking
-  # Cassandra to serialize server-side so the driver only ever sees TEXT:
+  # The Query page is still there for whole-row JSON. Restrict examples to the
+  # full partition key: a LIMIT caps rows returned, not token ranges walked.
   #   SELECT JSON * FROM chat.messages_by_room WHERE room_id='r-general' AND bucket=...;
-  #   SELECT message_id, msg, toJson(reactions) FROM chat.messages_by_id LIMIT 20;
-  # Only a bare `SELECT reactions`/`SELECT *` hits the panic.
+  #   SELECT message_id, msg, toJson(reactions) FROM chat.messages_by_id WHERE message_id='<id>';
   #
   # Message bodies do not arrive readable: ATREST_ENABLED defaults to true, so
   # message-worker puts the body in enc_payload as ciphertext and leaves msg
   # NULL. See the README's "Messages reach Cassandra encrypted".
   #
   # READ_ONLY is off by default: the build rejects *every* Query-page statement
-  # when it is on, plain SELECTs included, which would disable the one path that
-  # reads these tables. Set CASSANDRA_WEB_READ_ONLY=true in docker-local/.env to
-  # keep the UI's truncate/import/delete buttons from reaching real data, at the
-  # cost of the Query page. Against a cluster with auth, a SELECT-only role is
-  # the better lock: Cassandra refuses the write and the Query page keeps
-  # working. See the README's "Connecting to a Cassandra that needs auth".
+  # when it is on, plain SELECTs included. Set CASSANDRA_WEB_READ_ONLY=true in
+  # docker-local/.env to keep the UI's truncate/import/delete buttons from
+  # reaching real data, at the cost of the Query page; the row browser is
+  # unaffected. Against a cluster with auth, a SELECT-only role is the better
+  # lock: Cassandra refuses the write and the Query page keeps working. See the
+  # README's "Connecting to a Cassandra that needs auth".
   cassandra-web:
-    image: ipushc/cassandra-web:v1.1.6
+    image: josephsylvan/cassandra-web:0.1.0-rc2
     container_name: chat-local-cassandra-web
+    # Bounded retries, not unless-stopped. This is the one service here that
+    # exits at startup rather than waiting, so a transient DNS or endpoint blip
+    # against a CASSANDRA_WEB_HOST outside this stack would otherwise leave the
+    # viewer down until someone restarts it by hand; depends_on only gates on
+    # the local cassandra. A cap keeps the other half working: a wrong password
+    # or a bad host is permanent, and an unbounded policy would retry it
+    # forever, replacing the clear startup FATAL with a container stuck
+    # Restarting and never passing its healthcheck (which `--wait` waits on).
+    restart: on-failure:3
     # Bound to 127.0.0.1, following the same rule the obs stack uses for its
-    # dev-only UIs. Upstream's last release is Aug 2024, built on Go 1.20.2;
-    # `govulncheck -mode=binary` reports 59 reachable stdlib advisories in it,
-    # mostly DoS-class in net/http and html/template. Fine for a viewer only
-    # the developer can reach, not something to expose on a shared network.
+    # dev-only UIs. The image is our own build (Go 1.26.8, x/net and x/crypto
+    # current; `govulncheck -mode=binary` reports 0 advisories the code calls,
+    # against 59 stdlib ones in the ipushc build this replaced). Loopback is
+    # still right: the UI is unauthenticated and write-capable.
     ports:
       - "127.0.0.1:${CASSANDRA_WEB_HOST_PORT:-8083}:8083"
     environment:
