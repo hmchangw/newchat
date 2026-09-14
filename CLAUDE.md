@@ -377,17 +377,23 @@ short for work that waits on a dependency.
 - `stream.WithOutageRetryBudget(s, schedule)` raises the cap to the count covering
   `stream.OutageRetryWindow` under the schedule the service actually settles with —
   17 deliveries against `DefaultBackoff`, so a failing message keeps retrying for at
-  least an hour (2h nominal) before the server gives up. It only raises a consumer
-  still on the package default, so an explicit `CONSUMER_MAX_DELIVER` wins.
+  least an hour (2h nominal) before the server gives up. It raises only a consumer
+  whose `MaxDeliver` still *equals* `stream.DefaultMaxDeliver`, so a `CONSUMER_MAX_DELIVER`
+  of any other value wins — but one pinned to exactly the default is indistinguishable
+  from unset and gets raised anyway. `stream.DefaultMaxAckPending` has the same shape
+  and the same caveat.
 - `stream.WithUnlimitedRedelivery(s)` lifts the cap entirely, for consumers whose
   handler drops poison itself rather than relying on a delivery count.
 - A cross-site lane needs the budget too — `inbox-worker`'s events wait on other
   sites, not just on a database.
 - At a cap, `Term` explicitly (`jsretry.IsLastAttempt` reports when you are on the
   last delivery) so the give-up is logged instead of vanishing.
-- The cost: each parked message holds its ack-pending slot for that whole hour rather
-  than ~6 minutes, so a consumer whose dependency can back up past
-  `CONSUMER_MAX_ACK_PENDING` stalls every other producer sharing that durable.
+- The cost: each parked message holds its ack-pending slot for the whole window — up
+  to ~2h05 nominal, since jitter draws each wait from `[d/2, d]` — rather than ~6
+  minutes, so a consumer whose dependency can back up past `CONSUMER_MAX_ACK_PENDING`
+  stalls every other producer sharing that durable. Size the ceiling against that
+  window: `inbox-worker` widens its own to 10x the default because one durable serves
+  every peer, where `outbox-worker` instead splits its lanes per destination.
 
 ### Graceful Shutdown
 - Use `pkg/shutdown.Wait` in every service's `main.go`
