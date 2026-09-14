@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -120,11 +120,11 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 	}
 	return cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
-			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			data, err := natsutil.DecodePayload(msg)
 			if err != nil {
 				// a bad frame won't decode on redelivery → poison
-				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest(fmt.Sprintf("decode payload: %s", err.Error()))))
+				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("decode payload", errcode.WithCause(err))))
 				return
 			}
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), data))
@@ -138,8 +138,7 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 // len(BackOff)<=MaxDeliver rule; MaxAckPending=1 keeps the lane strictly
 // sequential so a quit cannot overtake the upsert before it.
 func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
-	s.MaxDeliver = -1
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
 	cc.Durable = durableName
 	cc.MaxAckPending = 1
 	return cc

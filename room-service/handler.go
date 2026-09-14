@@ -17,7 +17,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
@@ -26,12 +25,15 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgraph"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // badgeCache is the badge cache's Valkey accelerator (pkg/badgecache.Cache
@@ -91,6 +93,11 @@ type Handler struct {
 	mentionableMaxLimit     int
 	// routeMode gates the namespace(s) same-site room .event uses (ROOM_SUBJECT_MODE); cross-site is always global.
 	routeMode subject.RoomRouteMode
+	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
+	// entries after authoritative subscription writes (role change, visibility
+	// change). nil disables invalidation (best-effort). Set post-construction,
+	// mirroring dekProvisioner/graphClient.
+	valkey valkeyutil.Client
 }
 
 func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, legacyRoomOrigins map[string]string, maxResponseBytes int64, routeMode subject.RoomRouteMode) *Handler {
@@ -119,33 +126,33 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 // on callers sending a stable X-Request-ID across retries — see docs/client-api.md.
 // Register/RegisterNoBody panic on subscription failure (fatal at startup).
 func (h *Handler) Register(r *natsrouter.Router) {
-	natsrouter.RegisterNoBody(r, subject.MuteTogglePattern(h.siteID), h.muteToggle)
-	natsrouter.RegisterNoBody(r, subject.FavoriteTogglePattern(h.siteID), h.favoriteToggle)
-	natsrouter.Register(r, subject.MoveChatPattern(h.siteID), h.moveChat)
-	natsrouter.RegisterNoBody(r, subject.OpenRoomPattern(h.siteID), h.openRoom)
-	natsrouter.RegisterNoBody(r, subject.RoomAppTabsPattern(h.siteID), h.getRoomAppTabs)
-	natsrouter.RegisterNoBody(r, subject.RoomAppCmdMenuPattern(h.siteID), h.getRoomAppCommandMenu)
-	natsrouter.RegisterNoBody(r, subject.OrgMembersPattern(h.siteID), h.listOrgMembers)
-	natsrouter.RegisterNoBody(r, subject.MemberListPattern(h.siteID), h.listMembers)
-	natsrouter.RegisterNoBody(r, subject.MemberStatusesPattern(h.siteID), h.listMemberStatuses)
-	natsrouter.RegisterNoBody(r, subject.MentionableSubscriptionsPattern(h.siteID), h.listMentionableSubscriptions)
-	natsrouter.RegisterNoBody(r, subject.RoomKeyGetPattern(h.siteID), h.getRoomKey)
-	natsrouter.RegisterNoBody(r, subject.MessageReadPattern(h.siteID), h.messageRead)
-	natsrouter.Register(r, subject.MessageReadReceiptPattern(h.siteID), h.messageReadReceipt)
-	natsrouter.Register(r, subject.MessageThreadReadPattern(h.siteID), h.messageThreadRead)
-	natsrouter.Register(r, subject.MemberRoleUpdatePattern(h.siteID), h.updateRole)
-	natsrouter.Register(r, subject.MemberRemovePattern(h.siteID), h.removeMember)
-	natsrouter.Register(r, subject.MemberAddPattern(h.siteID), h.addMembers)
-	natsrouter.Register(r, subject.RoomRenamePattern(h.siteID), h.roomRename)
-	natsrouter.Register(r, subject.RoomRestricted(h.siteID), h.roomRestricted)
-	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), h.roomsInfoBatch)
-	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), h.threadRoomInfoBatch)
-	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), h.clearAllThreadRead)
-	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), h.ensureRoomKey)
-	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), h.createRoom)
-	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), h.teamsRoomCall)
-	natsrouter.Register(r, subject.TeamsUserCallPattern(h.siteID), h.teamsUserCall)
-	natsrouter.Register(r, subject.TeamsMeetingPattern(h.siteID), h.teamsMeeting)
+	natsrouter.RegisterNoBody(r, subject.MuteTogglePattern(h.siteID), natsmetrics.MethodToggleMute, h.muteToggle)
+	natsrouter.RegisterNoBody(r, subject.FavoriteTogglePattern(h.siteID), natsmetrics.MethodToggleFavorite, h.favoriteToggle)
+	natsrouter.Register(r, subject.MoveChatPattern(h.siteID), natsmetrics.MethodMoveChat, h.moveChat)
+	natsrouter.RegisterNoBody(r, subject.OpenRoomPattern(h.siteID), natsmetrics.MethodOpenRoom, h.openRoom)
+	natsrouter.RegisterNoBody(r, subject.RoomAppTabsPattern(h.siteID), natsmetrics.MethodGetRoomAppTabs, h.getRoomAppTabs)
+	natsrouter.RegisterNoBody(r, subject.RoomAppCmdMenuPattern(h.siteID), natsmetrics.MethodGetRoomAppCommandMenu, h.getRoomAppCommandMenu)
+	natsrouter.RegisterNoBody(r, subject.OrgMembersPattern(h.siteID), natsmetrics.MethodListOrgMembers, h.listOrgMembers)
+	natsrouter.RegisterNoBody(r, subject.MemberListPattern(h.siteID), natsmetrics.MethodListMembers, h.listMembers)
+	natsrouter.RegisterNoBody(r, subject.MemberStatusesPattern(h.siteID), natsmetrics.MethodListMemberStatuses, h.listMemberStatuses)
+	natsrouter.RegisterNoBody(r, subject.MentionableSubscriptionsPattern(h.siteID), natsmetrics.MethodListMentionableSubscriptions, h.listMentionableSubscriptions)
+	natsrouter.RegisterNoBody(r, subject.RoomKeyGetPattern(h.siteID), natsmetrics.MethodGetRoomKey, h.getRoomKey)
+	natsrouter.RegisterNoBody(r, subject.MessageReadPattern(h.siteID), natsmetrics.MethodMarkRoomRead, h.messageRead)
+	natsrouter.Register(r, subject.MessageReadReceiptPattern(h.siteID), natsmetrics.MethodListMessageReaders, h.messageReadReceipt)
+	natsrouter.Register(r, subject.MessageThreadReadPattern(h.siteID), natsmetrics.MethodMarkThreadRead, h.messageThreadRead)
+	natsrouter.Register(r, subject.MemberRoleUpdatePattern(h.siteID), natsmetrics.MethodUpdateMemberRole, h.updateRole)
+	natsrouter.Register(r, subject.MemberRemovePattern(h.siteID), natsmetrics.MethodRemoveMember, h.removeMember)
+	natsrouter.Register(r, subject.MemberAddPattern(h.siteID), natsmetrics.MethodAddMembers, h.addMembers)
+	natsrouter.Register(r, subject.RoomRenamePattern(h.siteID), natsmetrics.MethodRenameRoom, h.roomRename)
+	natsrouter.Register(r, subject.RoomRestricted(h.siteID), natsmetrics.MethodSetRoomRestricted, h.roomRestricted)
+	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), natsmetrics.MethodBatchGetRoomsInfo, h.roomsInfoBatch)
+	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), natsmetrics.MethodBatchGetThreadRoomsInfo, h.threadRoomInfoBatch)
+	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), natsmetrics.MethodMarkSiteThreadsRead, h.clearAllThreadRead)
+	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), natsmetrics.MethodEnsureRoomKey, h.ensureRoomKey)
+	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), natsmetrics.MethodCreateRoom, h.createRoom)
+	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), natsmetrics.MethodStartTeamsRoomCall, h.teamsRoomCall)
+	natsrouter.Register(r, subject.TeamsUserCallPattern(h.siteID), natsmetrics.MethodStartTeamsUserCall, h.teamsUserCall)
+	natsrouter.Register(r, subject.TeamsMeetingPattern(h.siteID), natsmetrics.MethodCreateTeamsMeeting, h.teamsMeeting)
 }
 
 func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest) (*model.CreateRoomReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
@@ -446,11 +453,11 @@ func (h *Handler) listMembers(c *natsrouter.Context) (*model.ListRoomMembersResp
 		return nil, errListOffsetInvalid
 	}
 
-	members, err := h.store.ListRoomMembers(ctx, roomID, req.Limit, req.Offset, req.Enrich)
+	members, hasMore, err := h.store.ListRoomMembers(ctx, roomID, req.Limit, req.Offset, req.Enrich)
 	if err != nil {
 		return nil, fmt.Errorf("get room members: %w", err)
 	}
-	return &model.ListRoomMembersResponse{Members: members}, nil
+	return &model.ListRoomMembersResponse{Members: members, HasMore: hasMore}, nil
 }
 
 func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, error) {
@@ -499,8 +506,7 @@ func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, 
 	if pair == nil {
 		// No slot and no archive entry: the only signal retention was too short.
 		// op separates this from room-worker's unrelated use of the same counter.
-		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1,
-			metric.WithAttributes(attribute.String("op", "GetByVersion")))
+		roomkeymetrics.RecordKeyAbsent(ctx, "GetByVersion")
 		return nil, errRoomKeyAbsent
 	}
 	// #nosec G117 -- RoomKeyGetResponse.PrivateKey is the intended payload: on-demand key delivery to the authorized room member over an auth-callout-gated per-user NATS subject, not a leak
@@ -546,6 +552,9 @@ func (h *Handler) requireMembershipAndGetRoom(ctx context.Context, account, room
 		return nil, fmt.Errorf("check room membership: %w", subErr)
 	}
 	if roomErr != nil {
+		if errors.Is(roomErr, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", roomErr)
 	}
 	return room, nil
@@ -660,6 +669,9 @@ func (h *Handler) removeMember(c *natsrouter.Context, req model.RemoveMemberRequ
 	// Channel-only: DM/botDM removals are not supported.
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
 	if room.Type != model.RoomTypeChannel {
@@ -744,16 +756,22 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		return nil, errRoomIDMismatch
 	}
 	req.RoomID = roomID
-	if req.NewRole != model.RoleOwner && req.NewRole != model.RoleMember {
+	// Clients may still send the legacy "member" spelling; normalize once so the
+	// rest of the handler compares against RoleUser only.
+	req.NewRole = model.NormalizeRole(req.NewRole)
+	if req.NewRole != model.RoleOwner && req.NewRole != model.RoleUser {
 		return nil, errInvalidRole
 	}
-	// Promote-only guard: demoting a legacy bot-owner back to member stays
+	// Promote-only guard: demoting a legacy bot-owner back to a plain user stays
 	// allowed so operators can repair such rooms.
 	if req.NewRole == model.RoleOwner && (model.IsBot(req.Account) || model.IsPlatformAdminAccount(req.Account)) {
 		return nil, errBotCannotBeOwner
 	}
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
 	if room.Type != model.RoomTypeChannel {
@@ -778,7 +796,7 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 	if req.NewRole == model.RoleOwner && hasRole(target.Subscription.Roles, model.RoleOwner) {
 		return nil, errAlreadyOwner
 	}
-	if req.NewRole == model.RoleMember && !hasRole(target.Subscription.Roles, model.RoleOwner) {
+	if req.NewRole == model.RoleUser && !hasRole(target.Subscription.Roles, model.RoleOwner) {
 		return nil, errNotOwner
 	}
 	// Reject only provably org-only members; subscription-only members (both flags false) are promotable.
@@ -786,7 +804,7 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		return nil, errPromoteRequiresIndividual
 	}
 	// Last-owner guard only needed on self-demotion; rule #5 ensures requester is an owner.
-	if req.NewRole == model.RoleMember && req.Account == requester {
+	if req.NewRole == model.RoleUser && req.Account == requester {
 		count, err := h.store.CountOwners(ctx, roomID)
 		if err != nil {
 			return nil, fmt.Errorf("count owners: %w", err)
@@ -798,6 +816,17 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 	// One instant shared by the origin write and the published event: the doc's
 	// rolesUpdatedAt must equal the event timestamp so remote replicas guard against
 	// the same high-water mark.
+	// Resolve the federation destination BEFORE the write. The validation above
+	// short-circuits on errAlreadyOwner/errNotOwner, so once the role has
+	// committed a retry of this same request returns early and never reaches the
+	// federation below — a failure between the two would leave the remote
+	// replica on the old role permanently, with nothing to reconcile it.
+	// Failing here costs a retry and changes nothing.
+	userSiteID, err := h.store.GetUserSiteID(ctx, req.Account)
+	if err != nil {
+		return nil, fmt.Errorf("get user siteId: %w", err)
+	}
+
 	now := time.Now().UTC()
 	sub, err := h.store.SetOwnerRole(ctx, roomID, req.Account, req.NewRole == model.RoleOwner, now)
 	if err != nil {
@@ -806,6 +835,9 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		}
 		return nil, fmt.Errorf("set owner role: %w", err)
 	}
+	// Bust AFTER the write: the cached Roles drove canBypassLargeRoomCap in the
+	// gatekeeper and must not keep serving the pre-change decision.
+	subauthcache.BustSub(ctx, h.valkey, roomID, req.Account)
 
 	// Role updates are channel-only (guarded above); the channel name is already in hand.
 	subEvtData, err := h.publishSubscriptionUpdate(ctx, req.Account, "role_updated", sub, room.Name, now)
@@ -813,10 +845,6 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		return nil, err
 	}
 
-	userSiteID, err := h.store.GetUserSiteID(ctx, req.Account)
-	if err != nil {
-		return nil, fmt.Errorf("get user siteId: %w", err)
-	}
 	if userSiteID != "" && userSiteID != h.siteID {
 		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxRoleUpdated, subEvtData, req.Account, now.UnixMilli()); err != nil {
 			return nil, fmt.Errorf("federate role-updated: %w", err)
@@ -886,6 +914,9 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	// 3. Get room and guard on type
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
 	if room.Type != model.RoomTypeChannel {
@@ -1122,7 +1153,7 @@ func (h *Handler) expandChannelRefs(ctx context.Context, requester string, refs 
 				}
 				return nil, nil, fmt.Errorf("subscription check %s: %w", ref.RoomID, subErr)
 			}
-			members, err = h.store.ListRoomMembers(refCtx, ref.RoomID, &listLimit, nil, false)
+			members, _, err = h.store.ListRoomMembers(refCtx, ref.RoomID, &listLimit, nil, false)
 			cancel()
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {
@@ -1393,6 +1424,9 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil
 	})
 	if err := g.Wait(); err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, err
 	}
 
@@ -1978,7 +2012,7 @@ func (h *Handler) roomRename(c *natsrouter.Context, req model.RoomRenameRequest)
 
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+		if errors.Is(err, ErrRoomNotFound) {
 			return nil, errRoomNotFound
 		}
 		return nil, fmt.Errorf("get room: %w", err)
@@ -2050,7 +2084,7 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 
 	room, err := h.store.GetRoom(ctx, req.RoomID)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+		if errors.Is(err, ErrRoomNotFound) {
 			return nil, errRoomNotFound
 		}
 		return nil, fmt.Errorf("get room: %w", err)
@@ -2086,13 +2120,13 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 		}
 		return nil, fmt.Errorf("update room restricted: %w", err)
 	}
-	if err := h.store.ApplySubscriptionRestriction(ctx, req.RoomID, req.Restricted, req.ExternalAccess, req.OwnerAccount, time.UnixMilli(req.Timestamp).UTC()); err != nil {
-		if errors.Is(err, ErrOwnerNotSubscribed) {
-			return nil, errOwnerNotMember
-		}
-		return nil, fmt.Errorf("apply subscription restricted: %w", err)
-	}
-
+	// Collect the subscriber set BEFORE the bulk role rewrite. It names who the
+	// write is about to affect, and it is what the cache bust below needs. This
+	// is request/reply with no automatic retry, so a listing failure AFTER the
+	// write would return an error having already left every subscriber's cached
+	// authorization decision wrong for the rest of the L2 TTL. The set is the
+	// same either side of the write — the rewrite changes roles, never
+	// membership.
 	subs, err := h.store.ListSubscriptionsByRoom(ctx, req.RoomID)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
@@ -2101,6 +2135,19 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 	for i := range subs {
 		accounts = append(accounts, subs[i].User.Account)
 	}
+
+	if err := h.store.ApplySubscriptionRestriction(ctx, req.RoomID, req.Restricted, req.ExternalAccess, req.OwnerAccount, time.UnixMilli(req.Timestamp).UTC()); err != nil {
+		if errors.Is(err, ErrOwnerNotSubscribed) {
+			return nil, errOwnerNotMember
+		}
+		return nil, fmt.Errorf("apply subscription restricted: %w", err)
+	}
+	// Bust every subscriber's subauthcache L2 entry in one batched round trip:
+	// ApplySubscriptionRestriction may have bulk-rewritten Roles (owner set,
+	// everyone else demoted to member) alongside the restricted/externalAccess
+	// flags, so a stale cached decision for any subscriber — not just
+	// OwnerAccount — would be wrong.
+	subauthcache.BustSubs(ctx, h.valkey, req.RoomID, accounts)
 	users, err := h.store.FindUsersByAccounts(ctx, accounts)
 	if err != nil {
 		return nil, fmt.Errorf("find users for inbox fan-out: %w", err)
@@ -2492,7 +2539,9 @@ func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID stri
 	}
 	room, err := h.store.GetRoomAppRead(ctx, roomID)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+		// Deliberately not errRoomNotFound: a non-member must not learn
+		// whether the room exists.
+		if errors.Is(err, ErrRoomNotFound) {
 			return nil, errAppAccessDenied
 		}
 		return nil, fmt.Errorf("get room for app read: %w", err)

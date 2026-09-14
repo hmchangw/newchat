@@ -30,6 +30,7 @@ func TestSubscriptionRepo_ReadPreferenceRouting(t *testing.T) {
 		r := NewSubscriptionRepo(db, 0, 0)
 		assert.Same(t, r.enriched, r.enrichedSecondary)
 		assert.Same(t, r.subscriptions, r.subscriptionsSecondary)
+		assert.Same(t, r.rooms, r.roomsSecondary)
 	})
 
 	t.Run("secondary preference clones read handles but not the primary ones", func(t *testing.T) {
@@ -38,6 +39,8 @@ func TestSubscriptionRepo_ReadPreferenceRouting(t *testing.T) {
 		assert.NotSame(t, r.subscriptions.Raw(), r.subscriptionsSecondary.Raw())
 		// GetAppSubscription (dedup guard) must keep using the primary handle.
 		assert.NotSame(t, r.subscriptions.Raw(), r.subscriptionsSecondary.Raw())
+		// The sort-key read takes the secondary; the page baseline read does not.
+		assert.NotSame(t, r.rooms, r.roomsSecondary)
 	})
 }
 

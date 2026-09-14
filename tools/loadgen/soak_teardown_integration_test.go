@@ -19,7 +19,7 @@ import (
 func TestTeardownSoak_DeletesOnlySelectedMongoRun(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "loadgen_soak_teardown")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	now := time.Now().UTC()
 
 	require.NoError(t, store.PutManifest(ctx, &soakManifest{
@@ -120,7 +120,7 @@ func TestTeardownSoak_DeletesOnlySelectedMongoRun(t *testing.T) {
 func TestTeardownSoak_PreservesArtifactsForUnownedRoomInOwnershipChunk(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "loadgen_soak_teardown_unowned")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	now := time.Now().UTC()
 
 	require.NoError(t, store.PutManifest(ctx, &soakManifest{
@@ -181,14 +181,14 @@ func TestTeardownSoak_PreservesArtifactsForUnownedRoomInOwnershipChunk(t *testin
 func TestTeardownSoak_DeletesSubscriptionsRoomServiceWroteForCreatedRooms(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "loadgen_soak_teardown_created")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	now := time.Now().UTC()
 
 	require.NoError(t, store.PutManifest(ctx, &soakManifest{
 		ID: "run-created", State: soakManifestSeeded, StartedAt: now, UpdatedAt: now,
 	}))
 	insertRoomServiceCreatedRoom(
-		t, ctx, store, "run-created", "site-a", "created-room-1",
+		t, ctx, db, store, "run-created", "site-a", "created-room-1",
 		[]model.SubscriptionUser{
 			{ID: "u1", Account: "alice"},
 			{ID: "u2", Account: "bob"},

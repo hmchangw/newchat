@@ -12,4 +12,5 @@ import (
 // Declared in the consumer so the handler can be tested without the service.
 type subscriptionLister interface {
 	ListSubscriptionsFor(ctx context.Context, account string, req models.SubscriptionListRequest, defaultLimit, maxLimit int) (*models.PagedSubscriptionListResponse, error)
+	CountSubscriptionsFor(ctx context.Context, account string, req models.CountRequest) (*models.CountResponse, error)
 }

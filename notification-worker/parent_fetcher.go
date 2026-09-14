@@ -69,7 +69,7 @@ type parentMessageProjection struct {
 func (f *historyParentFetcher) FetchParent(ctx context.Context, account, roomID, siteID, messageID string) (*ParentMessageInfo, error) {
 	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
-		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
+		return nil, errcode.MarshalFailed("GetMessageByID request", err)
 	}
 	started := time.Now()
 	msg, err := f.nc.Request(ctx, subject.MsgGet(account, roomID, siteID), reqBytes, parentFetchTimeout)

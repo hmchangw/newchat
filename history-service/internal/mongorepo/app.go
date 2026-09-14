@@ -2,6 +2,7 @@ package mongorepo
 
 import (
 	"context"
+	"fmt"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -34,4 +35,27 @@ func (r *AppRepo) AppNameByAccount(ctx context.Context, botAccount string) (stri
 		return "", nil
 	}
 	return app.Name, nil
+}
+
+// AppNamesByAccounts returns app.name keyed by assistant.name for every apps
+// document matching one of botAccounts, in a single read. Accounts with no app are
+// absent from the map rather than an error. The existing apps (assistant.name)
+// index covers the $in filter.
+func (r *AppRepo) AppNamesByAccounts(ctx context.Context, botAccounts []string) (map[string]string, error) {
+	if len(botAccounts) == 0 {
+		return nil, nil
+	}
+	apps, err := r.apps.FindMany(ctx, bson.M{"assistant.name": bson.M{"$in": botAccounts}},
+		mongoutil.WithProjection(bson.M{"name": 1, "assistant.name": 1, "_id": 0}))
+	if err != nil {
+		return nil, fmt.Errorf("find app names by accounts: %w", err)
+	}
+	names := make(map[string]string, len(apps))
+	for i := range apps {
+		// A document whose assistant did not project (or is absent) names nobody.
+		if a := apps[i].Assistant; a != nil && a.Name != "" {
+			names[a.Name] = apps[i].Name
+		}
+	}
+	return names, nil
 }

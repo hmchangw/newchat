@@ -40,21 +40,6 @@ func (m *MockStore) EXPECT() *MockStoreMockRecorder {
 	return m.recorder
 }
 
-// GetRoomSiteID mocks base method.
-func (m *MockStore) GetRoomSiteID(ctx context.Context, roomID string) (string, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetRoomSiteID", ctx, roomID)
-	ret0, _ := ret[0].(string)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// GetRoomSiteID indicates an expected call of GetRoomSiteID.
-func (mr *MockStoreMockRecorder) GetRoomSiteID(ctx, roomID any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomSiteID", reflect.TypeOf((*MockStore)(nil).GetRoomSiteID), ctx, roomID)
-}
-
 // GetUpload mocks base method.
 func (m *MockStore) GetUpload(ctx context.Context, fileID string) (*upload, error) {
 	m.ctrl.T.Helper()
@@ -70,17 +55,18 @@ func (mr *MockStoreMockRecorder) GetUpload(ctx, fileID any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUpload", reflect.TypeOf((*MockStore)(nil).GetUpload), ctx, fileID)
 }
 
-// IsMember mocks base method.
-func (m *MockStore) IsMember(ctx context.Context, roomID, account string) (bool, error) {
+// MemberSiteID mocks base method.
+func (m *MockStore) MemberSiteID(ctx context.Context, roomID, account string) (string, bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "IsMember", ctx, roomID, account)
-	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret := m.ctrl.Call(m, "MemberSiteID", ctx, roomID, account)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
-// IsMember indicates an expected call of IsMember.
-func (mr *MockStoreMockRecorder) IsMember(ctx, roomID, account any) *gomock.Call {
+// MemberSiteID indicates an expected call of MemberSiteID.
+func (mr *MockStoreMockRecorder) MemberSiteID(ctx, roomID, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsMember", reflect.TypeOf((*MockStore)(nil).IsMember), ctx, roomID, account)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MemberSiteID", reflect.TypeOf((*MockStore)(nil).MemberSiteID), ctx, roomID, account)
 }

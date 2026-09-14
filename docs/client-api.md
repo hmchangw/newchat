@@ -87,7 +87,7 @@ paths.
 12. [Client Update Service](#12-client-update-service)
     - [POST /api/v1/version](#post-apiv1version) · [GET /api/v1/version/:fileName](#get-apiv1versionfilename)
 13. [User Service HTTP API](#13-user-service-http-api)
-    - [13.1 Authentication](#131-authentication) · [13.2 GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions)
+    - [13.1 Authentication](#131-authentication) · [13.2 GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions) · [13.3 GET /api/v1/subscriptions/count](#133-http--get-apiv1subscriptionscount)
 
 ---
 
@@ -525,7 +525,9 @@ Uses the [§6](#6-error-envelope-reference) envelope. HTTP statuses:
 
 Uploads one or more images for a room on behalf of the authenticated user. Each
 file is validated independently and the response reports per-file
-success/failure in a single `200` (partial success).
+success/failure in a single `200` (partial success). A file whose name already
+exists in the room is re-uploaded automatically as a separate copy, so a name
+conflict is reported as a success unless that re-upload also fails.
 
 #### Request
 
@@ -552,7 +554,7 @@ success/failure in a single `200` (partial success).
 |---|---|---|
 | `name` | string | The file name. |
 | `status` | string | `success` for an uploaded file, `failure` for a rejected one. |
-| `error` | string | Present on failure: `file size exceeds limit`, `file has an invalid file type`, or `failed to open file`. |
+| `error` | string | Present on failure: `file size exceeds limit`, `file has an invalid file type`, `failed to open file`, or the storage backend's own message. |
 | `relativePath` | string | Present on success: path to download the file via the GET endpoint below, including the `drive_host` query param. |
 
 ```json
@@ -574,7 +576,6 @@ A whole-request failure (not a per-file rejection) uses the
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "too many files" }` — also `roomId is required`, `request must be multipart/form-data`. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 | 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
-| 404 | `not_found` | — | `{ "code": "not_found", "error": "room not found" }` |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context, no email on the account, or a Drive/store fault; real cause logged server-side only. |
 
 #### Triggered events — success path
@@ -593,7 +594,8 @@ A whole-request failure (not a per-file rejection) uses the
 **Reply:** synchronous HTTP response
 
 Uploads a single file (image/audio/video/document) for a room on behalf of the
-authenticated user and stores it in Drive. Returns a render-ready
+authenticated user and stores it in Drive. A file whose name already exists in
+the room is stored automatically as a separate copy. Returns a render-ready
 [Attachment](#attachment) the client uses to compose a `msg.send` (§4). This is a
 pure-HTTP endpoint — it does **not** publish a message.
 
@@ -644,7 +646,6 @@ Uses the [§6](#6-error-envelope-reference) envelope. HTTP statuses:
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "file type is not allowed" }` — also `roomId is required`, `request must be multipart/form-data`, `file is required`, `too many files`, `file size exceeds limit`. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 | 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
-| 404 | `not_found` | — | `{ "code": "not_found", "error": "room not found" }` |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context, no email on the account, or a read fault; real cause logged server-side only. |
 | 503 | `unavailable` | — | `{ "code": "unavailable", "error": "drive upload failed" }` |
 
@@ -690,6 +691,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is required" }` — also `roomId is required`, `fileId is required`. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is not a configured Drive host" }` — `drive_host` must be one of the Drive base URLs this deployment is configured for. Send back the value the upload response gave you; it is not a free-form URL. The rejected value is not echoed. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 | 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context. |
@@ -738,6 +740,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is required" }` — also `roomId is required`, `fileId is required`. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is not a configured Drive host" }` — `drive_host` must be one of the Drive base URLs this deployment is configured for. Send back the value the upload response gave you; it is not a free-form URL. The rejected value is not echoed. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 | 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context. |
@@ -973,7 +976,7 @@ it is absent on every other action.
 | `siteId` | string | The room's home site. |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — **as seen by this subscriber** (see [Effective room type](#effective-room-type)). |
 | `name` | string | Display name per room type (see above). |
-| `roles` | string[] | The user's roles in the room (e.g. `["member"]`, `["owner"]`). |
+| `roles` | string[] | The user's roles in the room (e.g. `["user"]`, `["owner"]`). Subscriptions written before the role cutover store the legacy value `"member"`; the server normalizes it to `"user"` on every response, so clients never see `"member"`. |
 | `joinedAt` | RFC3339 timestamp | When the user joined. |
 | `hasMention` | boolean | Whether the user has an unread mention. Authoritative subscription state maintained by the write path (set when the user is @-mentioned, cleared on read); **not** modified by read enrichment. For a mentionee homed on another site, `broadcast-worker` also relays a cross-site `subscription_mention` event so the badge lands on the site that serves their `subscription.list`. |
 | `hasUnread` | boolean | Whether the room has unread messages — computed at read time by comparing the room's `lastMsgAt` to the subscription's `lastSeenAt` (not persisted). System messages (member added/removed, rename, …) never set it; a member who has never opened the room sees it true whenever the room has any activity to compare against. **Deployment note:** while the `broadcast-worker` fleet is mixed, a room can briefly read as caught-up when it is not (and, before any writer is upgraded, a system message still marks it unread — the pre-change behavior). Drain the old writers before deploying the readers. |
@@ -1066,7 +1069,7 @@ that preview.
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | Message content snippet, capped at 500 runes (longer bodies are truncated). On `subscription.list` (both transports) it is truncated further to a short preview — 50 characters by default, whole characters only, no ellipsis appended. |
+| `content` | string | Full message content (never truncated server-side beyond the message size limit). On `subscription.list` (both transports) it is truncated to a short preview — 50 characters by default, whole characters only, no ellipsis appended. |
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. At most 10 — the room list renders a count, not the set. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. At most 20. |
@@ -1372,7 +1375,7 @@ The fields `requesterId`, `requesterAccount`, `timestamp`, and `historySharedSin
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, unrecognized `history.mode`). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, unrecognized `history.mode`). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added). When no room matches the subject `{roomID}` the reply is `"room not found"` (`not_found`).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -1423,7 +1426,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
     "roomId": "01970a4f8c2d7c9aQ",
     "roomType": "channel",
     "siteId": "siteA",
-    "roles": ["member"],
+    "roles": ["user"],
     "joinedAt": "2026-05-06T08:01:23Z",
     "room": {
       "siteId": "siteA",
@@ -1489,7 +1492,7 @@ For a **botDM**, the human member's event carries `appInfo` instead (the bot's o
 | `roomId` | string | |
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — the **room document's** type. One event serves every recipient, so a subscriber's own `roomType` may differ (see [Effective room type](#effective-room-type)). Omitted when empty. |
-| `members` | [RoomMemberEntry](#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
+| `members` | [RoomMemberEntry](#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `appName` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
@@ -1562,7 +1565,7 @@ Exactly one of `account` or `orgId` must be set. The fields `requester`, `roomTy
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually). The last-member guard counts **human** members only: removing the last human is rejected even when bot members remain, while removing a bot never trips the guard.
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually). The last-member guard counts **human** members only: removing the last human is rejected even when bot members remain, while removing a bot never trips the guard. When no room matches the subject `{roomID}` the reply is `"room not found"` (`not_found`).
 
 ```json
 { "code": "bad_request", "error": "exactly one of account or orgId must be set" }
@@ -1643,7 +1646,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 |---|---|---|---|
 | `roomId` | string | no | Server derives from subject; non-matching values are rejected. |
 | `account` | string | yes | The account of the user whose role is being changed. |
-| `newRole` | string | yes | Either `"owner"` (promote) or `"member"` (demote). |
+| `newRole` | string | yes | Either `"owner"` (promote) or `"user"` (demote). The legacy spelling `"member"` is still accepted and treated as `"user"`. |
 
 The `timestamp` field on the Go `UpdateRoleRequest` is server-set — the client should omit it.
 
@@ -1667,12 +1670,13 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 
 - Requester is not an owner of the room.
 - Target account is not a member of the room.
-- `newRole` is neither `"owner"` nor `"member"`.
+- `newRole` is neither `"owner"` nor `"user"` (nor the legacy alias `"member"`).
 - Promote attempt when the target is already an owner.
 - Demote attempt when the target is not an owner.
 - Last-owner guard: an owner cannot demote themselves if they are the only owner.
 - Promote attempt on a bot account — rejected with `"bots cannot be room owners"` (demoting a bot stays allowed).
 - Promote attempt on an org-only member (individual subscription required).
+- `"room not found"` (`not_found`) — no room matches the subject `{roomID}`.
 
 ```json
 { "code": "forbidden", "error": "only owners can update roles" }
@@ -1693,7 +1697,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
     "roomId": "01970a4f8c2d7c9aQ",
     "roomType": "channel",
     "siteId": "siteA",
-    "roles": ["member", "owner"],
+    "roles": ["user", "owner"],
     "joinedAt": "2026-05-06T08:01:23Z"
   },
   "action": "role_updated",
@@ -1809,7 +1813,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 > - `account` — the admin caller; carried as `byAccount` on the room event and recorded in room-service's log line
 > - `restricted` — whether the room is members-only
 > - `externalAccess` — whether the room is reachable from outside the company network (e.g. internet-side / off-VPN clients). This is a network-access gate, NOT a cross-site federation flag
-> - `ownerAccount` — **required** on the `false → true` transition. Whenever it is supplied together with `restricted: true` — transition or not — that account is promoted to **sole** owner and every other member is reset to plain member, so an already-restricted room can have its owner rotated. Omit it to change the flags without touching anyone's roles
+> - `ownerAccount` — **required** on the `false → true` transition. Whenever it is supplied together with `restricted: true` — transition or not — that account is promoted to **sole** owner and every other member is reset to the plain `user` role, so an already-restricted room can have its owner rotated. Omit it to change the flags without touching anyone's roles
 >
 > room-service does the Mongo writes, emits one `OutboxEvent` on the OUTBOX stream per remote federated site, and replies `{"status":"ok","requestId":"…"}` once the work is committed. `outbox-worker` forwards the cross-site `room_restricted` event (at-least-once) to each remote site's `chat.inbox.{remoteSiteID}.external.room_restricted`. No `AsyncJobResult` is emitted — the reply *is* the result.
 >
@@ -1840,9 +1844,9 @@ When the synchronous reply is an error envelope, the request was rejected before
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | If set, must be `> 0`. Caps the number of members returned. |
-| `offset` | number | no | If set, must be `>= 0`. For pagination. |
-| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `orgCode`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
+| `limit` | number | no | If set, must be `> 0`. Caps the number of members returned. Omitting it returns every member and always yields `hasMore: false`. |
+| `offset` | number | no | If set, must be `>= 0`. For pagination — advance it by the `limit` you sent to fetch the next page. |
+| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `appName`, `isOwner`, `sectName`, `employeeId`, `orgName`, `orgCode`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
 
 ```json
 { "limit": 50, "enrich": true }
@@ -1852,7 +1856,8 @@ When the synchronous reply is an error envelope, the request was rejected before
 
 | Field | Type | Notes |
 |---|---|---|
-| `members` | [RoomMember](#roommember)[] | One entry per individual or org membership. |
+| `members` | [RoomMember](#roommember)[] | One page of memberships, one entry per individual or org membership. |
+| `hasMore` | boolean | `true` when at least one more member follows this page (the server over-fetches `limit + 1` to decide). Always `false` when the request carried no `limit`. Request the next page by advancing `offset` by the `limit` you sent. |
 
 ###### RoomMember
 
@@ -1874,7 +1879,8 @@ When the synchronous reply is an error envelope, the request was rejected before
 | `chineseName` | string | Optional. Populated only when `enrich: true`. |
 | `sectName` | string | Optional. The member's section name. Populated only when `enrich: true` and entry is an individual. |
 | `employeeId` | string | Optional. The member's employee ID. Populated only when `enrich: true` and entry is an individual. |
-| `name` | string | Optional. Bot/app display name from `apps.name` when the member's account ends with `.bot`. Mutually exclusive with `engName`/`chineseName`. |
+| `appName` | string | Optional. Bot/app display name from `apps.name`. Always set for an account ending `.bot`. A bot account **without** that suffix resolves only when the room falls back to subscriptions (the only source carrying an `isBot` flag), so treat the `.bot` suffix as the reliable signal. Mutually exclusive with `engName`/`chineseName`. |
+| `name` | string | Optional. **Deprecated** alias of `appName`, emitted with the same value for pre-rename clients. Prefer `appName`. |
 | `isOwner` | boolean | Optional. Populated only when `enrich: true`. |
 | `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback), combined with the TC name when present. Populated only when `enrich: true` and entry is an org. |
 | `orgCode` | string | Optional. Org's plain section/department name (dept-first), without the TC-name combination `orgName` applies and with no orgID fallback. Populated only when `enrich: true` and entry is an org. |
@@ -1912,7 +1918,8 @@ When the synchronous reply is an error envelope, the request was rejected before
         "memberCount": 42
       }
     }
-  ]
+  ],
+  "hasMore": false
 }
 ```
 
@@ -1983,6 +1990,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `"only room members can perform this action"` — caller has no subscription in the room (sentinel reused across membership-gated RPCs).
 - `"limit must be > 0 and <= room user count"` — limit was `0`, negative, or larger than the room's current `userCount`.
+- `"room not found"` — no room matches the subject `{roomID}`.
 
 ##### Triggered events — success path
 
@@ -2104,6 +2112,7 @@ The subject already carries `account` and `roomID`, so no body fields are requir
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `"only room members can perform this action"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"room not found"` — no room matches the subject `{roomID}`.
 - A malformed subject surfaces as a generic `"internal error"` (the specific reason is sanitized away). Not normally reachable — the wildcard subscription guarantees a well-formed subject.
 
 ```json
@@ -2932,7 +2941,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `createdAt` | string | RFC 3339 timestamp. |
 | `messageId` | string | 17- or 20-char base62. |
 | `sender` | [MessageParticipant](#messageparticipant) | The message author. |
-| `msg` | string | The message body. For legacy `members_removed` system messages (`"{account}" has been removed from the channel.`), history-service substitutes the removed user's display name for the quoted account on read, keeping the quotes; an account with no matching user is returned unchanged. |
+| `msg` | string | The message body. For legacy `members_removed` system messages (`"{account}" has been removed from the channel.`), history-service substitutes the removed member's display name for the quoted account on read, keeping the quotes. A `.bot` account resolves to its registered app name, any other account to the user's composed name; an account matching neither is returned unchanged. Legacy `members_left` rows keep their stored text. |
 | `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Decoded attachment objects (history-service decodes the stored blobs on read). |
 | `card` | [MessageCard](#messagecard) | Optional. |
@@ -2946,7 +2955,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `visibleTo` | string | Optional. Opaque client-set visibility marker (set on `msg.send`). Stored and surfaced verbatim; the backend never filters delivery, reads, or previews on it — the client interprets the scope. |
 | `reactions` | map<emoji, [ReactionUser](#reactionuser)[]> | Optional. Omitted when absent; `{}` when present but empty. |
 | `deleted` | boolean | Optional. `true` for tombstoned messages. |
-| `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`, `"room_renamed"`. For all five, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other / room-creates / renames, the leaving user for self-leave). `"room_restricted"` also appears on historical messages: it is no longer produced — a restriction change emits a [room event](client-api/events.md#room_restricted-roomrestrictedroomevent) instead — but rows written before that change remain readable. |
+| `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`, `"room_renamed"`. For all five, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other / room-creates / renames, the leaving user for self-leave). `"room_restricted"` also appears on historical messages: it is no longer produced — a restriction change emits a [room event](client-api/events.md#room_restricted-roomrestrictedroomevent) instead — but rows written before that change remain readable. Migrated rows stored with a legacy plural type are normalized on read and never reach the client in that form: `members_removed` is returned as `member_removed`, `members_left` as `member_left`. |
 | `sysMsgData` | string | Optional. Base64-encoded JSON payload for system messages; shape depends on `type` (see [System-message `sysMsgData` payloads](#system-message-sysmsgdata-payloads)). |
 | `siteId` | string | Optional. The site that owns the message. |
 | `editedAt` | string | Optional. RFC 3339. Set after an edit. |
@@ -3478,7 +3487,7 @@ The payload is flat (no zero-valued room fields):
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](#reacting-to-a-preview-change). |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the full body, which list rows truncate). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -3574,7 +3583,7 @@ The payload is flat:
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](#reacting-to-a-preview-change). |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the full body, which list rows truncate). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -5303,7 +5312,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
       "roomId": "01970a4f8c2d7c9aQ",
       "siteId": "siteA",
       "roomType": "channel",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "engineering-general",
       "joinedAt": "2026-05-06T08:01:23Z",
       "hasMention": false,
@@ -5342,7 +5351,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
       "roomId": "alice_bob",
       "siteId": "siteA",
       "roomType": "dm",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "bob",
       "joinedAt": "2026-04-01T09:00:00Z",
       "hasMention": false,
@@ -5363,7 +5372,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
       "roomId": "alice_helper.bot",
       "siteId": "siteA",
       "roomType": "botDM",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "Helper",
       "isSubscribed": true,
       "joinedAt": "2026-03-15T11:00:00Z",
@@ -5442,7 +5451,7 @@ Same paginated shape as `subscription.list` — `{ "subscriptions": [...], "hasM
       "roomId": "01970a4f8c2d7c9aQ",
       "siteId": "siteA",
       "roomType": "channel",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "engineering-general",
       "joinedAt": "2026-05-06T08:01:23Z",
       "hasMention": false,
@@ -5514,7 +5523,7 @@ Returns the calling user's DM subscription with the named counterpart. The reply
     "roomId": "alice_bob",
     "siteId": "siteA",
     "roomType": "dm",
-    "roles": ["member"],
+    "roles": ["user"],
     "name": "bob",
     "joinedAt": "2026-04-01T09:00:00Z",
     "alert": false,
@@ -5577,7 +5586,7 @@ Same shape as `subscription.list` — a (here, at most one) list:
       "roomId": "alice_bob",
       "siteId": "siteA",
       "roomType": "dm",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "bob",
       "joinedAt": "2026-04-01T09:00:00Z",
       "alert": false,
@@ -5612,6 +5621,8 @@ Same shape as `subscription.list` — a (here, at most one) list:
 **Reply subject:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Returns the count of active subscriptions, optionally filtered to unread rooms only.
+
+> Also available over HTTP with no payload ceiling: [GET /api/v1/subscriptions/count](#133-http--get-apiv1subscriptionscount).
 
 **Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. Membership in the active set is decided from subscription state alone — no room document is consulted, and no room name is filtered. That holds for the whole request when `unread` is absent or `false`; `unread: true` then narrows the set using each room's activity (the local `$lookup` baseline, and `GetRoomsMeta` for cross-site rows) — see **Unread count behavior** below.
 
@@ -6451,12 +6462,12 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `content exceeds maximum size of 20480 bytes` | `bad_request` | — | `content` > 20 KiB. |
 | `visibleTo exceeds maximum size of 4096 bytes` | `bad_request` | — | `visibleTo` > 4096 bytes. |
 | `not subscribed` | `forbidden` | `not_subscribed` | Sender is not a member of the room. |
-| `posting is restricted to owners and admins in this room` | `forbidden` | `large_room_post_restricted` | Non-owner/admin/bot posting a top-level message in a room above the large-room threshold (thread replies are exempt). |
+| `posting is restricted to owners and admins in this room` | `forbidden` | `large_room_post_restricted` | Non-owner/admin/bot posting a top-level message in a room above the large-room threshold (thread replies are exempt). Not raised when the room-metadata read is unavailable — the cap is spam control, not access control, so it fails open and the send proceeds. |
 | `thread parent message not found` | `not_found` | `thread_parent_not_found` | `threadParentMessageId` does not resolve to a message the sender can read, on two lookups spaced `GATEKEEPER_THREAD_PARENT_RECHECK_DELAY` (150ms) apart — the second covers a parent whose own write is still in flight. Rejected at send time so the reply is never published to workers that would each retry and drop it. |
 | `quoted parent {id} not found` | `not_found` | — | The quoted message lookup failed (deleted, cross-room, …). |
 | `quoted parent {id} thread context mismatch: …` | `bad_request` | — | A quoted message must be in the same thread context (main-room or the same thread) as the new message — except a `tshow: true` thread reply, which may also be quoted from its parent channel room. |
 
-**Delivery guarantee:** every validation/authorization failure — including a `siteID` mismatch and a malformed `msg.send` subject — is replied to the client on the response subject and the JetStream message is acked (not retried). The error reply requires a routable response subject, so it can only be sent when the `{account}` segment is recoverable from the subject and the payload carries a valid hyphenated-UUID `requestId`; if neither is recoverable (a truly malformed subject or missing/invalid `requestId`) no reply is possible and the client falls back to a request timeout. **Only infrastructure failures** (store/publish errors) are nak'd and **redelivered by JetStream** — these produce no immediate reply.
+**Delivery guarantee:** every validation/authorization failure — including a `siteID` mismatch and a malformed `msg.send` subject — is replied to the client on the response subject and the JetStream message is acked (not retried). The error reply requires a routable response subject, so it can only be sent when the `{account}` segment is recoverable from the subject and the payload carries a valid hyphenated-UUID `requestId`; if neither is recoverable (a truly malformed subject or missing/invalid `requestId`) no reply is possible and the client falls back to a request timeout. **Only infrastructure failures** (store/publish errors) are nak'd and **redelivered by JetStream** — these produce no immediate reply. One exception: a failed **room-metadata** read is not nak'd. It only feeds the large-room cap, which is spam control rather than access control, so it fails open and the send proceeds. The subscription check that authorizes the send still fails closed.
 
 ```json
 { "code": "bad_request", "error": "content must not be empty" }
@@ -7776,7 +7787,7 @@ Toggles a channel room's on-duty state. On-duty staff work off the company netwo
 
 **Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything. No audit row is written — room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, is the only durable server-side record.
 
-Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to plain member. Turning duty **off** sends no owner, so roles are left exactly as they are.
+Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to the plain `user` role. Turning duty **off** sends no owner, so roles are left exactly as they are.
 
 Channel rooms only. The caller must also hold the platform `admin` user role, which room-service verifies independently of the session check.
 
@@ -8944,7 +8955,7 @@ Identical to the NATS reply — see [`subscription.list`](#subscriptionlist) for
       "roomId": "01970a4f8c2d7c9aQ",
       "siteId": "siteA",
       "roomType": "channel",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "engineering-general",
       "joinedAt": "2026-05-06T08:01:23Z",
       "hasMention": false,
@@ -9011,3 +9022,32 @@ X-Request-ID: 01970a4f-8c2d-7c9a-abcd-e0123456789f
 ```
 
 **Client contract:** honour `Retry-After` and retry with jitter. A 429 means *this pod* is momentarily full, not that the request was wrong — an immediate uniform retry from every client re-creates the burst that caused it. Do not treat it as a fatal error or force re-login.
+
+### 13.3 HTTP — GET /api/v1/subscriptions/count
+
+The HTTP form of [`subscription.count`](#subscriptioncount). Same active-set semantics, same unread-count behavior and staleness bounds, same `{count}` response.
+
+#### Query parameters
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `unread` | boolean | no | When `true`, returns the number of active rooms with unread messages or unread followed threads (degrades per-site for cross-site rooms, as with the NATS form). Omitted or `false` ⇒ the total active-subscription count. |
+
+```http
+GET /api/v1/subscriptions/count?unread=true HTTP/1.1
+ssoToken: <oidc-access-token>
+```
+
+#### Success response
+
+Identical to the NATS reply — see [`subscription.count`](#subscriptioncount).
+
+| Field | Type | Notes |
+|---|---|---|
+| `count` | number | The subscription count (total or unread depending on `unread`). |
+
+```json
+{ "count": 5 }
+```
+
+The response is marked `Cache-Control: private, no-store` (per-account data behind a non-standard credential header).

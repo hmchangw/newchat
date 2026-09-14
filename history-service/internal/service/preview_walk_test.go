@@ -280,6 +280,10 @@ func TestPreviewWalk_SkipsEverySystemType(t *testing.T) {
 		model.MessageTypeRoomRenamed,
 		model.MessageTypeRoomRestricted,
 		model.MessageTypeTeamsMeetStarted,
+		// Migrated rows. The walk reads Cassandra directly, so it classifies by the
+		// STORED type — the wire-side rewrite in normalizeLegacySysMsgs never runs here.
+		model.MessageTypeLegacyMembersRemoved,
+		model.MessageTypeLegacyMembersLeft,
 	}
 	for _, st := range systemTypes {
 		t.Run(st, func(t *testing.T) {
@@ -364,8 +368,8 @@ func TestPreviewWalk_ReadFailure_IsNotGone(t *testing.T) {
 	assert.False(t, gone)
 }
 
-// The preview carries render-ready enrichment: mapped participants, content capped.
-func TestPreviewWalk_EnrichesAndTruncates(t *testing.T) {
+// The preview carries render-ready enrichment: mapped participants, full content.
+func TestPreviewWalk_EnrichesAndKeepsFullContent(t *testing.T) {
 	m := msgAt("m-1", 1)
 	m.Msg = strings.Repeat("x", 900)
 	m.Sender = models.Participant{ID: "u-1", Account: "alice", EngName: "Alice", CompanyName: "愛麗絲"}
@@ -379,7 +383,7 @@ func TestPreviewWalk_EnrichesAndTruncates(t *testing.T) {
 	assert.Equal(t, "Alice 愛麗絲", got.Sender.DisplayName)
 	require.Len(t, got.Mentions, 1)
 	assert.Equal(t, "bob", got.Mentions[0].Account)
-	assert.Len(t, []rune(got.Content), 500, "the room list renders a snippet, not the whole body")
+	assert.Equal(t, strings.Repeat("x", 900), got.Content, "the preview carries the full body; only user-service narrows it at read time")
 }
 
 // A quoted reply is ordinary user content and previews like any other message.

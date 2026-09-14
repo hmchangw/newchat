@@ -87,7 +87,7 @@ This requires zero additional subjects, zero extra publishes, and zero write amp
 
 When offline, clients miss messages on non-active sidebar rooms. To restore mention badge state on reconnect, the server tracks mention counts per-user-per-room:
 
-1. **broadcast-worker** — when processing a message with non-empty `mentionedUserIDs`, atomically increments `mentionCountSinceLastSeen` on the `Subscription` record in MongoDB for each mentioned user (expanding `"all"`/`"here"` to the full member list)
+1. **roomlist-worker** — when processing a message with parsed mentions, sets the `hasMention` badge on the `Subscription` record in MongoDB for each mentioned user not already read past the message (this doc's `mentionCountSinceLastSeen` elsewhere is a stale field name predating this write path; the actual field is the boolean `hasMention`)
 2. **Subscription list response** (`chat.user.{account}.request.rooms.list`) — includes `mentionCountSinceLastSeen` per room, allowing the client to restore `@` badges without fetching message history for every sidebar room
 3. **Mark as read** — when the user opens a room, the client sends a read-position update (advancing `lastSeenAt`); the server resets `mentionCountSinceLastSeen` to `0` for that user+room
 
@@ -163,8 +163,8 @@ The single source of truth for downstream consumers (broadcast-worker, notificat
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
-| `chat.msg.canonical.{siteID}.created` | message-gatekeeper | broadcast-worker, notification-worker, search-sync-worker | New message persisted |
-| `chat.msg.canonical.{siteID}.updated` | history-service | broadcast-worker, search-sync-worker | Message edited |
+| `chat.msg.canonical.{siteID}.created` | message-gatekeeper | broadcast-worker, notification-worker, roomlist-worker, search-sync-worker | New message persisted |
+| `chat.msg.canonical.{siteID}.updated` | history-service | broadcast-worker, roomlist-worker, search-sync-worker | Message edited |
 | `chat.msg.canonical.{siteID}.deleted` | history-service | broadcast-worker, search-sync-worker | Message soft-deleted |
 | `chat.msg.canonical.{siteID}.reacted` | history-service | broadcast-worker, notification-worker, search-sync-worker (skips) | Reaction toggled (add/remove). Payload carries a `ReactionDelta`. search-sync-worker subscribes via the stream wildcard but no-ops on this subject because reactions don't change indexed content. |
 

@@ -12,7 +12,7 @@ import (
 var (
 	ErrUserNotFound       = errors.New("user not found")                        // GetUser: no matching account
 	ErrAppNotFound        = errors.New("app not found")                         // GetApp: no matching bot account
-	ErrRoomNotFound       = errors.New("room not found")                        // UpdateRoomVisibility: no matching room
+	ErrRoomNotFound       = errors.New("room not found")                        // GetRoom/GetRoomAppRead/UpdateRoomVisibility: no matching room
 	ErrOwnerNotSubscribed = errors.New("owner account is no longer subscribed") // ApplySubscriptionRestriction: owner left
 )
 
@@ -59,6 +59,7 @@ type RoomBotAppEntry struct {
 }
 
 type RoomStore interface {
+	// GetRoom returns ErrRoomNotFound when no room matches; any other error is infra.
 	GetRoom(ctx context.Context, id string) (*model.Room, error)
 	// GetRoomAppRead fetches only _id/type/siteId; same error contract as GetRoom.
 	GetRoomAppRead(ctx context.Context, id string) (*model.Room, error)
@@ -98,11 +99,14 @@ type RoomStore interface {
 	// Resolves candidates via pkg/pipelines.MatchCandidatesFilter, then (for a
 	// non-empty roomID) subtracts already-subscribed accounts via an indexed read.
 	CountNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID, excludeAccount string) (int, error)
-	// ListRoomMembers returns the members of roomID. When enrich=true, the
-	// returned RoomMember.Member entries carry display fields populated via
-	// $lookup stages against users and subscriptions. When enrich=false,
-	// display fields are left zero.
-	ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error)
+	// ListRoomMembers returns one page of the members of roomID plus a hasMore
+	// flag: true when at least one row follows the page. A non-nil limit makes
+	// the query over-fetch one row to decide it, trimmed off before returning;
+	// an unlimited request returns everything and hasMore=false. When
+	// enrich=true, the returned RoomMember.Member entries carry display fields
+	// populated via $lookup stages against users and subscriptions. When
+	// enrich=false, display fields are left zero.
+	ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, bool, error)
 	// ListOrgMembers returns all users whose sectId OR deptId equals orgID,
 	// projected as OrgMember rows sorted by account ascending. Returns a
 	// RoomInvalidOrg-reason errcode when no users match (treated as "orgId is
@@ -166,7 +170,8 @@ type RoomStore interface {
 	OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error)
 	// SetOwnerRole atomically grants (makeOwner=true) or revokes (makeOwner=false)
 	// the owner role on the subscription keyed by (roomID, account) via a single
-	// FindOneAndUpdate. Other roles (e.g. member) are retained. Stamps rolesUpdatedAt
+	// FindOneAndUpdate. Other roles are retained, with the legacy "member" spelling
+	// rewritten to "user" on the way through. Stamps rolesUpdatedAt
 	// so the origin doc carries the same high-water mark the federated event publishes
 	// (inbox-worker guards remote applies against it). Returns the updated
 	// subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.

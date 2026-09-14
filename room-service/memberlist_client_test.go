@@ -291,9 +291,10 @@ func TestNATSMemberListClient_ContextCancellation(t *testing.T) {
 // TestNATSMemberListClient_NotRoomMemberIsNotARequestFailure pins the metric
 // semantics for a business rejection. "You are not a member" is a complete,
 // well-formed answer from a healthy remote — the request/reply exchange
-// succeeded. Counting it as a failed request puts chat_nats_requests into the
-// transport-shaped other_error bucket at baseline and makes the family
-// unusable as a failure signal, which is the same rule GetMessageReadMeta
+// succeeded. Counting it as a failed request puts
+// rpc_client_call_duration_seconds into the transport-shaped other_error class
+// at baseline and makes the family unusable as a failure signal, which is the
+// same rule GetMessageReadMeta
 // already follows for CodeNotFound.
 func TestNATSMemberListClient_NotRoomMemberIsNotARequestFailure(t *testing.T) {
 	nc := startInProcessNATS(t)

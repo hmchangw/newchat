@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -97,7 +98,7 @@ func buildHandlerWithCapture(t *testing.T, db *mongo.Database) (*Handler, func()
 		return &jetstream.PubAck{}, nil
 	}
 	reply := func(_ context.Context, _ *nats.Msg) error { return nil }
-	return NewHandler(NewMongoStore(db, nil, 0), users, pub, reply, "site-a", nil, 500, 1, 8192, ""),
+	return NewHandler(NewMongoStore(db, nil, 0, 90*time.Minute, circuitbreaker.New(5, 10*time.Second), circuitbreaker.New(5, 10*time.Second)), users, pub, reply, "site-a", nil, 500, 1, 8192, ""),
 		func() *nats.Msg { return captured }
 }
 

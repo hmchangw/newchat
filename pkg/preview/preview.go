@@ -13,25 +13,21 @@ import (
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
-// MaxContentRunes caps PreviewMessage.Content: the room list renders a snippet only.
-const MaxContentRunes = 500
-
 // MaxAttachments and MaxMentions cap the collections the room list renders as a count or
-// a couple of chips. Capping Content alone bounded the one field that was already the
-// smallest risk: attachments and mentions ride uncapped from the message, so a single
-// wide message could size the coalescer's buffered entry, the stored document and every
-// reader's materialization of it at once. One cap at compose time bounds all three (#290).
+// a couple of chips. They ride uncapped from the message, so a single wide message could
+// size the coalescer's buffered entry, the stored document and every reader's
+// materialization of it at once. One cap at compose time bounds both (#290).
 const (
 	MaxAttachments = 10
 	MaxMentions    = 20
 )
 
-// Build normalizes a composed preview: truncated content, UTC timestamp. Takes
-// PreviewMessage itself so a new field cannot silently default on every write path.
+// Build normalizes a composed preview: capped collections, UTC timestamp. Content passes
+// through untouched. Takes PreviewMessage itself so a new field cannot silently default on
+// every write path.
 //
 //nolint:gocritic // hugeParam: PreviewMessage is the stored/wire shape itself; by-value keeps callers simple and the copy cost is negligible.
 func Build(p model.PreviewMessage) model.PreviewMessage {
-	p.Content = truncateContent(p.Content)
 	// Copy, don't reslice. Reslicing keeps the ORIGINAL backing array reachable, tail
 	// included, and this value is retained by Sealed.Meta and by the read cache — so the
 	// cap would bound the length while pinning exactly the memory it exists to bound.
@@ -45,21 +41,6 @@ func Build(p model.PreviewMessage) model.PreviewMessage {
 	return p
 }
 
-// truncateContent caps s at MaxContentRunes runes (never splitting a rune).
-func truncateContent(s string) string {
-	// Byte length bounds rune count, so the common short message needs no scan.
-	if len(s) <= MaxContentRunes {
-		return s
-	}
-	r := []rune(s)
-	if len(r) <= MaxContentRunes {
-		// Multi-byte but within the cap — return s rather than re-encoding it.
-		return s
-	}
-	// string() copies deliberately: slicing would pin the whole 20KB body in cache.
-	return string(r[:MaxContentRunes])
-}
-
 // Eligible reports whether a message may represent its room — system and deleted ones
 // may not. Shared: a rule on one writer only would strand a preview the walk never picks.
 // VisibleTo is deliberately NOT a gate: a message with a visibility marker is still
@@ -70,6 +51,10 @@ func Eligible(deleted bool, msgType string) bool {
 
 // AppNameLookup resolves a bot account's app display name; ("", nil) means no match.
 type AppNameLookup func(ctx context.Context, botAccount string) (string, error)
+
+// AppNamesLookup resolves many bot accounts in one read, keyed by account. An
+// account with no matching app is absent from the map rather than an error.
+type AppNamesLookup func(ctx context.Context, botAccounts []string) (map[string]string, error)
 
 // BotAwareDisplayName prefers a bot's app name, degrading to the composed name on miss.
 func BotAwareDisplayName(ctx context.Context, lookup AppNameLookup, engName, chineseName, account string) string {

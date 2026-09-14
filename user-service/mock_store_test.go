@@ -41,6 +41,21 @@ func (m *MocksubscriptionLister) EXPECT() *MocksubscriptionListerMockRecorder {
 	return m.recorder
 }
 
+// CountSubscriptionsFor mocks base method.
+func (m *MocksubscriptionLister) CountSubscriptionsFor(ctx context.Context, account string, req models.CountRequest) (*models.CountResponse, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CountSubscriptionsFor", ctx, account, req)
+	ret0, _ := ret[0].(*models.CountResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CountSubscriptionsFor indicates an expected call of CountSubscriptionsFor.
+func (mr *MocksubscriptionListerMockRecorder) CountSubscriptionsFor(ctx, account, req any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CountSubscriptionsFor", reflect.TypeOf((*MocksubscriptionLister)(nil).CountSubscriptionsFor), ctx, account, req)
+}
+
 // ListSubscriptionsFor mocks base method.
 func (m *MocksubscriptionLister) ListSubscriptionsFor(ctx context.Context, account string, req models.SubscriptionListRequest, defaultLimit, maxLimit int) (*models.PagedSubscriptionListResponse, error) {
 	m.ctrl.T.Helper()

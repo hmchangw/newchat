@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -1521,4 +1522,37 @@ func TestDistinctListNames_SplitsAppRoomsFromDMs(t *testing.T) {
 
 	assert.Equal(t, []string{"weather.bot"}, bots, "only real apps drive the app lookup")
 	assert.Equal(t, []string{"alice", "p_admin_ops", "bob"}, dms, "every DM drives the HR lookup")
+}
+
+// Subscriptions written before the role cutover still store the legacy "member"
+// spelling; every user-service read must hand the client "user" instead.
+func TestListSubscriptions_LegacyMemberRoleSerializesAsUser(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: []model.EnrichedSubscription{
+			{Subscription: model.Subscription{ID: "s1", RoomID: "r1", RoomType: model.RoomTypeChannel, Roles: []model.Role{model.RoleMember}}},
+		}}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"roles":["user"]`)
+	assert.NotContains(t, string(body), `"member"`)
+}
+
+func TestGetByRoomID_LegacyMemberRoleSerializesAsUser(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").
+		Return(&model.EnrichedSubscription{Subscription: model.Subscription{
+			ID: "s1", RoomID: "r1", RoomType: model.RoomTypeChannel, Roles: []model.Role{model.RoleMember, model.RoleOwner},
+		}}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	resp, err := svc.GetByRoomID(ctx("alice", "site-a"), models.GetByRoomIDRequest{RoomID: "r1"})
+	require.NoError(t, err)
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"roles":["user","owner"]`)
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/preview"
@@ -31,7 +32,7 @@ type MessageReader interface {
 }
 
 type MessageWriter interface {
-	UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error
+	UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, mentions []pkgmodel.Participant, editedAt time.Time) error
 	// SoftDeleteMessage performs a Cassandra LWT on messages_by_id and only
 	// runs the mirror-table and parent-tcount work when the LWT applies.
 	// Returns the updated_at value now persisted (the deletedAt argument when
@@ -129,10 +130,14 @@ type UserStore interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]pkgmodel.User, error)
 }
 
-// AppStore resolves a bot account's app display name for reaction Actor rendering.
+// AppStore resolves bot accounts to their registered app display names.
 type AppStore interface {
-	// AppNameByAccount returns ("", nil) when no app matches botAccount.
+	// AppNameByAccount returns ("", nil) when no app matches botAccount. Used on the
+	// per-actor reaction path, where one account is resolved at a time behind a cache.
 	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
+	// AppNamesByAccounts resolves many bot accounts in one read, keyed by account.
+	// Accounts with no matching app are simply absent from the map — not an error.
+	AppNamesByAccounts(ctx context.Context, botAccounts []string) (map[string]string, error)
 }
 
 // PreviewCache fronts the per-room preview resolve on the rooms.get lazy fallback.
@@ -171,20 +176,56 @@ type HistoryService struct {
 	threadSubs    ThreadSubscriptionRepository
 	users         UserStore
 	apps          AppStore
-	// appName is apps.AppNameByAccount behind a shared TTL cache, built ONCE here: a
-	// per-call wrapper would mint a fresh empty cache each time and never hit (#366).
-	// Nil when no app store is wired — BotAwareDisplayName degrades on a nil lookup.
+	// appName / appNames are the app store behind ONE shared TTL cache, built ONCE
+	// here: a per-call wrapper would mint a fresh empty cache each time and never hit
+	// (#366). Sharing means a bot resolved for a reaction actor is free to the legacy
+	// sys-msg page, and the reverse. Both nil when no app store is wired —
+	// BotAwareDisplayName degrades on a nil lookup.
 	appName            preview.AppNameLookup
+	appNames           preview.AppNamesLookup
 	historyFloor       time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
 	largeRoomThreshold int
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
-	// warmer stores walk-resolved previews off the request path; Close drains it.
-	warmer *previewWarmer
+	// warmer stores walk-resolved previews off the request path; never nil, so no guard needed.
+	warmer previewWriter
 	// pageBudget caps a paginated reply so it is trimmed to fit the broker
 	// rather than refused by it. Zero value disables trimming.
 	pageBudget pagefit.Budget
+	// roomTimes remembers the last room times MongoDB confirmed, so a walk can
+	// still be bounded while MongoDB is unreachable. Never nil — a disabled
+	// deployment gets a no-op, so the read path needs no nil check.
+	roomTimes RoomTimesCache
+}
+
+// RoomTimesCache remembers a room's last confirmed lastMsgAt/createdAt so the
+// bucket walk can still be bounded when MongoDB cannot answer. Write-on-success
+// and read-on-failure, NOT a read-through: a healthy request never consults it,
+// so it introduces no staleness on the hot path and needs no invalidation.
+type RoomTimesCache interface {
+	Store(ctx context.Context, roomID string, createdAt time.Time)
+	Fallback(ctx context.Context, roomID string) (createdAt time.Time, found bool)
+}
+
+// nopRoomTimesCache is the disabled form: it remembers nothing and offers
+// nothing, leaving the fail-open path exactly as wide as it was before the
+// tier existed.
+type nopRoomTimesCache struct{}
+
+func (nopRoomTimesCache) Store(context.Context, string, time.Time) {}
+func (nopRoomTimesCache) Fallback(context.Context, string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
+// WithRoomTimesCache enables the room-times L2 fallback. A nil cache leaves the
+// no-op in place.
+func WithRoomTimesCache(c RoomTimesCache) Option {
+	return func(s *HistoryService) {
+		if c != nil {
+			s.roomTimes = c
+		}
+	}
 }
 
 func New(
@@ -213,11 +254,16 @@ func New(
 		largeRoomThreshold: cfg.LargeRoomThreshold,
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
+		roomTimes:          nopRoomTimesCache{},
 	}
-	s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
+	s.warmer = nopPreviewWarmer{}
+	if cfg.PreviewWarmBackEnabled {
+		s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
+	}
 	// A method value derefs its receiver where written, so this is guarded, not eager.
 	if apps != nil {
-		s.appName = preview.CachedAppNameLookup(apps.AppNameByAccount)
+		appCache := preview.NewAppNameCache(apps.AppNameByAccount, apps.AppNamesByAccounts)
+		s.appName, s.appNames = appCache.Name, appCache.Names
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -234,37 +280,37 @@ func (s *HistoryService) Close(ctx context.Context) error {
 
 // RegisterHandlers wires all NATS endpoints. Panics on subscription failure (fatal at startup).
 func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
-	natsrouter.Register(r, subject.MsgHistoryPattern(siteID), s.LoadHistory)
-	natsrouter.Register(r, subject.MsgNextPattern(siteID), s.LoadNextMessages)
-	natsrouter.Register(r, subject.MsgSurroundingPattern(siteID), s.LoadSurroundingMessages)
-	natsrouter.Register(r, subject.MsgGetPattern(siteID), s.GetMessageByID)
-	natsrouter.Register(r, subject.MsgGetIDsPattern(siteID), s.GetMessagesByIDs)
-	natsrouter.Register(r, subject.RoomsGet(siteID), s.RoomsGet)
-	natsrouter.Register(r, subject.MsgEditPattern(siteID), func(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgHistoryPattern(siteID), natsmetrics.MethodListChannelMessages, s.LoadHistory)
+	natsrouter.Register(r, subject.MsgNextPattern(siteID), natsmetrics.MethodListNextMessages, s.LoadNextMessages)
+	natsrouter.Register(r, subject.MsgSurroundingPattern(siteID), natsmetrics.MethodListSurroundingMessages, s.LoadSurroundingMessages)
+	natsrouter.Register(r, subject.MsgGetPattern(siteID), natsmetrics.MethodGetMessage, s.GetMessageByID)
+	natsrouter.Register(r, subject.MsgGetIDsPattern(siteID), natsmetrics.MethodBatchGetMessages, s.GetMessagesByIDs)
+	natsrouter.Register(r, subject.RoomsGet(siteID), natsmetrics.MethodBatchGetRoomPreviews, s.RoomsGet)
+	natsrouter.Register(r, subject.MsgEditPattern(siteID), natsmetrics.MethodEditMessage, func(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
 		return s.EditMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgDeletePattern(siteID), func(c *natsrouter.Context, req models.DeleteMessageRequest) (*models.DeleteMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgDeletePattern(siteID), natsmetrics.MethodDeleteMessage, func(c *natsrouter.Context, req models.DeleteMessageRequest) (*models.DeleteMessageResponse, error) {
 		return s.DeleteMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgPinPattern(siteID), func(c *natsrouter.Context, req models.PinMessageRequest) (*models.PinMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgPinPattern(siteID), natsmetrics.MethodPinMessage, func(c *natsrouter.Context, req models.PinMessageRequest) (*models.PinMessageResponse, error) {
 		return s.PinMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgUnpinPattern(siteID), func(c *natsrouter.Context, req models.UnpinMessageRequest) (*models.UnpinMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgUnpinPattern(siteID), natsmetrics.MethodUnpinMessage, func(c *natsrouter.Context, req models.UnpinMessageRequest) (*models.UnpinMessageResponse, error) {
 		return s.UnpinMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgPinnedListPattern(siteID), s.ListPinnedMessages)
-	natsrouter.Register(r, subject.MsgReactPattern(siteID), func(c *natsrouter.Context, req models.ReactMessageRequest) (*models.ReactMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgPinnedListPattern(siteID), natsmetrics.MethodListPinnedMessages, s.ListPinnedMessages)
+	natsrouter.Register(r, subject.MsgReactPattern(siteID), natsmetrics.MethodToggleMessageReaction, func(c *natsrouter.Context, req models.ReactMessageRequest) (*models.ReactMessageResponse, error) {
 		return s.ReactMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgThreadPattern(siteID), s.GetThreadMessages)
-	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), s.GetThreadParentMessages)
-	natsrouter.Register(r, subject.MigrationInternalMsgEdit(siteID), func(c *natsrouter.Context, req pkgmodel.MigrationEditRequest) (*pkgmodel.MigrationAck, error) {
+	natsrouter.Register(r, subject.MsgThreadPattern(siteID), natsmetrics.MethodListThreadMessages, s.GetThreadMessages)
+	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), natsmetrics.MethodListThreadParentMessages, s.GetThreadParentMessages)
+	natsrouter.Register(r, subject.MigrationInternalMsgEdit(siteID), natsmetrics.MethodMigrateEditMessage, func(c *natsrouter.Context, req pkgmodel.MigrationEditRequest) (*pkgmodel.MigrationAck, error) {
 		return s.MigrationEditMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MigrationInternalMsgDelete(siteID), func(c *natsrouter.Context, req pkgmodel.MigrationDeleteRequest) (*pkgmodel.MigrationAck, error) {
+	natsrouter.Register(r, subject.MigrationInternalMsgDelete(siteID), natsmetrics.MethodMigrateDeleteMessage, func(c *natsrouter.Context, req pkgmodel.MigrationDeleteRequest) (*pkgmodel.MigrationAck, error) {
 		return s.MigrationDeleteMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.ThreadSubscriptionList(siteID), s.ListThreadSubscriptions)
+	natsrouter.Register(r, subject.ThreadSubscriptionList(siteID), natsmetrics.MethodListThreadSubscriptions, s.ListThreadSubscriptions)
 }
 
 // Compile-time checks.

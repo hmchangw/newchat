@@ -50,7 +50,8 @@ func New(ctx context.Context, cfg Config, opts ...Option) (SearchEngine, error) 
 		}
 		// o11yes.NewClient wires the first-party OTel instrumentation into the
 		// transport and returns the standard *elasticsearch.Client; the adapter
-		// then drives that instrumentation around its raw requests. A plain
+		// then drives that instrumentation around its raw requests, and the
+		// facade records db.client.operation.duration per request. A plain
 		// client (instrumentation absent) takes the adapter's no-op path.
 		client, err := newESClient(&esCfg, cc.obs)
 		if err != nil {
@@ -76,7 +77,7 @@ func New(ctx context.Context, cfg Config, opts ...Option) (SearchEngine, error) 
 // o11y/elasticsearch when observability is configured, otherwise plain.
 func newESClient(esCfg *elasticsearch.Config, obs Observability) (*elasticsearch.Client, error) {
 	if obs != nil {
-		return o11yes.NewClient(*esCfg, obs.TracerProvider())
+		return o11yes.NewClient(*esCfg, obs.TracerProvider(), obs.MeterProvider())
 	}
 	return elasticsearch.NewClient(*esCfg)
 }

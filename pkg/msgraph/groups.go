@@ -21,11 +21,17 @@ type GroupReader interface {
 }
 
 // NewGroupReaderClient returns an app-only group reader (shares the graph
-// client used for meetings; New always returns a *graphClient).
+// client used for meetings; New always returns a *graphClient). Honors
+// cfg.ProxyURL and the proxy credentials, reporting an invalid value at
+// construction rather than surfacing an opaque per-request error.
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewGroupReaderClient(cfg Config, opts ...Option) GroupReader {
-	return New(cfg, opts...).(*graphClient)
+func NewGroupReaderClient(cfg Config, opts ...Option) (GroupReader, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
+		return nil, fmt.Errorf("configure group reader client proxy: %w", err)
+	}
+	return g, nil
 }
 
 // GroupProfile is the subset of a Graph group resource we decode.

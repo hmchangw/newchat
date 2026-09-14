@@ -140,33 +140,6 @@ func gocqlBucketFetcher[T any](
 	}
 }
 
-// fillPage walks buckets in the given direction starting at startBucket until
-// pageSize rows are collected or maxBuckets is exhausted. It builds a live
-// gocql fetcher and delegates the traversal to walkBuckets.
-//
-// floorBucket bounds the walk: DESC stops when bucket < floorBucket; ASC stops
-// when bucket > floorBucket. To disable floor-based termination, callers pass
-// math.MinInt64 (DESC) or math.MaxInt64 (ASC). fanout caps how many buckets are
-// fetched concurrently once the walk fans out.
-func fillPage[T any](
-	ctx context.Context,
-	sizer msgbucket.Sizer,
-	direction walkDirection,
-	startBucket int64,
-	floorBucket int64,
-	maxBuckets int,
-	pageSize int,
-	initialPageState []byte,
-	fanout int,
-	queryFn bucketQueryFn,
-	scan func(iter *gocql.Iter, remaining int) ([]T, error),
-) (pageResult[T], error) {
-	return walkBuckets(
-		ctx, sizer, direction, startBucket, floorBucket, maxBuckets, pageSize,
-		initialPageState, fanout, gocqlBucketFetcher(queryFn, scan),
-	)
-}
-
 // bucketWalk holds the immutable parameters of one paginated walk over a
 // bucketed table. Its run method fills a single page by fetching buckets
 // concurrently in fan-out waves:
@@ -184,6 +157,18 @@ func fillPage[T any](
 // Rows are always assembled in strict bucket order and the returned cursor is
 // identical to what a serial walk would produce — concurrency overlaps the I/O
 // only, never the ordering or pagination.
+//
+// The walk is contiguous by design: it visits every bucket between its start and
+// its floor, and never jumps over a run it believes is empty. That is worth
+// stating because the belief is tempting and unavailable. The obvious source for
+// it, rooms.lastMsgAt, is not a watermark for this table: roomlist-worker projects
+// it from MESSAGES-CANONICAL on a consumer separate from the message-worker that
+// writes these rows, with MaxDeliver=-1 holding batches un-acked through a Mongo
+// outage. The pointer therefore lags Cassandra by an unbounded amount by design
+// (docs/load-testing/failure/mongodb.md), so no timestamp taken alongside it can
+// bound how far it lags, and any bucket it authorizes skipping may hold a row.
+// Only a watermark advanced by Cassandra persistence itself could, and none
+// exists. Widen the floor or the fan-out instead.
 type bucketWalk[T any] struct {
 	sizer        msgbucket.Sizer
 	direction    walkDirection
@@ -199,6 +184,11 @@ type bucketWalk[T any] struct {
 // walkBuckets fills a page starting at startBucket. See bucketWalk for the
 // traversal strategy. A fetch error aborts the walk and is returned to the
 // caller (accumulated rows are discarded).
+//
+// floorBucket bounds the walk: DESC stops when bucket < floorBucket; ASC stops
+// when bucket > floorBucket. To disable floor-based termination, callers pass
+// math.MinInt64 (DESC) or math.MaxInt64 (ASC). fanout caps how many buckets are
+// fetched concurrently once the walk fans out.
 func walkBuckets[T any](
 	ctx context.Context,
 	sizer msgbucket.Sizer,

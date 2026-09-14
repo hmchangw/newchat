@@ -12,9 +12,9 @@ import (
 type fakeSessionStore struct {
 	InsertFn                 func(ctx context.Context, s *session.Session) error
 	FindByHashFn             func(ctx context.Context, hash string) (*session.Session, error)
-	DeleteBeyondCapFn        func(ctx context.Context, account string, max int) (int64, error)
-	DeleteForAccountExceptFn func(ctx context.Context, siteID, account, exceptID string) (int64, error)
-	DeleteForAccountFn       func(ctx context.Context, siteID, account string) (int64, error)
+	DeleteBeyondCapFn        func(ctx context.Context, account string, max int) ([]string, error)
+	DeleteForAccountExceptFn func(ctx context.Context, siteID, account, exceptID string) ([]string, error)
+	DeleteForAccountFn       func(ctx context.Context, siteID, account string) ([]string, error)
 	ListForAccountFn         func(ctx context.Context, siteID, account string) ([]session.Session, error)
 	DeleteByIDFn             func(ctx context.Context, siteID, account, id string) (int64, error)
 	EnsureIndexesFn          func(ctx context.Context) error
@@ -28,15 +28,15 @@ func (f *fakeSessionStore) FindByHash(ctx context.Context, hash string) (*sessio
 	return f.FindByHashFn(ctx, hash)
 }
 
-func (f *fakeSessionStore) DeleteBeyondCap(ctx context.Context, account string, max int) (int64, error) {
+func (f *fakeSessionStore) DeleteBeyondCap(ctx context.Context, account string, max int) ([]string, error) {
 	return f.DeleteBeyondCapFn(ctx, account, max)
 }
 
-func (f *fakeSessionStore) DeleteForAccountExcept(ctx context.Context, siteID, account, exceptID string) (int64, error) {
+func (f *fakeSessionStore) DeleteForAccountExcept(ctx context.Context, siteID, account, exceptID string) ([]string, error) {
 	return f.DeleteForAccountExceptFn(ctx, siteID, account, exceptID)
 }
 
-func (f *fakeSessionStore) DeleteForAccount(ctx context.Context, siteID, account string) (int64, error) {
+func (f *fakeSessionStore) DeleteForAccount(ctx context.Context, siteID, account string) ([]string, error) {
 	return f.DeleteForAccountFn(ctx, siteID, account)
 }
 

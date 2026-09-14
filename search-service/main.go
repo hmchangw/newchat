@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -34,11 +35,6 @@ type ESConfig struct {
 	Username      string `env:"USERNAME"         envDefault:""`
 	Password      string `env:"PASSWORD"         envDefault:""`
 	TLSSkipVerify bool   `env:"TLS_SKIP_VERIFY"  envDefault:"false"`
-}
-
-type ValkeyConfig struct {
-	Addrs    []string `env:"ADDRS,required" envSeparator:","`
-	Password string   `env:"PASSWORD"        envDefault:""`
 }
 
 type NATSConfig struct {
@@ -74,6 +70,35 @@ type SearchConfig struct {
 	RecentWindow            time.Duration `env:"RECENT_WINDOW"              envDefault:"8760h"`
 	RequestTimeout          time.Duration `env:"REQUEST_TIMEOUT"            envDefault:"10s"`
 	HealthAddr              string        `env:"HEALTH_ADDR"                envDefault:":9090"`
+	// HR/App cache knobs size the pod-local L1 caches fronting the enrichment
+	// lookups in enrich.go. A non-positive size or TTL disables that cache.
+	// The TTL is the worst-case staleness of an HR name or an app name in a
+	// search result, and the worst-case delay before a newly-created user or
+	// app stops rendering as a bare account name.
+	HRCacheSize  int           `env:"HR_CACHE_SIZE"              envDefault:"130000"`
+	HRCacheTTL   time.Duration `env:"HR_CACHE_TTL"               envDefault:"24h"`
+	AppCacheSize int           `env:"APP_CACHE_SIZE"             envDefault:"1000"`
+	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"24h"`
+}
+
+// Validate rejects a positive-but-tiny cache TTL. expirable.LRU derives its
+// reaper tick as ttl/100 and passes it to time.NewTicker, which panics on zero
+// in a goroutine nothing recovers — so an operator typo like "50ns" would crash
+// the process at startup instead of failing cleanly here. Zero stays legal: it
+// is the documented disable switch.
+func (c *SearchConfig) Validate() error {
+	for _, k := range []struct {
+		name string
+		ttl  time.Duration
+	}{
+		{"SEARCH_HR_CACHE_TTL", c.HRCacheTTL},
+		{"SEARCH_APP_CACHE_TTL", c.AppCacheTTL},
+	} {
+		if k.ttl > 0 && k.ttl < minCacheTTL {
+			return fmt.Errorf("%s must be 0 (disabled) or at least %s, got %s", k.name, minCacheTTL, k.ttl)
+		}
+	}
+	return nil
 }
 
 // Config is the root service config. Note that ES and Search share the
@@ -83,9 +108,9 @@ type SearchConfig struct {
 // against the other or moved to a distinct prefix to avoid silent env
 // shadowing.
 type Config struct {
-	SiteID   string         `env:"SITE_ID,required"`
-	ES       ESConfig       `envPrefix:"SEARCH_"`
-	Valkey   ValkeyConfig   `envPrefix:"VALKEY_"`
+	SiteID   string   `env:"SITE_ID,required"`
+	ES       ESConfig `envPrefix:"SEARCH_"`
+	Valkey   valkeyutil.Config
 	NATS     NATSConfig     `envPrefix:"NATS_"`
 	Search   SearchConfig   `envPrefix:"SEARCH_"`
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
@@ -133,11 +158,19 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
+		os.Exit(1)
+	}
 	if err := cfg.Pool.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
 	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Search.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
@@ -183,16 +216,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password,
-		valkeyutil.WithObservability(sdk),
-		valkeyutil.WithRequireParentSpan(true),
-	)
+	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -227,7 +257,22 @@ func main() {
 		slog.Warn("ensure mongo indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
-	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{
+
+	// The cache fronts only the account-keyed enrichment lookups; enrich.go
+	// sees the same MongoStore either way. Built once here — expirable.LRU's
+	// reaper goroutine lives for the process.
+	cachedMongo := newCachedMongoStore(mongoStore, cacheConfig{
+		HRSize:  cfg.Search.HRCacheSize,
+		HRTTL:   cfg.Search.HRCacheTTL,
+		AppSize: cfg.Search.AppCacheSize,
+		AppTTL:  cfg.Search.AppCacheTTL,
+	})
+	slog.Info("enrichment caches configured",
+		"enabled", cachedMongo != mongoStore,
+		"hr_size", cfg.Search.HRCacheSize, "hr_ttl", cfg.Search.HRCacheTTL,
+		"app_size", cfg.Search.AppCacheSize, "app_ttl", cfg.Search.AppCacheTTL)
+
+	handler := newHandler(store, cachedMongo, usersClient, cache, &handlerConfig{
 		SiteID:                  cfg.SiteID,
 		DocCounts:               cfg.Search.DocCounts,
 		MaxDocCounts:            cfg.Search.MaxDocCounts,
@@ -242,7 +287,9 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	router := natsrouter.New(nc, "search-service", cfg.Guard.Options()...)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.New(nc, "search-service",
+		append(cfg.Guard.Options(), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())

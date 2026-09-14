@@ -177,7 +177,7 @@ func TestMongoOutageRecovery_ExternalStopStart(t *testing.T) {
 	require.NoError(t, client.Ping(ctx, readpref.Primary()))
 
 	db := client.Database("loadgen_mongo_outage")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	runID := "mongo-outage-recovery"
 	roomID := "room-outage"
 	account := "member-outage"

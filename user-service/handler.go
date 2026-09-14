@@ -62,3 +62,31 @@ func (h *handler) ListSubscriptions(c *gin.Context) {
 	c.Header("Cache-Control", "private, no-store")
 	c.JSON(http.StatusOK, resp)
 }
+
+// countQuery mirrors models.CountRequest. Unread is a pointer so an omitted
+// param stays distinct from false (both mean total, but the service owns that).
+type countQuery struct {
+	Unread *bool `form:"unread"`
+}
+
+// CountSubscriptions serves GET /api/v1/subscriptions/count for the
+// authenticated caller. unread=true returns the unread-badge count; omitted or
+// false returns the total active-subscription count. Shares the service logic
+// with the NATS handler.
+func (h *handler) CountSubscriptions(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var q countQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		errhttp.Write(ctx, c, errcode.BadRequest("invalid query parameters", errcode.WithCause(err)))
+		return
+	}
+
+	resp, err := h.subs.CountSubscriptionsFor(ctx, accountFromContext(c), models.CountRequest{Unread: q.Unread})
+	if err != nil {
+		errhttp.Write(ctx, c, err)
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, resp)
+}

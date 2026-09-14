@@ -86,10 +86,11 @@ func TestRunSync_EndToEnd(t *testing.T) {
 
 	fg := &fakeGraph{}
 	tokenURL, baseURL := newFakeGraphServer(t, fg)
-	graph := msgraph.NewGroupReaderClient(
+	graph, err := msgraph.NewGroupReaderClient(
 		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		msgraph.WithBaseURL(baseURL), msgraph.WithTokenURL(tokenURL),
 	)
+	require.NoError(t, err)
 	store := newMongoStore(db)
 	pub := newPublisher(jetStreamPublish(js), "central", transform.DefaultConverter{})
 	groups := []syncGroup{{GroupID: "g1", SiteID: "site-a"}}

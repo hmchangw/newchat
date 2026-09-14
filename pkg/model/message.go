@@ -94,6 +94,28 @@ func (m *Message) SenderDisplayName() string {
 	return m.UserAccount
 }
 
+// IsHiddenThreadReply reports whether the message is a thread reply that does
+// not also appear in the room's main timeline.
+//
+// It lives here because it classifies the message, not any one service's
+// routing: broadcast-worker skips channel fan-out for these, roomlist-worker
+// skips the room pointer and mention badge, and notification-worker skips the
+// room-wide push. Those three must agree on which messages exist in the
+// channel — a reply that fans out but never moves lastMsgAt, or a mention badge
+// with no visible message, is what disagreement looks like — and agreeing by
+// three textual copies is how that drifts.
+func (m *Message) IsHiddenThreadReply() bool {
+	return IsHiddenThreadReply(m.ThreadParentMessageID, m.TShow)
+}
+
+// IsHiddenThreadReply is the rule behind the method, exposed for consumers that
+// decode a narrow projection of a message rather than the whole type (see
+// roomlist-worker). Keeping one definition is the point: the services that branch
+// on this must agree on which messages exist in the channel.
+func IsHiddenThreadReply(threadParentMessageID string, tShow bool) bool {
+	return threadParentMessageID != "" && !tShow
+}
+
 // RoomTimeHint is an optional caller-supplied walk-bounds hint (UTC millis) for a
 // single room, letting history-service skip its own per-room room-times read.
 type RoomTimeHint struct {
@@ -112,10 +134,10 @@ type RoomsGetRequest struct {
 }
 
 // PreviewMessage is a room's most-recent eligible message, enriched for the room-list
-// preview. Content is a snippet capped at preview.MaxContentRunes (500 runes) — no longer
-// the full body, so user-service's PREVIEW_CONTENT_CHARS truncation now narrows an
-// already-capped snippet. Sender/mentions carry render-ready wire Participants (a bot
-// sender's displayName is its app name). Shared wire type: history-service's rooms.get RPC
+// preview. Content is the full message body, bounded only by the 20 KB message size limit;
+// user-service's PREVIEW_CONTENT_CHARS truncation is the only read-time narrowing.
+// Sender/mentions carry render-ready wire Participants (a bot sender's displayName is its
+// app name). Shared wire type: history-service's rooms.get RPC
 // produces it, user-service's subscription.list embeds it (SubscriptionRoom.PreviewMessage).
 // It is never stored — the room doc holds the split PreviewMeta + sealed body instead.
 type PreviewMessage struct {

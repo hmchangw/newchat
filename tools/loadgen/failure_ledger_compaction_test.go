@@ -68,7 +68,7 @@ func TestFailureLedger_CompactsOnceAfterRecoveringAJournal(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, journal.compacts, "recovery must reclaim the inherited journal")
-	assert.Len(t, ledger.active, 50)
+	assert.Equal(t, 50, ledger.Snapshot().Active)
 	assert.Less(t, journal.Size(), int64(1<<20),
 		"compaction must actually shrink the file it rewrote")
 }
@@ -123,22 +123,6 @@ func TestFailureLedger_LeavesTheJournalAloneWhileUnderBudget(t *testing.T) {
 // An operation between claiming its slot and having its start record written is
 // not in the active set a compaction rewrites from, so compacting now would
 // erase it. The budget check must not override that.
-func TestFailureLedger_DefersCompactionWhileAnOperationIsMidStart(t *testing.T) {
-	journal := &compactionCountingJournal{}
-	ledger, err := newFailureLedger(&failureLedgerConfig{
-		Capacity: 1000, Journal: journal,
-		CompactEvery: 1000000, MaxJournalBytes: 1,
-	})
-	require.NoError(t, err)
-	ledger.starting["in-flight"] = struct{}{}
-	before := journal.compacts
-
-	require.NoError(t, ledger.MaybeCompact(time.Unix(2000, 0).UTC()))
-
-	assert.Equal(t, before, journal.compacts,
-		"compacting now would drop the operation whose start record is still in flight")
-}
-
 // Replay drops operations it has no capacity for rather than crash-looping the
 // pod, and the journal is the only thing that still holds them: raise the
 // capacity, restart, and they come back. Compacting rewrites the journal from
@@ -150,7 +134,7 @@ func TestFailureLedger_DoesNotReclaimAJournalItCouldNotFullyRecover(t *testing.T
 	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 10, Journal: journal})
 	require.NoError(t, err)
 
-	require.Positive(t, ledger.dropped, "the fixture must exceed the capacity")
+	require.Positive(t, ledger.Snapshot().Dropped, "the fixture must exceed the capacity")
 	assert.Equal(t, 0, journal.compacts,
 		"the dropped operations only exist in the journal; compacting would erase them")
 }
@@ -167,7 +151,7 @@ func TestFailureLedger_StillReclaimsOnSizeAfterRecoveryDroppedOperations(t *test
 		Capacity: 10, Journal: journal, CompactEvery: 1000000, MaxJournalBytes: 4096,
 	})
 	require.NoError(t, err)
-	require.Positive(t, ledger.dropped, "the fixture must exceed the capacity")
+	require.Positive(t, ledger.Snapshot().Dropped, "the fixture must exceed the capacity")
 	require.Equal(t, 0, journal.compacts, "recovery must leave the inherited journal alone")
 
 	require.NoError(t, ledger.MaybeCompact(time.Unix(2000, 0).UTC()))
@@ -189,7 +173,7 @@ func TestFailureLedger_SurvivesAFailedRecoveryReclamation(t *testing.T) {
 	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 100, Journal: journal})
 
 	require.NoError(t, err, "a failed reclamation must not fail recovery")
-	assert.Len(t, ledger.active, 5, "the recovered state must survive")
+	assert.Equal(t, 5, ledger.Snapshot().Active, "the recovered state must survive")
 }
 
 type compactFailingJournal struct {

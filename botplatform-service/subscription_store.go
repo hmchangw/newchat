@@ -9,6 +9,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 )
@@ -33,10 +34,11 @@ type subscriptionStore interface {
 
 type mongoSubscriptionStore struct {
 	subscriptions *mongo.Collection
+	breaker       *circuitbreaker.Breaker
 }
 
-func newMongoSubscriptionStore(db *mongo.Database) *mongoSubscriptionStore {
-	return &mongoSubscriptionStore{subscriptions: db.Collection("subscriptions")}
+func newMongoSubscriptionStore(db *mongo.Database, breaker *circuitbreaker.Breaker) *mongoSubscriptionStore {
+	return &mongoSubscriptionStore{subscriptions: db.Collection("subscriptions"), breaker: breaker}
 }
 
 var subRoutingProjection = bson.M{"roomId": 1, "siteId": 1, "roomType": 1}
@@ -59,8 +61,12 @@ func (s *mongoSubscriptionStore) findOne(ctx context.Context, filter bson.M) (*B
 		SiteID   string         `bson:"siteId"`
 		RoomType model.RoomType `bson:"roomType"`
 	}
-	err := s.subscriptions.FindOne(ctx, filter,
-		options.FindOne().SetProjection(subRoutingProjection)).Decode(&row)
+	// Fenced so a stopped Mongo costs one server-selection timeout for the
+	// service rather than one per bot request.
+	err := s.breaker.Do(func() error {
+		return s.subscriptions.FindOne(ctx, filter,
+			options.FindOne().SetProjection(subRoutingProjection)).Decode(&row)
+	})
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, model.ErrSubscriptionNotFound

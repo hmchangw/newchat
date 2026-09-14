@@ -70,6 +70,8 @@ func (m *sessionManager) resolve(w http.ResponseWriter, r *http.Request) *sessio
 	id := idgen.GenerateID()
 	s := &session{id: id, hub: m.factory(), lastSeen: now}
 	m.sessions[id] = s
+	// debug tool served over plain HTTP, loopback-bound by default (BIND_ADDR)
+	// nosemgrep: cookie-missing-secure
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    id,

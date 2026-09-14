@@ -12,16 +12,9 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
-
-type GreetRequest struct {
-	Message string `json:"message"`
-}
-
-type GreetResponse struct {
-	Reply string `json:"reply"`
-}
 
 // Example_basicUsage demonstrates registering a handler with params.
 func Example_basicUsage() {
@@ -30,14 +23,18 @@ func Example_basicUsage() {
 
 	// Register a handler — {account} and {roomID} are extracted from the subject.
 	// The pattern is automatically converted to a NATS wildcard for subscription.
-	natsrouter.Register[GreetRequest, GreetResponse](
+	// The third argument is the route's rpc.method: a declared natsmetrics
+	// constant that every metric for this route is labelled with. The compiler
+	// requires an RPCMethod argument, and package tests keep the declared
+	// vocabulary bounded and unique. An out-of-vocabulary value is normalized to
+	// MethodOther at record time. Choosing the semantically correct method for a
+	// route remains a review responsibility.
+	natsrouter.Register[RenameRoomRequest, Room](
 		router,
-		"chat.user.{account}.room.{roomID}.greet",
-		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
-			account := c.Param("account")
-			roomID := c.Param("roomID")
-			reply := fmt.Sprintf("%s says %s in room %s", account, req.Message, roomID)
-			return &GreetResponse{Reply: reply}, nil
+		"chat.user.{account}.request.room.{roomID}.site-a.rename",
+		natsmetrics.MethodRenameRoom,
+		func(c *natsrouter.Context, req RenameRoomRequest) (*Room, error) {
+			return &Room{ID: c.Param("roomID"), Name: req.Name}, nil
 		},
 	)
 }
@@ -52,11 +49,12 @@ func Example_withMiddleware() {
 	router := natsrouter.Default(nc, "my-service")
 	router.Use(natsrouter.HandlerTimeout(5 * time.Second))
 
-	natsrouter.Register(
+	natsrouter.RegisterNoBody[Settings](
 		router,
-		"chat.user.{account}.greet",
-		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
-			return &GreetResponse{Reply: "hello " + c.Param("account")}, nil
+		"chat.user.{account}.request.settings.get",
+		natsmetrics.MethodGetSettings,
+		func(c *natsrouter.Context) (*Settings, error) {
+			return &Settings{Account: c.Param("account"), Locale: "zh-TW"}, nil
 		},
 	)
 }
@@ -64,6 +62,27 @@ func Example_withMiddleware() {
 type Room struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// Request and response types are named for the operation their route's
+// rpc.method names. A rename route taking a greeting payload would be exactly
+// the method-does-not-match-the-handler mismatch this vocabulary exists to
+// prevent, demonstrated in the package's own godoc.
+type RenameRoomRequest struct {
+	Name string `json:"name"`
+}
+
+type OpenRoomRequest struct {
+	IncludeMembers bool `json:"includeMembers"`
+}
+
+type Settings struct {
+	Account string `json:"account"`
+	Locale  string `json:"locale"`
+}
+
+type SetSettingsRequest struct {
+	Locale string `json:"locale"`
 }
 
 // Example_noBodyHandler demonstrates RegisterNoBody for GET-style endpoints.
@@ -74,7 +93,8 @@ func Example_noBodyHandler() {
 	// No request body needed — the roomID comes from the subject.
 	natsrouter.RegisterNoBody[Room](
 		router,
-		"chat.user.{account}.request.rooms.get.{roomID}",
+		"chat.user.{account}.request.room.{roomID}.site-a.open",
+		natsmetrics.MethodOpenRoom,
 		func(c *natsrouter.Context) (*Room, error) {
 			roomID := c.Param("roomID")
 			return &Room{ID: roomID, Name: "General"}, nil
@@ -89,8 +109,9 @@ func Example_errorHandling() {
 
 	natsrouter.Register(
 		router,
-		"chat.user.{account}.request.rooms.get.{roomID}",
-		func(c *natsrouter.Context, req GreetRequest) (*Room, error) {
+		"chat.user.{account}.request.room.{roomID}.site-a.open",
+		natsmetrics.MethodOpenRoom,
+		func(c *natsrouter.Context, req OpenRoomRequest) (*Room, error) {
 			room := findRoom(c.Param("roomID"))
 			if room == nil {
 				// User-facing error — client receives: {"code":"not_found","error":"room not found"}
@@ -145,11 +166,12 @@ func Example_customMiddleware() {
 	router.Use(natsrouter.Recovery())
 	router.Use(requireBody)
 
-	natsrouter.Register[GreetRequest, GreetResponse](
+	natsrouter.Register[SetSettingsRequest, Settings](
 		router,
-		"chat.user.{account}.greet",
-		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
-			return &GreetResponse{Reply: "hello"}, nil
+		"chat.user.{account}.request.settings.set",
+		natsmetrics.MethodSetSettings,
+		func(c *natsrouter.Context, req SetSettingsRequest) (*Settings, error) {
+			return &Settings{Account: c.Param("account"), Locale: req.Locale}, nil
 		},
 	)
 }

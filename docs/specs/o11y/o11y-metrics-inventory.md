@@ -89,15 +89,20 @@ Enabled wherever the matching `WithObservability` / middleware is wired.
 | **MongoDB** (`mongoutil`) | `db.client.operation.duration`; pool count, idle-min, max, pending-requests, timeouts, and create-time | direct clients passing `mongoutil.WithObservability`; see the storage contract for gaps |
 | **Valkey/Redis** (`valkeyutil`) | `db.client.operation.duration`; connection-pool usage/wait/use/create metrics | gatekeeper, broadcast, notification, room-*, search-*, user-* |
 | **Cassandra** (`cassutil`) | `db.client.operation.duration`, `cassandra.query.attempts`, `db.client.connection.create_time`, `cassandra.connection.attempts` | message-worker, bot-message-worker, history-service ordinary queries; raw batches remain a gap |
+| **Elasticsearch** (`searchengine`, o11y v0.12.0+) | `db.client.operation.duration` (one sample per request, retries included) | search-service, search-sync-worker |
 | **Go runtime** (`WithRuntimeMetrics`, **on by default**) | goroutines, GC pauses/count, heap/alloc, memory, GOMAXPROCS | **all** services |
 
-**Two notable auto-gaps (spans only, NO metrics):**
+**One notable auto-gap (spans only, NO metrics):**
 - **NATS/JetStream client** (`otelnats`) — emits *spans*, but **no client
   metrics** from the SDK itself. This is still true of the instrumentation
   layer; the gap is now covered at the application layer instead, by the shared
   `chat.nats.*` families in §2.1. Do not expect SDK-auto NATS series.
-- **Elasticsearch client** (`searchengine`) — emits *spans* (ES `_search`/`_bulk`
-  latency is visible in traces) but **no metrics** instrument.
+
+The **Elasticsearch client** (`searchengine`) was the second such gap until o11y
+v0.12.0, which added an SDK-owned `db.client.operation.duration` histogram beside
+the spans — one sample per request, retries included. Labels and the monthly
+index-name caveat are in
+[`storage-dependency-metrics.md`](storage-dependency-metrics.md) §4.
 
 ---
 
@@ -159,18 +164,29 @@ HTTP 500 on `/metrics` (this happened; fixed 2026-08-19).
 |---|---|---|---|
 | `chat.nats.consumer.loop.up` | up-down counter | `pkg/natsmetrics` | stream, consumer |
 | `chat.nats.consumer.messages` | counter | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
-| `chat.nats.consumer.redeliveries` | counter | `pkg/natsmetrics` | stream, consumer, event_type |
 | `chat.nats.consumer.processing.duration` | histogram (s) | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
 | `chat.nats.terminal.failures` | counter | `pkg/natsmetrics` | stream, consumer, event_type, reason |
-| `chat.nats.publish.attempts` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
-| `chat.nats.publish.retries` | counter | `pkg/natsmetrics` | destination_kind, operation |
-| `chat.nats.requests` | counter | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.duration` | histogram (s) | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.handled` | counter | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
-| `chat.nats.request.handler.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
+| `chat.nats.publish.failures` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
+| `rpc.client.call.duration` | histogram (s) | `pkg/natsmetrics` | rpc.system.name, rpc.method, error.type (absent on success) |
+| `rpc.server.call.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | rpc.system.name, rpc.method, error.type (absent on success) |
 | `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process; value is the live connection count |
 | `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
 | `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
+
+The two RPC families are the one place this repo does not use a `chat.` prefix:
+they implement the OpenTelemetry RPC semantic conventions, so they carry the
+convention's instrument names, unit and labels verbatim (verified against
+`go.opentelemetry.io/otel/semconv/v1.40.0/rpcconv`). `error.type` is conditional
+on failure per the convention, so a successful call carries no error label at
+all.
+
+Bucket boundaries are the one deliberate deviation: these histograms use
+`o11y.DefaultLatencyBuckets()` (11 boundaries), not the convention's own table
+(14). The SDK overrides the identical table for `http.server.*` so that p99 is
+directly comparable across services, and an RPC family on different boundaries
+would break exactly that. Interop is unaffected in the part that matters — a
+generic RPC panel still finds and groups these series by name and label; only
+`histogram_quantile`'s interpolation points differ.
 
 The two `chat.nats.client.*` families are the exception: they carry no `site`
 at all, because they are emitted from the opt-in connection helper, which sits
@@ -181,10 +197,18 @@ labels. `nats_slow_consumer_events_total` is scoped the same way.
 All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
 `not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
-Room and history operations are coarse bounded categories — `room_read`,
-`room_mutation`, `member_read`, `member_mutation`, `history_read`,
-`history_mutation`, `room_publish`, `member_publish`, `outbox_publish`. Subject
-families that do not map normalize to `unknown` rather than minting a label.
+`rpc_method` on the two RPC families is a closed 92-constant vocabulary,
+declared at route registration — one method per route, verb-first snake_case per
+AIP-131/132/190. A route that declares none does not compile, and a value outside
+the vocabulary records as semconv's `_OTHER` rather than minting a label. It was
+previously derived from the subject, which recognised only the room and orgs
+families and left 51 of 96 routes on `unknown`; the derivation is gone. Publish
+operations remain the coarse bounded set they were — `room_publish`,
+`member_publish`, `outbox_publish`, `canonical_publish`, `client_response`,
+`recipient_publish`, `notification_publish`, `push_publish`, `thread_tcount`,
+`teams_user_upsert` — plus the three the outbound client lane still passes
+(`history_get_message`, `member_read`, `presence_lookup`), with `unknown` as
+their fallback.
 Raw subjects, room IDs, account IDs, site IDs parsed out of subject tokens, and
 error strings are never labels.
 
@@ -196,9 +220,9 @@ arrives as a resource-derived constant label, never as an inline attribute.)
 Reconnect-buffer overflow is **not** a connection event: nats.go returns
 `ErrReconnectBufExceeded` synchronously from `publish()` and never routes it
 through `ErrorHandler`, so it is counted as
-`chat_nats_publish_attempts_total{outcome="buffer_full"}`. The full semantics,
-label enums, and the alerts these drive are specified in the NATS failure
-metrics contract under `docs/load-testing/failure/`.
+`chat_nats_publish_failures_total{outcome="buffer_full"}`. The full semantics,
+label enums, and the alerts these drive are specified in the NATS metrics
+contract at `docs/specs/o11y/nats-metrics-contract.md`.
 
 ### 2.2 Services not previously inventoried (2026-08-14)
 

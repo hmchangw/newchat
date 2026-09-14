@@ -152,7 +152,7 @@ func TestSoakCollector_SkipsActionsThatHaveNoPage(t *testing.T) {
 // would put those in the same distribution as a real page.
 func TestSoakReadSample_CountRowsMarksOnlyRealCounts(t *testing.T) {
 	counted := soakReadSample{Action: soakRPCMemberList}
-	counted.countRows(7)
+	counted.CountRows(7)
 	assert.Equal(t, 7, counted.Messages)
 	assert.True(t, counted.RowsCounted)
 

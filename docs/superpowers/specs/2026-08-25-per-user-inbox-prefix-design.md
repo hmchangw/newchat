@@ -118,8 +118,42 @@ Two call sites:
 No Go production client is affected. `tools/loadgen` connects with `backend.creds`
 (`daily_pool.go:183-186`); `maxrps_login.go:167` mints a JWT to measure login
 throughput but never dials NATS with it; bots authenticate over HTTP through
-`pkg/botauth`. The prefix string is therefore needed in JS only — nothing is added
-to `pkg/subject`, where it would be an exported function with no production caller.
+`pkg/botauth`.
+
+> **Amended 2026-09-09.** The original text concluded from the above that the
+> prefix was needed in JS only, and that nothing be added to `pkg/subject`
+> because it would have no Go caller. That held on 2026-08-25 and no longer
+> does: `tools/clientsim` (PR #444, merged 2026-09-03) dials NATS over
+> WebSocket with a JWT minted from this very template — one connection per
+> account — and so is bound by the same grants as the browser.
+>
+> Left on nats.go's default `_INBOX` prefix, its response mux subscribes
+> `_INBOX.<nuid>.*`. Under §9's scheme the template grants no `_INBOX` subject
+> at all, so that subscription is denied outright: the broker answers with a
+> permissions violation, nats.go tears the mux down and recreates it — denied
+> again — and the connection is closed under a client that never completes its
+> first `subscription.list` page. That is how the gap surfaced, in a staging
+> run.
+>
+> The prefix now lives in `subject.UserInboxPrefix(account)` (returning
+> `chat.user.{account}`, per §9 — **not** §4's superseded `_INBOX.{account}`),
+> and clientsim passes it through `nats.CustomInboxPrefix`
+> (`tools/clientsim/conn.go`, `dialOptions`). It encodes the account through
+> `EncodeAccount`, as `SubscriptionUpdate` and `RoomKeyUpdate` do: a dotted
+> `.bot` account spans subject tokens, and auth-service encodes it before
+> stamping the JWT's `account:` tag (`auth-service/handler.go:247`), so
+> `{{tag(account)}}` is evaluated against the encoded form. §3's claim that "an
+> account is always exactly one safe subject token" is true only of the encoded
+> account — the raw one can carry dots, and the validator §3 cites rejects
+> them.
+>
+> The rule the original reasoning missed, and which any future Go client should
+> read off this line: **the prefix belongs to the JWT template, not to the
+> browser.** Anything dialling with a user JWT minted from it — production
+> client, tool, or test harness — has to set the same prefix. The remaining Go
+> dials are unaffected for the reason given above, not by luck: `tools/loadgen`,
+> `tools/nats-debug` and `tools/cdc-verify` all connect with a creds file for a
+> non-scoped account, so no `{{tag(account)}}` template applies to them.
 
 ### 5.1 Failure handling
 

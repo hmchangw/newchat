@@ -21,89 +21,47 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
+	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
 
-const natsAlias = "nats-server"
-
-// setupNetwork creates a shared Docker network for the NATS and Node containers.
-func setupNetwork(t *testing.T) *testcontainers.DockerNetwork {
+// testIdentity derives a per-test account and room ID so tests sharing the
+// process-wide broker can never cross-talk on identical subjects
+// (CLAUDE.md §4: per-test isolation is the caller's responsibility).
+func testIdentity(t *testing.T) (account, roomID string) {
 	t.Helper()
-	ctx := context.Background()
-	nw, err := network.New(ctx)
-	require.NoError(t, err, "create docker network")
-	t.Cleanup(func() {
-		_ = nw.Remove(ctx)
-	})
-	return nw
+	base := strings.ToLower(strings.NewReplacer("/", "-", "_", "-").Replace(t.Name()))
+	if len(base) > 24 {
+		base = base[:24]
+	}
+	return "acct-" + base, "room-" + base
 }
 
-// setupNATS starts a NATS container with TCP (4222) and WebSocket (8080) enabled.
-// Returns a connected Go NATS client (TCP) and the WebSocket URL reachable from
-// other containers on the shared network.
-func setupNATS(t *testing.T, nw *testcontainers.DockerNetwork) (*nats.Conn, string) {
+// setupNATS connects to the process-shared WebSocket-enabled NATS instance
+// (testutil.NATSWebSocket). Returns a per-test Go NATS client (TCP), the
+// WebSocket URL reachable from sibling containers on the shared network,
+// and that network's name for setupNode.
+func setupNATS(t *testing.T) (*nats.Conn, string, string) {
 	t.Helper()
-	ctx := context.Background()
-
-	// NATS config enabling WebSocket without TLS.
-	natsConf := `
-listen: 0.0.0.0:4222
-websocket {
-  listen: "0.0.0.0:8080"
-  no_tls: true
-}
-`
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        testimages.NATS,
-			ExposedPorts: []string{"4222/tcp", "8080/tcp"},
-			Cmd:          []string{"--config", "/nats.conf"},
-			Files: []testcontainers.ContainerFile{
-				{
-					Reader:            strings.NewReader(natsConf),
-					ContainerFilePath: "/nats.conf",
-					FileMode:          0o644,
-				},
-			},
-			Networks:       []string{nw.Name},
-			NetworkAliases: map[string][]string{nw.Name: {natsAlias}},
-			WaitingFor:     wait.ForLog("Server is ready").WithStartupTimeout(30 * time.Second),
-		},
-		Started: true,
-	})
-	require.NoError(t, err, "start NATS container")
-	t.Cleanup(func() {
-		_ = container.Terminate(ctx)
-	})
-
-	// Build TCP URL for Go client (mapped host port).
-	host, err := container.Host(ctx)
-	require.NoError(t, err)
-	tcpPort, err := container.MappedPort(ctx, "4222")
-	require.NoError(t, err)
-	tcpURL := fmt.Sprintf("nats://%s:%s", host, tcpPort.Port())
-
-	nc, err := nats.Connect(tcpURL)
+	info := testutil.NATSWebSocket(t)
+	if info.Network == "" {
+		t.Skip("shared ws-NATS is running in subprocess mode (no Docker): the TypeScript client needs a Node container on a shared docker network")
+	}
+	nc, err := nats.Connect(info.TCPURL)
 	require.NoError(t, err, "connect to NATS")
 	t.Cleanup(func() {
 		nc.Close()
 	})
-
-	// Build WS URL for TypeScript client (container-to-container via network alias).
-	wsURL := fmt.Sprintf("ws://%s:8080", natsAlias)
-
-	return nc, wsURL
+	return nc, info.AliasWSURL, info.Network
 }
 
 // setupNode starts a Node container on the shared network, installs tsx + nats npm
 // packages, and copies the client.ts script. Returns the container for exec calls.
-func setupNode(t *testing.T, nw *testcontainers.DockerNetwork) testcontainers.Container {
+func setupNode(t *testing.T, networkName string) testcontainers.Container {
 	t.Helper()
 	ctx := context.Background()
 
@@ -113,7 +71,7 @@ func setupNode(t *testing.T, nw *testcontainers.DockerNetwork) testcontainers.Co
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:      testimages.Node,
 			Cmd:        []string{"sh", "-c", "sleep 600"},
-			Networks:   []string{nw.Name},
+			Networks:   []string{networkName},
 			WaitingFor: wait.ForExec([]string{"node", "--version"}).WithStartupTimeout(30 * time.Second),
 		},
 		Started: true,
@@ -189,13 +147,11 @@ func TestRoomKeySender_TypeScriptClient_Unencrypted(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Start infrastructure.
-	nw := setupNetwork(t)
-	nc, wsURL := setupNATS(t, nw)
-	nodeContainer := setupNode(t, nw)
+	nc, wsURL, networkName := setupNATS(t)
+	nodeContainer := setupNode(t, networkName)
 
-	// 2. Test parameters.
-	account := "alice"
-	roomID := "room-1"
+	// 2. Test parameters — per-test identifiers on a process-shared broker.
+	account, roomID := testIdentity(t)
 	plaintext := "hello unencrypted"
 
 	// 3. Start the TypeScript client in background.
@@ -244,18 +200,16 @@ func TestRoomKeySender_TypeScriptClient(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Start infrastructure.
-	nw := setupNetwork(t)
-	nc, wsURL := setupNATS(t, nw)
-	nodeContainer := setupNode(t, nw)
+	nc, wsURL, networkName := setupNATS(t)
+	nodeContainer := setupNode(t, networkName)
 
 	// 2. Generate a fresh 32-byte room secret.
 	privKeyBytes := make([]byte, 32)
 	_, err := rand.Read(privKeyBytes)
 	require.NoError(t, err)
 
-	// 3. Test parameters.
-	account := "alice"
-	roomID := "room-1"
+	// 3. Test parameters — per-test identifiers on a process-shared broker.
+	account, roomID := testIdentity(t)
 	version := 0
 	plaintext := "hello from Go integration test"
 

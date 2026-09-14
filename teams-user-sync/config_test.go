@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	"github.com/caarlos0/env/v11"
@@ -16,6 +17,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("GRAPH_CLIENT_SECRET", "secret")
 	t.Setenv("MONGO_READ_URI", "mongodb://read:27017")
 	t.Setenv("MONGO_WRITE_URI", "mongodb://write:27017")
+	unsetProxyEnv(t)
 }
 
 func TestConfig_Defaults(t *testing.T) {
@@ -82,5 +84,46 @@ func TestConfig_MissingRequiredFails(t *testing.T) {
 			_, err := env.ParseAs[config]()
 			require.Error(t, err)
 		})
+	}
+}
+
+// TestConfig_GraphProxyCredentials covers the authenticating-proxy settings.
+// They are kept out of GRAPH_PROXY_URL so a password carrying URL
+// metacharacters needs no percent-encoding, and so the secret is a field of its
+// own rather than half of a connection string.
+func TestConfig_GraphProxyCredentials(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("GRAPH_PROXY_URL", "http://proxy.corp:8080")
+	t.Setenv("GRAPH_PROXY_USERNAME", "proxyuser")
+	t.Setenv("GRAPH_PROXY_PASSWORD", "p@ss:w/rd")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	assert.Equal(t, "proxyuser", cfg.GraphProxyUsername)
+	assert.Equal(t, "p@ss:w/rd", cfg.GraphProxyPassword)
+}
+
+func TestConfig_GraphProxyCredentialsDefaultEmpty(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	assert.Empty(t, cfg.GraphProxyUsername, "an unauthenticated proxy stays the default")
+	assert.Empty(t, cfg.GraphProxyPassword)
+}
+
+// unsetProxyEnv removes the Graph proxy vars for the duration of the test,
+// restoring any prior value on cleanup. t.Setenv has no unset counterpart, and
+// an explicitly empty value is a different input from an absent one — the
+// default assertions are about the absent case.
+func unsetProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"GRAPH_PROXY_URL", "GRAPH_PROXY_USERNAME", "GRAPH_PROXY_PASSWORD"} {
+		if prev, ok := os.LookupEnv(k); ok {
+			t.Cleanup(func() { require.NoError(t, os.Setenv(k, prev)) })
+		}
+		require.NoError(t, os.Unsetenv(k))
 	}
 }

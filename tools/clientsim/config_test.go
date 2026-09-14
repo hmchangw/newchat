@@ -1,0 +1,428 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/poolartifact"
+)
+
+func validTestConfig() config {
+	return config{
+		// Cleartext with the explicit opt-in: these cases are about the other
+		// knobs, and TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn
+		// owns the transport rule.
+		NATSWSURL: "ws://x", AllowInsecureWS: true,
+		AuthURL: "http://x", PoolFile: "p", SiteID: "s",
+		RampRate: 50, JWTMode: jwtModeProactive,
+		SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
+		ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
+	}
+}
+
+func TestValidateConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*config)
+		wantErr string
+	}{
+		{"valid", func(*config) {}, ""},
+		{"valid expiry mode", func(c *config) { c.JWTMode = jwtModeExpiry }, ""},
+		{"unknown jwt mode", func(c *config) { c.JWTMode = "sometimes" }, "JWT_MODE"},
+		{"zero pending msgs would mean unlimited", func(c *config) { c.SubPendingMsgs = 0 }, "PENDING"},
+		{"negative pending bytes would mean unlimited", func(c *config) { c.SubPendingBytes = -1 }, "PENDING"},
+		{"zero ramp rate", func(c *config) { c.RampRate = 0 }, "RAMP_RATE"},
+		{"negative churn rate", func(c *config) { c.ChurnRate = -1 }, "CHURN_RATE"},
+		{"zero reconnect buffer", func(c *config) { c.ReconnectBufBytes = 0 }, "RECONNECT_BUF"},
+		{"zero ping interval", func(c *config) { c.PingInterval = 0 }, "PING_INTERVAL"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.mutate(&cfg)
+			err := validateConfig(&cfg)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// requestConn is a minimal simConn whose Request is scripted — for
+// natsLister's error paths.
+type requestConn struct {
+	fakeConn
+	reply []byte
+	err   error
+}
+
+func (r *requestConn) Request(context.Context, string, []byte) (*nats.Msg, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return &nats.Msg{Data: r.reply}, nil
+}
+
+func TestNatsLister_ErrorPaths(t *testing.T) {
+	t.Run("transport error", func(t *testing.T) {
+		l := &natsLister{conn: &requestConn{err: errors.New("no responders")}, subject: "s", timeout: time.Second}
+		_, err := l.List(context.Background(), subListRequest{Type: "rooms"})
+		assert.ErrorContains(t, err, "subscription.list request")
+	})
+	t.Run("errcode rejection envelope", func(t *testing.T) {
+		l := &natsLister{conn: &requestConn{reply: []byte(`{"code":"bad_request","error":"unknown subscription type"}`)}, subject: "s", timeout: time.Second}
+		_, err := l.List(context.Background(), subListRequest{Type: "nope"})
+		assert.ErrorContains(t, err, "rejected")
+	})
+	t.Run("malformed reply body", func(t *testing.T) {
+		l := &natsLister{conn: &requestConn{reply: []byte("{nope")}, subject: "s", timeout: time.Second}
+		_, err := l.List(context.Background(), subListRequest{Type: "rooms"})
+		assert.ErrorContains(t, err, "decode")
+	})
+	t.Run("happy path", func(t *testing.T) {
+		l := &natsLister{conn: &requestConn{reply: []byte(`{"subscriptions":[],"hasMore":false}`)}, subject: "s", timeout: time.Second}
+		page, err := l.List(context.Background(), subListRequest{Type: "rooms"})
+		require.NoError(t, err)
+		assert.False(t, page.HasMore)
+	})
+}
+
+func TestPrintSummary_LogsWithoutError(t *testing.T) {
+	m := newMetrics()
+	m.DecodeFailures.Inc()
+	s, err := printSummary(m, "run-9", "digest", 10)
+	require.NoError(t, err)
+	assert.True(t, s.Degraded, "a decode failure marks the window degraded")
+}
+
+// setupUnreachableRun points a run at dead endpoints: every client fails
+// auth, so no connection is ever held.
+func setupUnreachableRun(t *testing.T) {
+	t.Helper()
+	pool := filepath.Join(t.TempDir(), "pool.json")
+	require.NoError(t, poolartifact.Write(pool, &poolartifact.Artifact{
+		RunID: "test-run", SiteID: "site-t", ConfigDigest: "d",
+		Accounts: []string{"user-a", "user-b"},
+	}))
+	t.Setenv("CLIENTSIM_NATS_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_ALLOW_INSECURE_WS", "true")
+	t.Setenv("CLIENTSIM_AUTH_URL", "http://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_POOL_FILE", pool)
+	t.Setenv("CLIENTSIM_SITE_ID", "site-t")
+	t.Setenv("CLIENTSIM_METRICS_ADDR", "127.0.0.1:0")
+	t.Setenv("CLIENTSIM_RAMP_RATE", "1000")
+}
+
+// A soak where nothing ever connected must not report success — that run
+// measured nothing, however cleanly it shut down.
+func TestRun_EndToEnd_FailsWhenFleetNeverCameUp(t *testing.T) {
+	setupUnreachableRun(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := run(ctx)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "readiness floor")
+}
+
+// With the gate switched off the same run drains cleanly and exits 0.
+func TestRun_EndToEnd_StartsAndShutsDown(t *testing.T) {
+	setupUnreachableRun(t)
+	t.Setenv("CLIENTSIM_MIN_READY_RATIO", "0")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	assert.NoError(t, run(ctx), "a cancelled run with failing clients still shuts down cleanly")
+}
+
+func TestRun_FailsFastOnBadPoolFile(t *testing.T) {
+	t.Setenv("CLIENTSIM_NATS_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_ALLOW_INSECURE_WS", "true")
+	t.Setenv("CLIENTSIM_AUTH_URL", "http://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_POOL_FILE", filepath.Join(t.TempDir(), "missing.json"))
+	t.Setenv("CLIENTSIM_SITE_ID", "site-t")
+	err := run(context.Background())
+	assert.ErrorContains(t, err, "pool artifact")
+}
+
+func TestRun_FailsFastOnInvalidMode(t *testing.T) {
+	t.Setenv("CLIENTSIM_NATS_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_ALLOW_INSECURE_WS", "true")
+	t.Setenv("CLIENTSIM_AUTH_URL", "http://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_POOL_FILE", "x")
+	t.Setenv("CLIENTSIM_SITE_ID", "site-t")
+	t.Setenv("CLIENTSIM_JWT_MODE", "yolo")
+	err := run(context.Background())
+	assert.ErrorContains(t, err, "JWT_MODE")
+}
+
+func TestValidateConfig_ReadyRatioBounds(t *testing.T) {
+	cases := []struct {
+		name    string
+		ratio   float64
+		wantErr bool
+	}{
+		{"disabled", 0, false},
+		{"default", 0.95, false},
+		{"full fleet required", 1, false},
+		{"negative", -0.1, true},
+		{"over one", 1.5, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config{NATSWSURL: "wss://x", JWTMode: jwtModeProactive,
+				PoolFile:       "p",
+				MinReadyRatio:  tt.ratio,
+				SubPendingMsgs: 1, SubPendingBytes: 1, ShardCount: 1,
+				RampRate: 1, ReconnectBufBytes: 1, PingInterval: time.Minute}
+			err := validateConfig(cfg)
+			if tt.wantErr {
+				assert.ErrorContains(t, err, "MIN_READY_RATIO")
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn(t *testing.T) {
+	base := func() *config {
+		return &config{
+			NATSWSURL: "wss://nats.example:443", JWTMode: jwtModeProactive,
+			PoolFile:      "p",
+			MinReadyRatio: 0.95, SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
+			RampRate: 50, ChurnRate: 0, ReconnectBufBytes: 1 << 16,
+			PingInterval: 2 * time.Minute,
+		}
+	}
+	tests := []struct {
+		name    string
+		url     string
+		allow   bool
+		wantErr string
+	}{
+		{"wss is always fine", "wss://nats.example:443", false, ""},
+		{"ws without the opt-in is rejected", "ws://127.0.0.1:8080", false, "CLIENTSIM_ALLOW_INSECURE_WS"},
+		{"ws with the opt-in is allowed", "ws://127.0.0.1:8080", true, ""},
+		// Rejected for BEING the wrong protocol, not merely for lacking the
+		// opt-in — TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn
+		// owns the case where the opt-in is present.
+		{"a non-websocket scheme is rejected too", "nats://127.0.0.1:4222", false, "must be a WebSocket URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			cfg.NATSWSURL = tt.url
+			cfg.AllowInsecureWS = tt.allow
+			err := validateConfig(cfg)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// The tool's entire output is its metrics endpoint. A Serve failure mid-run
+// means hours of fleet time nobody can read, so it has to reach run() rather
+// than being logged past.
+func TestServeMetrics_ReportsAServeFailure(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := &http.Server{Handler: http.NewServeMux(), ReadHeaderTimeout: time.Second}
+	errCh := serveMetrics(srv, lis)
+
+	require.NoError(t, lis.Close()) // pulled out from under Serve
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "metrics server")
+	case <-time.After(3 * time.Second):
+		t.Fatal("a dead metrics server never reported")
+	}
+}
+
+// A deliberate shutdown is not a failure: the channel closes with no error.
+func TestServeMetrics_ShutdownIsNotAFailure(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := &http.Server{Handler: http.NewServeMux(), ReadHeaderTimeout: time.Second}
+	errCh := serveMetrics(srv, lis)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(ctx))
+	select {
+	case err, ok := <-errCh:
+		assert.False(t, ok, "a clean shutdown must not report an error, got %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveMetrics never finished after Shutdown")
+	}
+}
+
+// The tool's premise is that it connects the way the real client does — over
+// nats.ws. A nats:// URL would connect over plain TCP instead, quietly
+// measuring a transport nobody ships. The insecure opt-in exists to allow
+// cleartext WebSocket on a throwaway stack, not to allow a different protocol.
+func TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn(t *testing.T) {
+	base := func() *config {
+		return &config{
+			JWTMode: jwtModeProactive, MinReadyRatio: 0.95, PoolFile: "p",
+			SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
+			RampRate: 50, ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
+		}
+	}
+	tests := []struct {
+		name    string
+		url     string
+		allow   bool
+		wantErr string
+	}{
+		{"wss is always fine", "wss://nats.example:443", false, ""},
+		{"ws needs the opt-in", "ws://127.0.0.1:8080", false, "CLIENTSIM_ALLOW_INSECURE_WS"},
+		{"ws with the opt-in", "ws://127.0.0.1:8080", true, ""},
+		{"nats:// is not a WebSocket URL, opt-in or not", "nats://127.0.0.1:4222", true, "WebSocket"},
+		{"tls:// is not either", "tls://127.0.0.1:4222", true, "WebSocket"},
+		{"a bare host is not a URL at all", "127.0.0.1:4222", true, "WebSocket"},
+		// A scheme with no authority parses cleanly and only fails later,
+		// inside nats.Connect's own handshake, where the message is far less
+		// obviously a config mistake.
+		{"scheme with no authority", "wss:", true, "host"},
+		{"empty authority with a path", "wss:///path", true, "host"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			cfg.NATSWSURL, cfg.AllowInsecureWS = tt.url, tt.allow
+			err := validateConfig(cfg)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// The pool reaches a k8s fleet through an object store, because the two
+// alternatives are out: a shared PVC needs ReadWriteMany, and a ConfigMap
+// caps below a real 30k-account pool. Exactly one source must be set — a
+// fleet that silently preferred one over the other could measure the wrong
+// population with nothing in the logs saying so.
+func TestValidateConfig_PoolSourceIsExactlyOne(t *testing.T) {
+	store := poolartifact.StoreConfig{
+		Endpoint: "e", AccessKey: "a", SecretKey: "s", Bucket: "b",
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*config)
+		wantErr string
+	}{
+		{"file only", func(*config) {}, ""},
+		{"url only", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "s3://b/k.json.gz"
+			c.Pool = store
+		}, ""},
+		{"neither", func(c *config) { c.PoolFile = "" }, "CLIENTSIM_POOL_FILE"},
+		{"both", func(c *config) {
+			c.PoolURL = "s3://b/k.json.gz"
+			c.Pool = store
+		}, "not both"},
+		{"url without store config", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "s3://b/k.json.gz"
+		}, "POOL_S3_ENDPOINT"},
+		// The URL names the bucket, and the contract says POOL_S3_BUCKET is
+		// then unnecessary. Validating the raw config first demanded it
+		// anyway, so the documented k8s setup could not start at all.
+		{"url supplies the bucket", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "s3://from-url/k.json.gz"
+			c.Pool = poolartifact.StoreConfig{Endpoint: "e", AccessKey: "a", SecretKey: "s"}
+		}, ""},
+		{"url that is not s3", func(c *config) {
+			c.PoolFile = ""
+			c.PoolURL = "https://example.com/pool.json"
+			c.Pool = store
+		}, "s3://"},
+		{"partially configured store with a file source", func(c *config) {
+			c.Pool = poolartifact.StoreConfig{Bucket: "b"}
+		}, "POOL_S3_ENDPOINT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tc.mutate(&cfg)
+			err := validateConfig(&cfg)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// The file branch is the local and docker-compose path; the object-store
+// branch is covered by pkg/poolartifact's own tests. What is worth pinning
+// here is that the two do not cross: a file source must never reach for the
+// network, and a malformed URL must fail before any connection is attempted.
+func TestLoadPool_ReadsTheConfiguredSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.json")
+	require.NoError(t, poolartifact.Write(path, &poolartifact.Artifact{
+		RunID: "r", SiteID: "site-a", ConfigDigest: "d",
+		Accounts: []string{"anna", "bob"},
+	}))
+
+	cfg := validTestConfig()
+	cfg.PoolFile = path
+	cfg.SiteID = "site-a"
+	got, err := loadPool(context.Background(), &cfg)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"anna", "bob"}, got.Accounts)
+
+	cfg.PoolFile = ""
+	cfg.PoolURL = "s3://bucket"
+	_, err = loadPool(context.Background(), &cfg)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "object key")
+}
+
+// The pool is a list of real employee accounts and the fetch carries the
+// store's access key ID, so a plaintext endpoint is a real exposure — but
+// rejecting it outright would break the documented docker-compose loop, which
+// runs MinIO over HTTP on localhost. Make the posture visible instead of
+// silent, and only where it is actually a network hop.
+func TestWarnPlaintextObjectStore(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint string
+		useSSL   bool
+		want     bool
+	}{
+		{"tls anywhere is fine", "minio.svc.cluster.local:9000", true, false},
+		{"plaintext to a remote host warns", "minio.svc.cluster.local:9000", false, true},
+		{"plaintext to localhost is the dev loop", "localhost:9000", false, false},
+		{"plaintext to 127.0.0.1 is the dev loop", "127.0.0.1:9000", false, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := poolartifact.StoreConfig{Endpoint: tt.endpoint, UseSSL: tt.useSSL}
+			assert.Equal(t, tt.want, cfg.PlaintextEndpoint())
+		})
+	}
+}

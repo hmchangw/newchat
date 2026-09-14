@@ -9,16 +9,17 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -43,6 +44,10 @@ type config struct {
 	// match broadcast-worker's: it encrypts against its own handle while key.get is
 	// served from here, and the two must not disagree about falling back.
 	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
+
+	// Valkey backs best-effort subauthcache L2 invalidation on member removal.
+	// Optional: when VALKEY_ADDRS is empty the bust is a no-op (the L2 TTL reconciles).
+	Valkey valkeyutil.Config
 
 	// Pool caps the Mongo connection pool. MaxConcurrency bounds in-flight
 	// handlers — kept at this service's historical 200 default (below the fleet
@@ -82,7 +87,7 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
@@ -122,19 +127,26 @@ func run() error {
 	}
 	keySender := roomkeysender.NewSender(nc.NatsConn())
 
-	// pkg/outbox.Publish wants a raw NATS publish with msgID as Nats-Msg-Id header.
-	pubCallback := func(_ context.Context, subj string, data []byte, msgID string) error {
-		msg := &nats.Msg{Subject: subj, Data: data, Header: nats.Header{}}
-		msg.Header.Set("Nats-Msg-Id", msgID)
-		return nc.NatsConn().PublishMsg(msg)
+	pubCallback := newOutboxPublisher(js)
+
+	// Best-effort subauthcache L2 (Valkey) invalidation. A connect failure logs
+	// and continues (nil client, bust becomes a no-op reconciled by the L2
+	// TTL) rather than exiting — this is an optional cache tier, not a hard
+	// startup dependency.
+	subValkey := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "subauth L2 invalidation", valkeyutil.Instrumented(sdk))
+	if subValkey != nil {
+		slog.Info("subauth L2 invalidation enabled")
 	}
 
 	peers := parsePeers(cfg.AllSiteIDs, cfg.SiteID)
 	h := newHandler(store, cfg.SiteID, peers, pubCallback, keyStore, keySender)
+	h.valkey = subValkey
 	// LOCAL sysmsg emission on create/add/remove; never federated cross-site.
 	h.sysmsgPub = jsPublishAdapter{js: js}
 
-	router := natsrouter.DefaultGuarded(nc, "bot-room-service", guard)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.DefaultGuarded(nc, "bot-room-service", guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	h.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
@@ -149,6 +161,7 @@ func run() error {
 		func(dctx context.Context) error { return router.Shutdown(dctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(dctx context.Context) error { mongoutil.Disconnect(dctx, mc); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(dctx context.Context) error { return healthStop(dctx) },
 		func(dctx context.Context) error { return obsShutdown(dctx) },
 	)

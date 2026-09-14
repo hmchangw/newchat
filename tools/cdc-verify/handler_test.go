@@ -62,6 +62,8 @@ func testServer(t *testing.T) (*httptest.Server, *hub) {
 
 func TestHealthz(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/healthz")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -70,6 +72,8 @@ func TestHealthz(t *testing.T) {
 
 func TestAPIState(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/api/state")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -95,6 +99,8 @@ func TestAPIState(t *testing.T) {
 
 func TestFailuresDownload(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/failures.json")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -107,6 +113,8 @@ func TestFailuresDownload(t *testing.T) {
 
 func TestIndexServed(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -210,6 +218,8 @@ func (fakeInspector) Inspect(_ context.Context, collection, docID string) (Inspe
 
 func TestAPIInspect(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/api/inspect?collection=rocketchat_room&doc=r1")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -226,6 +236,8 @@ func TestAPIInspect(t *testing.T) {
 func TestAPIInspect_BadRequest(t *testing.T) {
 	srv, _ := testServer(t)
 	for _, q := range []string{"", "?collection=x", "?doc=y"} {
+		// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+		// nosemgrep: gosec.G107-1
 		resp, err := http.Get(srv.URL + "/api/inspect" + q)
 		require.NoError(t, err)
 		resp.Body.Close()
@@ -235,6 +247,8 @@ func TestAPIInspect_BadRequest(t *testing.T) {
 
 func TestAPIInspect_UnmappedIs404(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/api/inspect?collection=unmapped_coll&doc=x")
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -245,6 +259,8 @@ func TestAPIInspect_UnmappedIs404(t *testing.T) {
 // URIs/hosts that must never reach the browser.
 func TestAPIInspect_InternalErrorBodyIsGeneric(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/api/inspect?collection=boom_coll&doc=x")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -257,6 +273,8 @@ func TestAPIInspect_InternalErrorBodyIsGeneric(t *testing.T) {
 
 func TestAPIMapping(t *testing.T) {
 	srv, _ := testServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(srv.URL + "/api/mapping")
 	require.NoError(t, err)
 	defer resp.Body.Close()

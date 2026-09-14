@@ -68,10 +68,11 @@ func (s *Sender) SendData(account string, data []byte) error {
 // publish metric with the caller's context.
 func (s *Sender) SendDataContext(ctx context.Context, account string, data []byte) error {
 	subj := subject.RoomKeyUpdate(account)
-	err := s.pub.Publish(subj, data)
-	destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-	s.metrics.Attempt(ctx, destination, operation, err)
-	if err != nil {
+	if err := s.pub.Publish(subj, data); err != nil {
+		// Classify only on the failure path: fanOutKey calls this once per room
+		// member, and PublishLabelsFromSubject allocates.
+		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+		s.metrics.Failure(ctx, destination, operation, err)
 		return fmt.Errorf("publish room key event: %w", err)
 	}
 	return nil

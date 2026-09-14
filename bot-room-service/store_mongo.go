@@ -124,12 +124,30 @@ func (s *storeMongo) UpsertSubscription(ctx context.Context, sub *Subscription) 
 	return res.UpsertedCount > 0, nil
 }
 
-func (s *storeMongo) DeleteSubscription(ctx context.Context, roomID, userID string) (bool, error) {
-	res, err := s.subs.DeleteOne(ctx, bson.M{"roomId": roomID, "u._id": userID})
-	if err != nil {
-		return false, fmt.Errorf("delete subscription (%s,%s): %w", roomID, userID, err)
+// DeleteSubscription deletes and returns both values the caller cannot recover
+// afterwards, in one round trip. FindOneAndDelete rather than DeleteOne because
+// this is the last instant the row exists: _id names the membership incarnation
+// the removal ends (the cross-site event dedups on it), and u.account is the key
+// subauthcache is stored under, so sourcing it here means the bust cannot be
+// skipped by a follow-up lookup that fails independently.
+func (s *storeMongo) DeleteSubscription(ctx context.Context, roomID, userID string) (string, string, bool, error) {
+	var deleted struct {
+		ID   string `bson:"_id"`
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
 	}
-	return res.DeletedCount > 0, nil
+	err := s.subs.FindOneAndDelete(ctx,
+		bson.M{"roomId": roomID, "u._id": userID},
+		options.FindOneAndDelete().SetProjection(bson.M{"_id": 1, "u.account": 1}),
+	).Decode(&deleted)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", "", false, nil
+		}
+		return "", "", false, fmt.Errorf("delete subscription (%s,%s): %w", roomID, userID, err)
+	}
+	return deleted.ID, deleted.User.Account, true, nil
 }
 
 func (s *storeMongo) FindUser(ctx context.Context, userID string) (*model.User, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -165,4 +166,86 @@ func TestStatusLabel_RawErrorCollapsesToInternal(t *testing.T) {
 	if got := statusLabel(wrapped); got != "internal" {
 		t.Fatalf("wrapped raw err → status = %q, want %q", got, "internal")
 	}
+}
+
+// observeRequest indexes its precomputed maps by kind and status. Its sibling
+// recorder in search-sync-worker guards the lookup and falls back; this one did
+// not, so a kind added to the metricKind constants but forgotten in
+// allMetricKinds yielded a nil MeasurementOption and panicked inside the SDK on
+// the first request of that kind — at runtime, in production, on a path the
+// compiler cannot check.
+//
+// The asymmetry was the trap: two recorders written the same way in the same
+// change, one defended and one not.
+func TestObserveRequest_UnregisteredKindDoesNotPanic(t *testing.T) {
+	reader := newTestMetrics(t)
+
+	var handlerErr error
+	require.NotPanics(t, func() {
+		observeRequest(context.Background(), "a-kind-nobody-registered", &handlerErr)()
+	})
+
+	// It still counts — an unregistered kind is a reporting gap, not a reason
+	// to lose the request entirely.
+	m, ok := findMetric(collectMetrics(t, reader), "search_service_requests")
+	require.True(t, ok, "the request must still be recorded, without the unbounded kind label")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	require.True(t, ok)
+	require.Len(t, sum.DataPoints, 1)
+	for _, kv := range sum.DataPoints[0].Attributes.ToSlice() {
+		require.NotEqual(t, "a-kind-nobody-registered", kv.Value.String(),
+			"the unregistered kind must not become a label value")
+	}
+}
+
+// A registered kind keeps its labels — the fallback must not swallow them.
+func TestObserveRequest_RegisteredKindKeepsItsLabels(t *testing.T) {
+	reader := newTestMetrics(t)
+
+	var handlerErr error
+	observeRequest(context.Background(), metricKindMessages, &handlerErr)()
+
+	m, ok := findMetric(collectMetrics(t, reader), "search_service_requests")
+	require.True(t, ok)
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	require.True(t, ok)
+	require.Len(t, sum.DataPoints, 1)
+	got := map[string]string{}
+	for _, kv := range sum.DataPoints[0].Attributes.ToSlice() {
+		got[string(kv.Key)] = kv.Value.String()
+	}
+	require.Equal(t, metricKindMessages, got["kind"])
+	require.Equal(t, "ok", got["status"])
+}
+
+// The fallback that keeps an unregistered kind from panicking built its
+// MeasurementOptions inline, once per request — the allocation this package
+// precomputes buildRequestOpts to avoid, reintroduced by the fix for the panic.
+// It escaped the semgrep rule only because the option is assigned to a variable
+// before it reaches Record/Add, not because it is cheap.
+//
+// Both fallback sets are closed: statusLabel returns members of
+// allowedStatusLabels and nothing else, and the duration fallback carries no
+// labels at all, so there is exactly one option per status plus one unlabelled.
+func TestObserveRequest_UnregisteredKindDoesNotAllocateOptions(t *testing.T) {
+	newTestMetrics(t)
+
+	var handlerErr error
+	ctx := context.Background()
+	// One warm-up outside the measurement: the first call through the SDK
+	// allocates its own per-series state, which is not what this asserts.
+	observeRequest(ctx, "a-kind-nobody-registered", &handlerErr)()
+
+	opts := allocsForFallbackOptions(t, "a-kind-nobody-registered")
+	assert.Zero(t, opts, "the unknown-kind fallback must look its options up, not build them")
+}
+
+// allocsForFallbackOptions measures only the option selection, not the SDK
+// recording underneath it, so the assertion stays about this package's choice.
+func allocsForFallbackOptions(t *testing.T, kind string) float64 {
+	t.Helper()
+	return testing.AllocsPerRun(100, func() {
+		_ = appMetrics.durationOptFor(kind)
+		_ = appMetrics.countOptFor(kind, "ok")
+	})
 }

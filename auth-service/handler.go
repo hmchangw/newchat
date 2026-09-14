@@ -309,8 +309,13 @@ func (h *AuthHandler) handleDevAuth(ctx context.Context, c *gin.Context, req aut
 // Effective grants (kept in sync with docker-local/setup.sh and
 // docs/client-api.md §2.1 — a platform-team template change must mirror both):
 //
-//	Pub allow: chat.user.{account}.>, _INBOX.>, chat.user.presence.*.query.batch (+allow-pub-response)
-//	Sub allow: chat.user.{account}.>, chat.room.>, chat.local.room.>, _INBOX.>, chat.user.presence.state.*
+//	Pub allow: chat.user.{account}.>, chat.user.presence.*.query.batch (+allow-pub-response)
+//	Sub allow: chat.user.{account}.>, chat.room.>, chat.local.room.>, chat.user.presence.state.*
+//
+// There is deliberately no _INBOX grant on either side: a client sets its
+// request/reply inbox prefix to chat.user.{account} (subject.UserInboxPrefix),
+// so replies ride the user namespace already granted above. Re-adding one
+// would hand every authenticated user the whole reply namespace.
 //
 // The list above is documentation only (the live grant is the platform-team
 // template); the leaf node denies chat.local.> cross-gateway, so it stays site-local.

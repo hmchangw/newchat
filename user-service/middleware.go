@@ -14,6 +14,8 @@ import (
 
 // ssoTokenHeader carries the SSO credential, matching upload-service and the
 // Drive endpoints the client already calls.
+// #nosec G101 -- HTTP header name, not a credential
+// nosemgrep: gosec.G101-1
 const ssoTokenHeader = "ssoToken"
 
 // ctxAccountKey holds the account resolved from the caller's credential.

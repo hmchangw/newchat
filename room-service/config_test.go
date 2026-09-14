@@ -79,7 +79,7 @@ func TestConfig_ValkeyDisabledByDefault(t *testing.T) {
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	assert.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+	assert.Empty(t, cfg.Valkey.Addrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
 }
 
 func TestConfig_ValkeyAddrsParsed(t *testing.T) {
@@ -90,8 +90,8 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
-	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
+	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.Valkey.Addrs)
+	assert.Equal(t, "hunter2", cfg.Valkey.Password)
 }
 
 func TestConfig_MentionableLimits(t *testing.T) {
@@ -266,4 +266,47 @@ func TestConfig_KeyReadPreferenceDefault(t *testing.T) {
 	rp, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
 	require.NoError(t, err)
 	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
+}
+
+// TestConfig_GraphProxyCredentials covers the authenticating-proxy settings for
+// the meetings Graph client. They are kept out of GRAPH_PROXY_URL so a password
+// carrying URL metacharacters needs no percent-encoding, and so the secret is a
+// field of its own rather than half of a connection string.
+func TestConfig_GraphProxyCredentials(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("GRAPH_PROXY_URL", "http://proxy.corp:8080")
+	t.Setenv("GRAPH_PROXY_USERNAME", "proxyuser")
+	t.Setenv("GRAPH_PROXY_PASSWORD", "p@ss:w/rd")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "http://proxy.corp:8080", cfg.GraphProxyURL)
+	assert.Equal(t, "proxyuser", cfg.GraphProxyUsername)
+	assert.Equal(t, "p@ss:w/rd", cfg.GraphProxyPassword)
+}
+
+func TestConfig_GraphProxyCredentialsDefaultEmpty(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	unsetProxyEnv(t)
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.GraphProxyUsername, "an unauthenticated proxy stays the default")
+	assert.Empty(t, cfg.GraphProxyPassword)
+}
+
+// unsetProxyEnv removes the Graph proxy vars for the duration of the test,
+// restoring any prior value on cleanup. t.Setenv has no unset counterpart, and
+// an explicitly empty value is a different input from an absent one — the
+// default assertions are about the absent case.
+func unsetProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"GRAPH_PROXY_URL", "GRAPH_PROXY_USERNAME", "GRAPH_PROXY_PASSWORD"} {
+		if prev, ok := os.LookupEnv(k); ok {
+			t.Cleanup(func() { require.NoError(t, os.Setenv(k, prev)) })
+		}
+		require.NoError(t, os.Unsetenv(k))
+	}
 }

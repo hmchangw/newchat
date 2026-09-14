@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
@@ -80,4 +81,92 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
 	})
+}
+
+// The four cache knobs are the operator's only control over enrichment
+// staleness and pod memory, so both the name and the default are pinned.
+func TestConfig_EnrichmentCacheKnobs(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		setRequiredSearchEnv(t)
+		for _, k := range []string{"SEARCH_HR_CACHE_SIZE", "SEARCH_HR_CACHE_TTL", "SEARCH_APP_CACHE_SIZE", "SEARCH_APP_CACHE_TTL"} {
+			require.NoError(t, os.Unsetenv(k))
+		}
+
+		cfg, err := env.ParseAs[Config]()
+
+		require.NoError(t, err)
+		assert.Equal(t, 130000, cfg.Search.HRCacheSize)
+		assert.Equal(t, 24*time.Hour, cfg.Search.HRCacheTTL)
+		assert.Equal(t, 1000, cfg.Search.AppCacheSize)
+		assert.Equal(t, 24*time.Hour, cfg.Search.AppCacheTTL)
+	})
+
+	t.Run("overrides", func(t *testing.T) {
+		setRequiredSearchEnv(t)
+		t.Setenv("SEARCH_HR_CACHE_SIZE", "16")
+		t.Setenv("SEARCH_HR_CACHE_TTL", "90s")
+		t.Setenv("SEARCH_APP_CACHE_SIZE", "8")
+		t.Setenv("SEARCH_APP_CACHE_TTL", "30s")
+
+		cfg, err := env.ParseAs[Config]()
+
+		require.NoError(t, err)
+		assert.Equal(t, 16, cfg.Search.HRCacheSize)
+		assert.Equal(t, 90*time.Second, cfg.Search.HRCacheTTL)
+		assert.Equal(t, 8, cfg.Search.AppCacheSize)
+		assert.Equal(t, 30*time.Second, cfg.Search.AppCacheTTL)
+	})
+
+	// Zero is the documented disable switch, not a parse error — Task 3's
+	// constructor turns it into a pass-through store.
+	t.Run("zero disables", func(t *testing.T) {
+		setRequiredSearchEnv(t)
+		t.Setenv("SEARCH_HR_CACHE_SIZE", "0")
+		t.Setenv("SEARCH_APP_CACHE_TTL", "0s")
+
+		cfg, err := env.ParseAs[Config]()
+
+		require.NoError(t, err)
+		assert.Equal(t, 0, cfg.Search.HRCacheSize)
+		assert.Equal(t, time.Duration(0), cfg.Search.AppCacheTTL)
+	})
+}
+
+// expirable.LRU ticks its reaper at ttl/100 via time.NewTicker, which panics on
+// zero in an unrecovered goroutine — so a tiny positive TTL must fail startup
+// cleanly rather than crash the process.
+func TestSearchConfig_ValidateRejectsTinyCacheTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     SearchConfig
+		wantErr string
+	}{
+		{"hr ttl below floor", SearchConfig{HRCacheTTL: 50 * time.Nanosecond}, "SEARCH_HR_CACHE_TTL"},
+		{"app ttl below floor", SearchConfig{AppCacheTTL: 50 * time.Nanosecond}, "SEARCH_APP_CACHE_TTL"},
+		{"hr ttl just under the floor", SearchConfig{HRCacheTTL: minCacheTTL - time.Nanosecond}, "SEARCH_HR_CACHE_TTL"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestSearchConfig_ValidateAcceptsDisabledAndSaneTTLs(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SearchConfig
+	}{
+		{"both zero (disabled)", SearchConfig{}},
+		{"exactly the floor", SearchConfig{HRCacheTTL: minCacheTTL, AppCacheTTL: minCacheTTL}},
+		{"the shipped defaults", SearchConfig{HRCacheTTL: 24 * time.Hour, AppCacheTTL: 24 * time.Hour}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.NoError(t, tc.cfg.Validate())
+		})
+	}
 }

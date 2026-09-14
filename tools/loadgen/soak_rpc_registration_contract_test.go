@@ -80,6 +80,8 @@ func handlerBodyRequirements(t *testing.T, root string) map[string]bool {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		source, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return fmt.Errorf("read %q while scanning registrations: %w", path, readErr)
@@ -117,6 +119,8 @@ func soakRequestCallSites(t *testing.T) []soakRequestCallSite {
 		if strings.HasSuffix(file, "_test.go") {
 			continue
 		}
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		source, readErr := os.ReadFile(file)
 		require.NoError(t, readErr)
 		text := string(source)

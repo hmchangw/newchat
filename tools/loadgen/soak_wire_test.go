@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	soakwire "github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 	usermodels "github.com/hmchangw/chat/user-service/models"
 )
 
@@ -375,7 +376,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var decoded soakUserAppCategoriesResponse
+		var decoded soakwire.UserAppCategoriesResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded),
 			"decoding a category object as a string would fail every apps.categories read")
 		require.Len(t, decoded.Categories, 1)
@@ -389,7 +390,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var decoded soakUserThreadListResponse
+		var decoded soakwire.UserThreadListResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		require.Len(t, decoded.Items, 1, "a page read through the wrong key looks empty")
 		assert.Equal(t, "thread-1", decoded.Items[0].ThreadRoomID)
@@ -401,7 +402,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		encoded, err := json.Marshal(model.ThreadUnreadSummaryResponse{Unread: true})
 		require.NoError(t, err)
 
-		var decoded soakUserThreadUnreadResponse
+		var decoded soakwire.UserThreadUnreadResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		assert.True(t, decoded.Unread)
 	})
@@ -412,7 +413,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var decoded soakUserSettingsResponse
+		var decoded soakwire.UserSettingsResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		assert.True(t, decoded.Permissions["canPost"])
 	})
@@ -424,7 +425,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var decoded soakUserAppsResponse
+		var decoded soakwire.UserAppsResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		require.Len(t, decoded.Apps, 1)
 		assert.Equal(t, "app-1", decoded.Apps[0].ID)
@@ -438,7 +439,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var decoded soakUserMeResponse
+		var decoded soakwire.UserMeResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		assert.Equal(t, "alice", decoded.Account)
 	})
@@ -449,7 +450,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var decoded soakUserPriorityContactsResponse
+		var decoded soakwire.UserPriorityContactsResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		require.Len(t, decoded.Contacts, 1)
 		assert.Equal(t, "bob", decoded.Contacts[0].Account)
@@ -461,7 +462,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var decoded soakUserChatlistResponse
+		var decoded soakwire.UserChatlistResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		require.Len(t, decoded.Sections, 1)
 		assert.Equal(t, "favorites", decoded.Sections[0].ID)
@@ -471,7 +472,7 @@ func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
 		encoded, err := json.Marshal(usermodels.CountResponse{Count: 7})
 		require.NoError(t, err)
 
-		var decoded soakUserCountResponse
+		var decoded soakwire.UserCountResponse
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
 		assert.Equal(t, 7, decoded.Count)
 	})
@@ -488,22 +489,22 @@ func TestSoakUserReadRequests_MatchUserServiceJSON(t *testing.T) {
 	}{
 		{
 			name: "get by name",
-			soak: soakUserNameRequest{Name: "alice"},
+			soak: soakwire.UserNameRequest{Name: "alice"},
 			real: usermodels.StatusGetByNameRequest{Name: "alice"},
 		},
 		{
 			name: "get dm",
-			soak: soakUserAccountNameRequest{AccountName: "bob"},
+			soak: soakwire.UserAccountNameRequest{AccountName: "bob"},
 			real: usermodels.GetDMRequest{AccountName: "bob"},
 		},
 		{
 			name: "get by room",
-			soak: soakUserRoomRequest{RoomID: "room-1"},
+			soak: soakwire.UserRoomRequest{RoomID: "room-1"},
 			real: usermodels.GetByRoomIDRequest{RoomID: "room-1"},
 		},
 		{
 			name: "subscription count",
-			soak: soakUserCountRequest{},
+			soak: soakwire.UserCountRequest{},
 			real: usermodels.CountRequest{},
 		},
 	} {
@@ -526,22 +527,22 @@ func TestSoakUserReadRequests_MatchUserServiceJSON(t *testing.T) {
 func TestSoakUserPageRequest_MatchesEveryPagedReader(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
-		soak soakUserPageRequest
+		soak soakwire.UserPageRequest
 		real any
 	}{
 		{
 			name: "apps list",
-			soak: soakUserPageRequest{Limit: 20, Offset: 40},
+			soak: soakwire.UserPageRequest{Limit: 20, Offset: 40},
 			real: usermodels.AppsListRequest{Limit: 20, Offset: 40},
 		},
 		{
 			name: "subscription channels",
-			soak: soakUserPageRequest{Limit: 20, Offset: 40},
+			soak: soakwire.UserPageRequest{Limit: 20, Offset: 40},
 			real: usermodels.GetChannelsRequest{Limit: 20, Offset: 40},
 		},
 		{
 			name: "thread list",
-			soak: soakUserPageRequest{Limit: 20},
+			soak: soakwire.UserPageRequest{Limit: 20},
 			real: model.ThreadListRequest{Limit: 20},
 		},
 	} {

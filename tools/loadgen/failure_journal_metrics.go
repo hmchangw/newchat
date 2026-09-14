@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"time"
+
+	failuremodel "github.com/hmchangw/chat/tools/loadgen/internal/failure"
 )
 
 type failureJournalMetrics struct {
@@ -64,9 +66,7 @@ func (j *failureJournalMetrics) ConfigureObserverContract(
 	contract failureObserverContract,
 	active []failureOperation,
 ) error {
-	configurer, ok := j.journal.(interface {
-		ConfigureObserverContract(failureObserverContract, []failureOperation) error
-	})
+	configurer, ok := j.journal.(failuremodel.ObserverContractJournal)
 	if !ok {
 		return nil
 	}
@@ -74,6 +74,6 @@ func (j *failureJournalMetrics) ConfigureObserverContract(
 }
 
 func (j *failureJournalMetrics) NeedsUpgrade() bool {
-	upgrade, ok := j.journal.(interface{ NeedsUpgrade() bool })
+	upgrade, ok := j.journal.(failuremodel.UpgradeJournal)
 	return ok && upgrade.NeedsUpgrade()
 }

@@ -79,6 +79,8 @@ var LowLatencyBackoff = []time.Duration{
 	1 * time.Second,
 	5 * time.Second,
 	30 * time.Second,
+	2 * time.Minute,
+	10 * time.Minute,
 }
 
 // Settle resolves a processed message and logs the business error once:
@@ -168,4 +170,65 @@ func jitter(d time.Duration) time.Duration {
 	half := d / 2
 	// #nosec G404 -- retry jitter, not security-sensitive
 	return half + time.Duration(rand.Int64N(int64(d-half)+1))
+}
+
+// MinWindow returns the SHORTEST total delay a message can accumulate across
+// deliveries redeliveries under schedule — n deliveries means n-1 waits, and
+// the schedule's last entry repeats once attempts run past it.
+//
+// Shortest, not nominal, because jitter is the point. Every wait is drawn from
+// [d/2, d], so a budget sized on the nominal schedule promises roughly twice
+// the window it can actually guarantee. Anything choosing a delivery count to
+// ride out an outage must size against this.
+func MinWindow(schedule []time.Duration, deliveries int) time.Duration {
+	if len(schedule) == 0 || deliveries < 2 {
+		return 0
+	}
+	var window time.Duration
+	for i := range deliveries - 1 {
+		window += minJitter(delayAt(schedule, i))
+	}
+	return window
+}
+
+// delayAt is the "last entry repeats once attempts run past it" rule, in one
+// place: MinWindow and DeliveriesFor both walk a schedule past its end, and two
+// spellings of the tail rule would let the guaranteed window and the delivery
+// count sized against it disagree about what the tail is.
+func delayAt(schedule []time.Duration, i int) time.Duration {
+	return schedule[min(i, len(schedule)-1)]
+}
+
+// minJitter is the floor jitter can return for a base delay, mirroring jitter's
+// own branches so the two cannot drift.
+func minJitter(d time.Duration) time.Duration {
+	if d <= minNakDelay {
+		return minNakDelay
+	}
+	return d / 2
+}
+
+// DeliveriesFor returns the smallest delivery count whose guaranteed window
+// (see MinWindow) covers want. A schedule with a short repeating tail needs a
+// large count — that is real information, not a rounding detail: it means the
+// schedule cannot ride out an outage of that length at any sane budget.
+//
+// Returns 1 for a non-positive want, and 0 for an empty schedule, which can
+// promise nothing.
+func DeliveriesFor(schedule []time.Duration, want time.Duration) int {
+	if len(schedule) == 0 {
+		return 0
+	}
+	if want <= 0 {
+		return 1
+	}
+	var window time.Duration
+	n := 1
+	// Bounded by construction: the last entry repeats, and a schedule whose
+	// entries are all at the minNakDelay floor still advances every iteration.
+	for window < want {
+		window += minJitter(delayAt(schedule, n-1))
+		n++
+	}
+	return n
 }

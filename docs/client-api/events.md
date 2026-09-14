@@ -620,7 +620,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the full body, which list rows truncate). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -671,7 +671,7 @@ Thread-reply deletes **additionally** emit a
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the full body, which list rows truncate). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -999,7 +999,7 @@ copy documented above — clients never receive them.
 | `roomId` | string | |
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
-| `members` | [RoomMemberEntry](../client-api.md#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](../client-api.md#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](request-reply.md#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
+| `members` | [RoomMemberEntry](../client-api.md#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](../client-api.md#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](request-reply.md#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `appName` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |

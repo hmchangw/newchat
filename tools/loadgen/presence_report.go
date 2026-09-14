@@ -42,6 +42,8 @@ func renderPresenceConsole(w io.Writer, results []presenceStepResult) {
 }
 
 func writePresenceCSV(path string, results []presenceStepResult) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)
@@ -104,6 +106,8 @@ func renderStormConsole(w io.Writer, results []stormStepResult) {
 }
 
 func writeStormCSV(path string, results []stormStepResult) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)

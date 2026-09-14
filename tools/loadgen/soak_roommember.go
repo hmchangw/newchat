@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/idgen"
+	soakreconcile "github.com/hmchangw/chat/tools/loadgen/internal/soak/reconcile"
 )
 
 type soakRoomLaneConfig struct {
@@ -647,7 +648,7 @@ func (l *soakRoomLanes) releaseProbe(operation *failureOperation, now time.Time)
 	if operation == nil {
 		return fmt.Errorf("reschedule soak room operation: operation is required")
 	}
-	next := nextReconcileProbe(
+	next := soakreconcile.NextProbe(
 		now, operation.VerifyAfter, operation.Deadline, l.cfg.RetryInterval,
 	)
 	if err := l.ledger.ReleaseClaim(operation.ID, next); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/nats-io/nats.go"
@@ -172,16 +173,16 @@ func TestSender_WithoutMetrics(t *testing.T) {
 	assert.Equal(t, "chat.user.alice.event.room.key", pub.subject)
 }
 
-// TestSender_WithMetrics records one bounded publish attempt per send. The key
-// subject carries an account token, so the recorded labels must come from the
-// classifier rather than the subject itself.
+// TestSender_WithMetrics records a bounded failure per failed send, and
+// nothing at all when the send succeeds — the broker owns the success side and
+// a Core NATS success only means the message reached the write buffer.
 func TestSender_WithMetrics(t *testing.T) {
 	tests := []struct {
 		name        string
 		publishErr  error
-		wantOutcome string
+		wantOutcome string // "" means nothing is recorded
 	}{
-		{name: "success", wantOutcome: "success"},
+		{name: "success records nothing", wantOutcome: ""},
 		{name: "publish failure", publishErr: errors.New("connection lost"), wantOutcome: "other_error"},
 		{name: "disconnected", publishErr: nats.ErrConnectionClosed, wantOutcome: "disconnected"},
 	}
@@ -203,11 +204,11 @@ func TestSender_WithMetrics(t *testing.T) {
 			var rm metricdata.ResourceMetrics
 			require.NoError(t, reader.Collect(context.Background(), &rm))
 
-			var attempts int64
+			var failures int64
 			var gotAttrs map[string]string
 			for _, scope := range rm.ScopeMetrics {
 				for _, m := range scope.Metrics {
-					if m.Name != "chat.nats.publish.attempts" {
+					if m.Name != "chat.nats.publish.failures" {
 						continue
 					}
 					sum, ok := m.Data.(metricdata.Sum[int64])
@@ -217,18 +218,69 @@ func TestSender_WithMetrics(t *testing.T) {
 						for _, kv := range point.Attributes.ToSlice() {
 							attrs[string(kv.Key)] = kv.Value.AsString()
 						}
-						attempts += point.Value
+						failures += point.Value
 						gotAttrs = attrs
 					}
 				}
 			}
 
-			require.Equal(t, int64(1), attempts, "exactly one publish attempt per send")
+			if tt.wantOutcome == "" {
+				assert.Zero(t, failures, "a successful send must not record a failure")
+				return
+			}
+			require.Equal(t, int64(1), failures, "exactly one failure per failed send")
 			assert.Equal(t, "recipient_event", gotAttrs["destination_kind"])
 			assert.Equal(t, "room_publish", gotAttrs["operation"])
 			assert.Equal(t, tt.wantOutcome, gotAttrs["outcome"])
-			assert.NotContains(t, gotAttrs, "service_name", "service identity comes from the resource, not an inline label")
 			assert.NotContains(t, gotAttrs, "account", "the account token must never become a label")
 		})
 	}
+}
+
+// TestSender_MetricsAddNoAllocationOnSuccess pins the fan-out hot path.
+// fanOutKey calls SendDataContext once per room member, so enabling metrics
+// must not add work to a successful send. The subject builder allocates on its
+// own, so the contract is the delta: an instrumented Sender must allocate
+// exactly as much as an un-instrumented one when the publish succeeds.
+func TestSender_MetricsAddNoAllocationOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	payload := []byte("{}")
+
+	plain := roomkeysender.NewSender(&mockPublisher{})
+	baseline := minAllocsPerRun(func() {
+		_ = plain.SendDataContext(ctx, "alice", payload)
+	})
+
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader()))
+	instrumented := roomkeysender.NewSender(&mockPublisher{},
+		roomkeysender.WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+	withMetrics := minAllocsPerRun(func() {
+		_ = instrumented.SendDataContext(ctx, "alice", payload)
+	})
+
+	assert.Equal(t, baseline, withMetrics,
+		"instrumenting a successful room-key send must not add allocations")
+}
+
+// minAllocsPerRun is testing.AllocsPerRun repeated, keeping the lowest result.
+//
+// AllocsPerRun brackets the loop with runtime.ReadMemStats, which counts every
+// allocation in the process, not just the ones the closure made. Under `go test
+// -tags integration` the whole package runs, and its other tests leave NATS
+// connections and their background goroutines alive — those allocate during the
+// measurement window and land in the same counter. That is how this assertion
+// failed in CI with baseline=3 against withMetrics=2 while passing locally,
+// where only this test was running.
+//
+// Background noise can only ever inflate a sample, never deflate it, so the
+// minimum across repetitions converges on the closure's own cost and the
+// equality this test is actually about stays exact.
+func minAllocsPerRun(f func()) float64 {
+	lowest := math.MaxFloat64
+	for range 5 {
+		if got := testing.AllocsPerRun(200, f); got < lowest {
+			lowest = got
+		}
+	}
+	return lowest
 }

@@ -4,15 +4,23 @@ package errcode
 const (
 	// BotplatformInvalidCredentials: uniform 401 (unknown account, wrong password, SSO-only).
 	// Not enumerated to avoid revealing which accounts are password-eligible.
+	// #nosec G101 -- wire-format reason code, not a credential
+	// nosemgrep: gosec.G101-1
 	BotplatformInvalidCredentials Reason = "invalid_credentials"
 
 	// BotplatformInvalidToken: 401 for /v1/auth/validate when the session hash is not found.
+	// #nosec G101 -- wire-format reason code, not a credential
+	// nosemgrep: gosec.G101-1
 	BotplatformInvalidToken Reason = "invalid_token"
 
 	// BotplatformAmbiguousToken: 400 when both ssoToken and authToken are supplied.
+	// #nosec G101 -- wire-format reason code, not a credential
+	// nosemgrep: gosec.G101-1
 	BotplatformAmbiguousToken Reason = "ambiguous_token"
 
 	// BotplatformMissingToken: 400 when neither ssoToken nor authToken is supplied.
+	// #nosec G101 -- wire-format reason code, not a credential
+	// nosemgrep: gosec.G101-1
 	BotplatformMissingToken Reason = "missing_token"
 
 	// BotplatformUpstreamUnavailable: 502 when portal/auth cannot reach the home-site BP.

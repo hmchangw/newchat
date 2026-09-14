@@ -3,7 +3,6 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -16,8 +15,13 @@ func registerRoutes(r *gin.Engine, h *handler) {
 
 // registerBotRoutes attaches bot endpoints with the auth → rate-limit → idempotency → handler chain
 // (login/validate use a different auth model). Nil valkey (dev) omits rate-limit + idempotency.
-func registerBotRoutes(r *gin.Engine, sessions session.Store, valkey valkeyutil.Client, cfg *config, h *handler) {
-	auth := requireBot(sessions)
+//
+// Auth resolves through h.store, deliberately: that is the cached,
+// breaker-fenced lookup /auth/validate already uses. Taking a session.Store of
+// its own is what let the bot routes read Mongo raw on every request, so there
+// is no second store to pass — the uncached path is not reachable from here.
+func registerBotRoutes(r *gin.Engine, valkey valkeyutil.Client, cfg *config, h *handler) {
+	auth := requireBot(h.store)
 
 	var rateLimit gin.HandlerFunc
 	var msgIdem, roomMgmtIdem func(endpoint string, resourceFrom resourceIDFunc) gin.HandlerFunc

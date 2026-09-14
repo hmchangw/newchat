@@ -1,5 +1,6 @@
 // Generated at container start — edit template, not output.
 window.__APP_CONFIG__ = {
   ADMIN_SERVICE_URL: "${ADMIN_SERVICE_URL}",
-  PERMISSIONS_ENABLED: "${PERMISSIONS_ENABLED}"
+  PERMISSIONS_ENABLED: "${PERMISSIONS_ENABLED}",
+  UPDATES_ENABLED: "${UPDATES_ENABLED}"
 };

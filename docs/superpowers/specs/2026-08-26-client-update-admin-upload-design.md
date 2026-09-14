@@ -338,6 +338,17 @@ convention used by `UsersConsole`, `AuditView` and `PermissionsView`.
 `AppShell.jsx`'s nav gains `{ key: 'updates', label: 'Updates', Component: lazy(() => import('@/components/UpdatesConsole')) }`,
 lazy-loaded like its siblings.
 
+**Deploy-gated** (added 2026-09-01): the section carries `gate: updatesEnabled`, so
+the tab renders only where the runtime config flag `UPDATES_ENABLED` is the literal
+string `"true"` (nginx envsubst renders it from the container env; default `false`,
+dev compose included). This mirrors `PERMISSIONS_ENABLED` and gates the UI section
+only — `admin-service`'s `POST /v1/admin/client-updates` is unchanged and stays
+reachable with an admin token. To actually disable uploads for a site, leave
+`client-update-service`'s `UPLOAD_TOKENS` empty (§1.1) — an empty table is a valid
+config meaning "uploads disabled". Clearing `admin-service`'s `CLIENT_UPDATE_TOKEN`
+is not an alternative: it is `required` and rejected when empty, so admin-service
+fails to start.
+
 States: idle → both files chosen → uploading (percentage) → success / error.
 Upload is disabled until both files are chosen. Error copy goes through
 `formatAsyncJobError`.

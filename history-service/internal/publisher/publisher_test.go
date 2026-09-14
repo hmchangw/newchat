@@ -34,24 +34,24 @@ func (j *recordingJetStream) PublishMsg(_ context.Context, msg *nats.Msg, _ ...j
 func TestPublisher_PublishRecordsActualJetStreamAttempt(t *testing.T) {
 	publishErr := errors.New("publish unavailable")
 	js := &recordingJetStream{err: publishErr}
-	recorder := NewMockattemptRecorder(gomock.NewController(t))
-	recorder.EXPECT().Attempt(gomock.Any(), natsmetrics.DestinationCanonical,
+	recorder := NewMockfailureRecorder(gomock.NewController(t))
+	recorder.EXPECT().Failure(gomock.Any(), natsmetrics.DestinationCanonical,
 		natsmetrics.OperationCanonicalPublish, gomock.Cond(func(err error) bool {
 			return errors.Is(err, publishErr)
 		}))
-	p := New(js, withAttemptRecorder(recorder))
+	p := New(js, withFailureRecorder(recorder))
 
 	err := p.Publish(context.Background(), subject.MsgCanonicalUpdated("site-a"), []byte(`{"id":"m1"}`), "dedup-1")
 
 	require.ErrorIs(t, err, publishErr)
 }
 
-func TestPublisher_PublishMigrationPreservesHeaderAndRecordsSuccess(t *testing.T) {
+// A successful migration publish records nothing: the broker already counts
+// the acceptance, so the recorder must not be called at all.
+func TestPublisher_PublishMigrationPreservesHeaderAndRecordsNothing(t *testing.T) {
 	js := &recordingJetStream{}
-	recorder := NewMockattemptRecorder(gomock.NewController(t))
-	recorder.EXPECT().Attempt(gomock.Any(), natsmetrics.DestinationCanonical,
-		natsmetrics.OperationCanonicalPublish, gomock.Nil())
-	p := New(js, withAttemptRecorder(recorder))
+	recorder := NewMockfailureRecorder(gomock.NewController(t))
+	p := New(js, withFailureRecorder(recorder))
 	subj := subject.MsgCanonicalDeleted("site-a")
 
 	require.NoError(t, p.PublishMigration(context.Background(), subj, []byte(`{}`), "dedup-2"))

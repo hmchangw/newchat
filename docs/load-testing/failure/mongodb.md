@@ -45,7 +45,8 @@ per-operation verdict.
 | room-worker | Applies membership/room/thread state from the ROOMS stream | **Reconciled** through the same lanes — the write it performs is what `room_state` reads back |
 | message-gatekeeper | Reads subscriptions, rooms, users and room metadata caches | **Traffic only**: every message lane exercises admission. A cache hit can hide a Mongo failure |
 | message-worker | Reads users; writes thread rooms and thread subscriptions; reads/writes room DEKs | **Partial**: message persistence is reconciled in Cassandra, but the Mongo thread-room and thread-subscription writes are not read back |
-| broadcast-worker | Reads room/subscription/thread/user state; coalesces `rooms.lastMsg*` bulk updates | **Partial**: with the recipient observer enabled, delivery is reconciled per recipient. The coalesced Mongo update is not |
+| broadcast-worker | Reads room/subscription/thread/user state; coalesces best-effort `rooms.preview*` bulk updates | **Partial**: with the recipient observer enabled, delivery is reconciled per recipient. The coalesced preview write is not, and it is deliberately droppable — history-service's walk repairs a room with no stored preview |
+| roomlist-worker | Writes `rooms.lastMsg*`, the sender's subscription `lastSeenAt` and the `hasMention` badge; reads nothing | **Partial**: the state it writes is read back by `room_state` and the unread lanes, but its own retry behaviour (batches held un-acked at `MaxDeliver=-1`) is not driven by any failure lane |
 | history-service | Reads apps, rooms, subscriptions, threads, users, room DEKs | **Traffic only**: soak and history lanes cover the main reads |
 | user-service | Users, apps, SSO tokens, subscriptions, rooms, threads | **Traffic only**: the `user_read` lane drives 14 reads uniformly. No write is reconciled |
 | user-presence-service | Presence state | **Traffic only**: the presence lane compares live signals; Mongo persistence and recovery are not read back |
@@ -82,7 +83,8 @@ flowchart LR
 |---|---|---|
 | room-service and room-worker membership changes | Multi-document and unordered bulk writes partially applied | The room reads back with a member set that matches neither the before nor the after state. `room_state` reports `bad`, not `missing` |
 | message-worker thread writes | Thread room/subscription written, then Cassandra or the event publish fails | The reply exists in history with no thread metadata behind it. Not visible to any current observer |
-| broadcast-worker `rooms.lastMsg*` coalescer | Flush errors are logged and **not** returned to the message handler, because the field is derived | Room previews go stale silently. The message itself still reconciles good, so nothing in the ledger moves |
+| roomlist-worker `rooms.lastMsg*` coalescer | Flush errors hold the batch un-acked and retry (`MaxDeliver=-1`), on a consumer separate from fan-out | Room ordering and unread badges lag while the flush is failing, then land on recovery. Delivery is unaffected, so nothing in the ledger moves |
+| broadcast-worker `rooms.preview*` coalescer | Flush errors are logged and **not** returned to the handler; the batch is dropped, not retried | The room list falls back to history-service's Cassandra walk for that room, which warms the document back on the next read. Invisible in the ledger, and by design |
 | Ambiguous mutation | The request commits, the reply is lost | Loadgen never resends a mutation: a replayed remove drops a member the first attempt already removed, and a replayed mute toggle undoes itself. Ambiguity is settled by reading state back |
 | `secondaryPreferred` reads | A secondary answers from behind the write | Without the forced-primary rule in §1 this is indistinguishable from data loss |
 | admin-service transaction pairs | The callback re-runs and duplicates a side effect outside the transaction | No traffic drives it, so this round cannot see it at all |
@@ -202,7 +204,8 @@ into evidence.
 
 - Connection, instrumentation, pool tuning, read preference: `pkg/mongoutil/`
 - Transaction path: `admin-service/store_mongo.go`
-- Derived last-message coalescing: `broadcast-worker/coalescer.go`, `store_mongo.go`
+- Derived last-message coalescing: `roomlist-worker/batch.go`, `roomlist-worker/flush.go`, `roomlist-worker/store_mongo.go`
+- Room-preview coalescing (best-effort, drops on failure): `broadcast-worker/preview_writer.go`, `broadcast-worker/store_mongo.go`
 - Bulk-write paths: `inbox-worker`, `room-service`, `room-worker`, `pkg/mongoutil/collection.go`
 - Loadgen lanes, observers and the ledger: `tools/loadgen/soak_room*.go`, `tools/loadgen/failure_*.go`
 - Client metric names and labels: [`../../specs/o11y/storage-dependency-metrics.md`](../../specs/o11y/storage-dependency-metrics.md)

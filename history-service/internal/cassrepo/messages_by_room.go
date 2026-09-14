@@ -80,9 +80,10 @@ func (r *Repository) scanMessagesUpTo(ctx context.Context) func(iter *gocql.Iter
 // per-bucket query builder. A new walk-level parameter is then a one-line change
 // here rather than an edit at every reader.
 func (r *Repository) fillMessagePage(ctx context.Context, direction walkDirection, startBucket, floorBucket int64, pageReq PageRequest, initialPageState []byte, queryFn bucketQueryFn) (Page[models.Message], error) {
-	res, err := fillPage[models.Message](
+	res, err := walkBuckets[models.Message](
 		ctx, r.bucket, direction, startBucket, floorBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, r.walkFanout, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState, r.walkFanout,
+		gocqlBucketFetcher(queryFn, r.scanMessagesUpTo(ctx)),
 	)
 	if err != nil {
 		return Page[models.Message]{}, err

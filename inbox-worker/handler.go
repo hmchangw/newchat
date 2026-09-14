@@ -12,6 +12,8 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // InboxStore abstracts the data store operations needed by the inbox worker.
@@ -95,8 +97,14 @@ type InboxStore interface {
 	// in the room, each guarded by its own restrictUpdatedAt so an out-of-order
 	// visibility change cannot regress the flags/roles. When restricted=true and
 	// ownerAccount is non-empty, a $cond pipeline demotes all accounts except
-	// ownerAccount to RoleMember.
+	// ownerAccount to RoleUser.
 	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error
+	// ListSubscriptionAccountsByRoom returns the accounts subscribed to roomID
+	// on this site's local replica. Used to drive the room_restricted bust
+	// loop: ApplySubscriptionRestriction can bulk-rewrite Roles for every
+	// local subscriber, not just OwnerAccount, so every one of them needs an
+	// L2 bust. Mirrors room-service's ListSubscriptionsByRoom.
+	ListSubscriptionAccountsByRoom(ctx context.Context, roomID string) ([]string, error)
 	// UpdateUserStatus replicates a cross-site status change onto the local users doc keyed by
 	// account, guarded by statusUpdatedAt (the event publish time): an older/equal high-water
 	// mark is a no-op so out-of-order multi-site delivery can't regress the status. statusIsShow
@@ -149,6 +157,12 @@ type Handler struct {
 	// badge is the badge cache; nil (VALKEY_ADDRS unset) disables the
 	// invalidation hooks. Injected post-construction.
 	badge badgeCache
+	// valkey is the L2 (Valkey) client used only to invalidate this site's
+	// local subauthcache entries after a federated write that replicates a
+	// role change or member removal onto this site's own subscription copy.
+	// nil disables invalidation (best-effort). Set post-construction,
+	// mirroring room-worker/room-service's valkey field.
+	valkey valkeyutil.Client
 	// roomSubs memoizes the "is this site a member of this room" check the
 	// activity refresh performs; nil disables it and every refresh reads through.
 	roomSubs *roomSubCache
@@ -205,7 +219,7 @@ func (h *Handler) HandleRoomActivity(ctx context.Context, data []byte) error {
 func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 	var evt model.InboxEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
-		return fmt.Errorf("unmarshal inbox event: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal inbox event", errcode.WithCause(err)))
 	}
 
 	switch evt.Type {
@@ -262,7 +276,7 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) error {
 	var event model.MemberAddEvent
 	if err := json.Unmarshal(evt.Payload, &event); err != nil {
-		return fmt.Errorf("unmarshal member_added payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal member_added payload", errcode.WithCause(err)))
 	}
 
 	roomType := event.RoomType
@@ -361,7 +375,7 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 func (h *Handler) handleMemberJoinedAtRefreshed(ctx context.Context, evt *model.InboxEvent) error {
 	var event model.MemberAddEvent
 	if err := json.Unmarshal(evt.Payload, &event); err != nil {
-		return fmt.Errorf("unmarshal member_joinedat_refreshed payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal member_joinedat_refreshed payload", errcode.WithCause(err)))
 	}
 	if len(event.Accounts) == 0 {
 		return nil
@@ -380,7 +394,7 @@ func (h *Handler) handleMemberJoinedAtRefreshed(ctx context.Context, evt *model.
 func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent) error {
 	var memberEvt model.MemberRemoveEvent
 	if err := json.Unmarshal(evt.Payload, &memberEvt); err != nil {
-		return fmt.Errorf("unmarshal member removed payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal member removed payload", errcode.WithCause(err)))
 	}
 	if len(memberEvt.Accounts) == 0 {
 		return nil
@@ -388,6 +402,10 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.DeleteSubscriptionsByAccounts(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
+	// Bust AFTER the write, in one batched round trip: this site's local
+	// replica of each removed member's subscription is gone, so their cached
+	// positive decision must die immediately, not linger for the L2 TTL.
+	subauthcache.BustSubs(ctx, h.valkey, memberEvt.RoomID, memberEvt.Accounts)
 	// Other members may remain, so re-resolve rather than caching a guess. When
 	// none do, the ordering row has no reader left here — drop it, or it becomes
 	// the orphan the seed path is careful not to create. Best-effort: a stale row
@@ -418,7 +436,7 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 func (h *Handler) handleRoomSync(ctx context.Context, evt *model.InboxEvent) error {
 	var room model.Room
 	if err := json.Unmarshal(evt.Payload, &room); err != nil {
-		return fmt.Errorf("unmarshal room_sync payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal room_sync payload", errcode.WithCause(err)))
 	}
 
 	if err := h.store.UpsertRoom(ctx, &room); err != nil {
@@ -434,7 +452,7 @@ func (h *Handler) handleRoomSync(ctx context.Context, evt *model.InboxEvent) err
 func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.InboxEvent) error {
 	var subEvt model.SubscriptionUpdateEvent
 	if err := json.Unmarshal(evt.Payload, &subEvt); err != nil {
-		return fmt.Errorf("unmarshal role_updated payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal role_updated payload", errcode.WithCause(err)))
 	}
 	account := subEvt.Subscription.User.Account
 	roomID := subEvt.Subscription.RoomID
@@ -449,6 +467,9 @@ func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.InboxEvent) 
 	if err := h.store.UpdateSubscriptionRoles(ctx, account, roomID, roles, time.UnixMilli(subEvt.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription roles: %w", err)
 	}
+	// Bust AFTER the write: this site's local replica's cached Roles must not
+	// keep serving the pre-change decision.
+	subauthcache.BustSub(ctx, h.valkey, roomID, account)
 	return nil
 }
 
@@ -458,7 +479,7 @@ func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.InboxEvent) 
 func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionReadEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal subscription_read payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_read payload", errcode.WithCause(err)))
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
 	applied, threadUnread, err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert)
@@ -478,7 +499,7 @@ func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEv
 func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionMuteToggledEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal subscription_mute_toggled payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_mute_toggled payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateSubscriptionMute(ctx, e.RoomID, e.Account, e.Muted, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription mute for %q in room %q: %w", e.Account, e.RoomID, err)
@@ -499,7 +520,7 @@ func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.
 func (h *Handler) handleSubscriptionFavoriteToggled(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionFavoriteToggledEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal subscription_favorite_toggled payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_favorite_toggled payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateSubscriptionFavorite(ctx, e.RoomID, e.Account, e.Favorite, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription favorite for %q in room %q: %w", e.Account, e.RoomID, err)
@@ -511,7 +532,7 @@ func (h *Handler) handleSubscriptionFavoriteToggled(ctx context.Context, evt *mo
 func (h *Handler) handleSubscriptionOpened(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionOpenedEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal subscription_opened payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_opened payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateSubscriptionOpen(ctx, e.RoomID, e.Account, e.Open); err != nil {
 		return fmt.Errorf("update subscription open for %q in room %q: %w", e.Account, e.RoomID, err)
@@ -526,7 +547,7 @@ func (h *Handler) handleSubscriptionOpened(ctx context.Context, evt *model.Inbox
 func (h *Handler) handleThreadSubscriptionUpserted(ctx context.Context, evt *model.InboxEvent) error {
 	var sub model.ThreadSubscription
 	if err := json.Unmarshal(evt.Payload, &sub); err != nil {
-		return fmt.Errorf("unmarshal thread_subscription_upserted payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal thread_subscription_upserted payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpsertThreadSubscription(ctx, &sub); err != nil {
 		return fmt.Errorf("upsert thread subscription (threadRoomID %q, userID %q): %w",
@@ -538,7 +559,7 @@ func (h *Handler) handleThreadSubscriptionUpserted(ctx context.Context, evt *mod
 func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.ThreadReadEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal thread_read payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal thread_read payload", errcode.WithCause(err)))
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
 	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.ParentMessageID, lastSeenAt); err != nil {
@@ -557,7 +578,7 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.ThreadReadAllEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal thread_read_all payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal thread_read_all payload", errcode.WithCause(err)))
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
 	if err := h.store.ApplyThreadReadAll(ctx, e.Account, lastSeenAt); err != nil {
@@ -575,7 +596,7 @@ func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent
 func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.ThreadUnreadAddedEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal thread_unread_added payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal thread_unread_added payload", errcode.WithCause(err)))
 	}
 	if err := h.store.AddThreadUnread(ctx, e.RoomID, e.ParentMessageID, e.Accounts); err != nil {
 		return fmt.Errorf("add thread unread %q in room %q: %w", e.ParentMessageID, e.RoomID, err)
@@ -589,7 +610,7 @@ func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxE
 func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionMentionEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_mention payload"))
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_mention payload", errcode.WithCause(err)))
 	}
 	// Poison payload: a blank room matches nothing, an empty account list has no
 	// destination, and a zero mentionedAt badges as 1970 — which makes the read
@@ -609,7 +630,7 @@ func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.Inbo
 func (h *Handler) handleRoomRenamed(ctx context.Context, evt *model.InboxEvent) error {
 	var p model.RoomRenamedInboxPayload
 	if err := json.Unmarshal(evt.Payload, &p); err != nil {
-		return errcode.Permanent(errcode.BadRequest("unmarshal room_renamed payload"))
+		return errcode.Permanent(errcode.BadRequest("unmarshal room_renamed payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateSubscriptionNamesForRoom(ctx, p.RoomID, p.NewName, time.UnixMilli(p.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription names for room %s: %w", p.RoomID, err)
@@ -620,11 +641,28 @@ func (h *Handler) handleRoomRenamed(ctx context.Context, evt *model.InboxEvent) 
 func (h *Handler) handleRoomVisibilityChanged(ctx context.Context, evt *model.InboxEvent) error {
 	var p model.RoomRestrictedInboxPayload
 	if err := json.Unmarshal(evt.Payload, &p); err != nil {
-		return errcode.Permanent(errcode.BadRequest("unmarshal room_restricted payload"))
+		return errcode.Permanent(errcode.BadRequest("unmarshal room_restricted payload", errcode.WithCause(err)))
 	}
 	if err := h.store.ApplySubscriptionRestriction(ctx, p.RoomID, p.Restricted, p.ExternalAccess, p.OwnerAccount, time.UnixMilli(p.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("apply subscription visibility for room %s: %w", p.RoomID, err)
 	}
+	// Bust every local subscriber's subauthcache L2 entry in one batched round
+	// trip: ApplySubscriptionRestriction is the same store method
+	// room-service's roomRestricted calls, and it can bulk-rewrite Roles for
+	// every subscriber (owner set, everyone else demoted) alongside the
+	// restricted/externalAccess flags — not just OwnerAccount.
+	//
+	// A listing failure is RETRYABLE, not best-effort. By this point the write
+	// has already made every cached authorization decision for this room wrong,
+	// so Acking here would leave demoted members passing authorization from L2
+	// for the rest of the TTL. The whole event is idempotent — the restriction
+	// write is timestamp-guarded and the bust is a delete — so returning the
+	// error costs one redelivery and completes the invalidation.
+	accounts, err := h.store.ListSubscriptionAccountsByRoom(ctx, p.RoomID)
+	if err != nil {
+		return fmt.Errorf("list local subscribers for subauthcache bust (room %s): %w", p.RoomID, err)
+	}
+	subauthcache.BustSubs(ctx, h.valkey, p.RoomID, accounts)
 	return nil
 }
 
@@ -633,7 +671,7 @@ func (h *Handler) handleRoomVisibilityChanged(ctx context.Context, evt *model.In
 func (h *Handler) handleUserStatusUpdated(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.UserStatusUpdated
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal user_status_updated payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal user_status_updated payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateUserStatus(ctx, e.Account, e.StatusText, e.StatusIsShow, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update user status for %q: %w", e.Account, err)
@@ -646,7 +684,7 @@ func (h *Handler) handleUserStatusUpdated(ctx context.Context, evt *model.InboxE
 func (h *Handler) handleUserSettingsUpdated(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.UserSettingsUpdated
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal user_settings_updated payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal user_settings_updated payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateUserSettings(ctx, e.Account, &e.Settings, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update user settings for %q: %w", e.Account, err)
@@ -659,7 +697,7 @@ func (h *Handler) handleUserSettingsUpdated(ctx context.Context, evt *model.Inbo
 func (h *Handler) handleUserPermissionsUpdated(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.UserPermissionsUpdated
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal user_permissions_updated payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal user_permissions_updated payload", errcode.WithCause(err)))
 	}
 	if _, ok := model.PermissionFieldName(e.Permission); !ok {
 		// A future permission key reaching a not-yet-upgraded site: retrying cannot
@@ -678,7 +716,7 @@ func (h *Handler) handleUserPermissionsUpdated(ctx context.Context, evt *model.I
 func (h *Handler) handleUserChatlistUpdated(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.UserChatlistUpdated
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal user_chatlist_updated payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal user_chatlist_updated payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateUserChatlist(ctx, e.Account, &e.Chatlist, e.Timestamp); err != nil {
 		return fmt.Errorf("update user chatlist for %q: %w", e.Account, err)
@@ -691,7 +729,7 @@ func (h *Handler) handleUserChatlistUpdated(ctx context.Context, evt *model.Inbo
 func (h *Handler) handleUserAccountUpdated(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.UserAccountUpdated
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal user_account_updated payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal user_account_updated payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpsertUserAccount(ctx, &e, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("upsert user account for %q: %w", e.Account, err)
@@ -704,7 +742,7 @@ func (h *Handler) handleUserAccountUpdated(ctx context.Context, evt *model.Inbox
 func (h *Handler) handleSubscriptionSectionMoved(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionSectionMovedEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal subscription_section_moved payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_section_moved payload", errcode.WithCause(err)))
 	}
 	if err := h.store.UpdateSubscriptionSection(ctx, e.RoomID, e.Account, e.SectionID, e.SectionOrder, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription section for %q in room %q: %w", e.Account, e.RoomID, err)
@@ -714,7 +752,7 @@ func (h *Handler) handleSubscriptionSectionMoved(ctx context.Context, evt *model
 
 func rolesForType(t model.RoomType) []model.Role {
 	if t == model.RoomTypeChannel {
-		return []model.Role{model.RoleMember}
+		return []model.Role{model.RoleUser}
 	}
 	return nil
 }

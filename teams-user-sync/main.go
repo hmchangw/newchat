@@ -66,6 +66,8 @@ func run() error {
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
+		ProxyUsername:         cfg.GraphProxyUsername,
+		ProxyPassword:         cfg.GraphProxyPassword,
 	})
 	if err != nil {
 		return fmt.Errorf("build user lister client: %w", err)

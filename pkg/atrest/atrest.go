@@ -52,10 +52,14 @@ type EncMeta struct {
 // Vault transit engine, this is a "vault:vN:..." string carrying its own
 // version metadata). No KEK version or wrap nonce is stored on the row —
 // both are encoded inside WrappedDEK.
+//
+// The json tags are load-bearing, not decoration: this record is also the
+// Valkey L2 wire form (see dek_store_l2.go), so the field names are a cache
+// format that must stay stable across renames.
 type RoomDataKey struct {
-	ID         string    `bson:"_id"`
-	WrappedDEK []byte    `bson:"wrappedDEK"`
-	CreatedAt  time.Time `bson:"createdAt"`
+	ID         string    `json:"id"         bson:"_id"`
+	WrappedDEK []byte    `json:"wrappedDek" bson:"wrappedDEK"`
+	CreatedAt  time.Time `json:"createdAt"  bson:"createdAt"`
 }
 
 // Config is parsed via caarlos0/env in each consuming service. It is the

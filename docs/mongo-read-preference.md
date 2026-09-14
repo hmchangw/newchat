@@ -56,6 +56,13 @@ All reads go to a secondary except the pinned handles.
 | broadcast-worker | `rooms` (metadata), `subscriptions`, `thread_rooms`, `users` | `rooms` **via roomkeystore** — encryption must not miss a fresh/rotated key |
 | notification-worker | `subscriptions`, `thread_rooms`, `rooms` (meta backfill) | — |
 
+broadcast-worker is read-mostly against MongoDB. Its room/subscription writes
+(`rooms.lastMsgAt`/`lastMsgId`, subscription `lastSeenAt`, `hasMention`) moved to
+`roomlist-worker`; what stays is the room-list preview (`rooms.preview*`), buffered
+and drained best-effort so no handler awaits it. The reads above are unaffected
+by that split, and the preview write is not read-preference sensitive — it is a
+write, and the reader tolerates a miss by walking Cassandra.
+
 The DEK store and roomkeystore pins matter because those keys are written by
 *other* services and read here to decrypt / encrypt; a lagging secondary could
 miss a just-created key. Both are pinned even when the client default is
@@ -95,7 +102,14 @@ and adds parallel secondary-bound handles used only by the uniformly-safe reads.
 
 ---
 
-## 4. Operational notes
+## 4. Write-only services
+
+`roomlist-worker` derives its writes purely from the canonical event — it never
+reads MongoDB to decide anything — so it deliberately has no `MONGO_READ_PREFERENCE`
+config field at all, not even pinned to `primary`. Its writes (via `BulkWrite`) always
+target the primary regardless; there is no read path for a preference to apply to.
+
+## 5. Operational notes
 
 - **Requires a replica set.** On a standalone Mongo the preference is ignored;
   the offload only happens against a replica set with provisioned secondaries.

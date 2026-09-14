@@ -11,8 +11,9 @@
 /** Mirrors model.RoomType. */
 export type RoomType = 'channel' | 'dm' | 'botDM' | 'discussion'
 
-/** Mirrors model.Role. */
-export type Role = 'owner' | 'admin' | 'member'
+/** Mirrors model.Role. The server normalizes the legacy 'member' spelling to
+ *  'user' on every response, so 'member' never arrives on the wire. */
+export type Role = 'owner' | 'admin' | 'user'
 
 /** Mirrors pkg/model.SubscriptionHRInfo — the counterpart's HR record
  *  attached to a DM subscription. All three fields are required strings

@@ -103,6 +103,8 @@ func formatActionLatencies(stats map[string]ActionLatencyStats) string {
 
 // writeDailyCSV writes one row per StepResult, sorted ascending by N.
 func writeDailyCSV(path string, results []StepResult) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)

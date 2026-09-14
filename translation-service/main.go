@@ -9,6 +9,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -96,7 +97,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -107,12 +108,13 @@ func main() {
 	// and outbound connections without ceiling; on saturation the router replies
 	// errcode.Unavailable("service busy") so the caller can retry immediately.
 	// MAX_CONCURRENCY=0 disables the cap (unbounded spawn).
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
 	router := natsrouter.Default(nc, "translation-service", routerOpts...)
-	natsrouter.Register(router, subject.TranslateRequestPattern(cfg.SiteID), handler.Translate)
+	registerRoutes(router, handler, cfg.SiteID)
 
 	slog.Info("translation-service running", "site", cfg.SiteID, "backend", cfg.Backend)
 
@@ -121,4 +123,11 @@ func main() {
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// registerRoutes wires translation-service's routes onto the router. It is a
+// function rather than inline in main so the registration table has exactly one
+// definition.
+func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
+	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), natsmetrics.MethodTranslateText, handler.Translate)
 }

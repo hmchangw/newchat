@@ -14,25 +14,26 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
-type attemptRecorder interface {
-	Attempt(context.Context, natsmetrics.DestinationKind, natsmetrics.Operation, error)
+type failureRecorder interface {
+	Failure(context.Context, natsmetrics.DestinationKind, natsmetrics.Operation, error)
 }
 
 // Publisher publishes byte payloads to NATS JetStream with dedup support.
 type Publisher struct {
 	js      o11ynats.JetStream
-	metrics attemptRecorder
+	metrics failureRecorder
 }
 
 type Option func(*Publisher)
 
-// WithMetrics enables bounded publish-attempt metrics without changing
-// JetStream acknowledgement or deduplication behavior.
+// WithMetrics enables bounded publish-failure metrics without changing
+// JetStream acknowledgement or deduplication behavior. Successful publishes are
+// not recorded; see natsmetrics.Publisher.Failure.
 func WithMetrics(metrics natsmetrics.Publisher) Option {
-	return withAttemptRecorder(metrics)
+	return withFailureRecorder(metrics)
 }
 
-func withAttemptRecorder(metrics attemptRecorder) Option {
+func withFailureRecorder(metrics failureRecorder) Option {
 	return func(p *Publisher) { p.metrics = metrics }
 }
 
@@ -48,7 +49,7 @@ func New(js o11ynats.JetStream, opts ...Option) *Publisher {
 func (p *Publisher) Publish(ctx context.Context, subj string, data []byte, msgID string) error {
 	msg := natsutil.NewMsg(ctx, subj, data)
 	_, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-	p.recordAttempt(ctx, subj, err)
+	p.recordFailure(ctx, subj, err)
 	if err != nil {
 		return fmt.Errorf("publishing to %q: %w", subj, err)
 	}
@@ -61,17 +62,22 @@ func (p *Publisher) PublishMigration(ctx context.Context, subj string, data []by
 	msg := natsutil.NewMsg(ctx, subj, data)
 	natsutil.SetMigrationLive(msg)
 	_, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-	p.recordAttempt(ctx, subj, err)
+	p.recordFailure(ctx, subj, err)
 	if err != nil {
 		return fmt.Errorf("publishing migration to %q: %w", subj, err)
 	}
 	return nil
 }
 
-func (p *Publisher) recordAttempt(ctx context.Context, subj string, err error) {
-	if p.metrics == nil {
+func (p *Publisher) recordFailure(ctx context.Context, subj string, err error) {
+	// Classify only when there is a failure to attribute, because
+	// PublishLabelsFromSubject allocates and this runs on every publish.
+	// Successes go uncounted anywhere — jetstream_stream_total_messages is
+	// stream depth, not accepted publishes — which is an accepted blind spot,
+	// not broker coverage. See Publisher.Failure in pkg/natsmetrics.
+	if err == nil || p.metrics == nil {
 		return
 	}
 	destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-	p.metrics.Attempt(ctx, destination, operation, err)
+	p.metrics.Failure(ctx, destination, operation, err)
 }

@@ -732,8 +732,15 @@ func (s *UserService) GetByRoomID(c *natsrouter.Context, req models.GetByRoomIDR
 func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.CountRequest) (*models.CountResponse, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
+	return s.CountSubscriptionsFor(c, account, req)
+}
+
+// CountSubscriptionsFor is the transport-agnostic count both the NATS handler
+// and the HTTP endpoint share. Unread nil/false ⇒ total active subs; true ⇒
+// the unread-badge count (cache-first when gated).
+func (s *UserService) CountSubscriptionsFor(ctx context.Context, account string, req models.CountRequest) (*models.CountResponse, error) {
 	if req.Unread == nil || !*req.Unread {
-		total, err := s.subs.CountActiveSubscriptions(c, account)
+		total, err := s.subs.CountActiveSubscriptions(ctx, account)
 		if err != nil {
 			return nil, fmt.Errorf("count subscriptions: %w", err)
 		}
@@ -743,11 +750,11 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 	// miss/stale falls through to the Mongo compute, whose Reseed rewrites the
 	// set and marker.
 	if s.badgeCacheFirst {
-		if n, fresh := s.badge.Count(c, account); fresh {
+		if n, fresh := s.badge.Count(ctx, account); fresh {
 			return &models.CountResponse{Count: n}, nil
 		}
 	}
-	ids, degraded, err := s.unreadRooms(c, account)
+	ids, degraded, err := s.unreadRooms(ctx, account)
 	if err != nil {
 		return nil, err
 	}
@@ -755,7 +762,7 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 	// skipped when degraded, since caching a partial set would stamp the
 	// freshness marker on data we already know is incomplete.
 	if !degraded {
-		s.badge.Reseed(c, account, ids)
+		s.badge.Reseed(ctx, account, ids)
 	}
 	return &models.CountResponse{Count: len(ids)}, nil
 }
@@ -768,8 +775,8 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 // the freshness marker on a knowingly-incomplete set.
 // Local subs read lastMsgAt from the $lookup; cross-site subs fetch it via
 // per-site GetRoomsMeta (rooms the remote site cannot resolve are excluded).
-func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]string, bool, error) {
-	subs, err := s.subs.GetActiveSubscriptions(c, account, s.maxSubs)
+func (s *UserService) unreadRooms(ctx context.Context, account string) ([]string, bool, error) {
+	subs, err := s.subs.GetActiveSubscriptions(ctx, account, s.maxSubs)
 	if err != nil {
 		return nil, false, fmt.Errorf("unread rooms: %w", err)
 	}
@@ -808,7 +815,7 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 			// Client already gone — stop firing further ~5s RPCs. The remaining sites'
 			// rooms will never be counted, so mark them (and this one) degraded rather
 			// than let a cancelled request be cached as if it were complete.
-			if c.Err() != nil {
+			if ctx.Err() != nil {
 				for j := i; j < len(sites); j++ {
 					failed[j] = true
 				}
@@ -819,14 +826,14 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
-				if c.Err() != nil {
+				if ctx.Err() != nil {
 					failed[i] = true
 					return
 				}
-				infos, err := s.rooms.GetRoomsMeta(c, site, roomIDsBySite[site])
+				infos, err := s.rooms.GetRoomsMeta(ctx, site, roomIDsBySite[site])
 				if err != nil {
 					// Skip this site rather than nuking the whole result.
-					slog.WarnContext(c, "unread count degraded for site", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
+					slog.WarnContext(ctx, "unread count degraded for site", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 					failed[i] = true
 					return
 				}

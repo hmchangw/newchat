@@ -25,8 +25,9 @@ import (
 func StartValkeyCluster(t *testing.T) *redis.ClusterClient {
 	t.Helper()
 	ctx := context.Background()
-	container, addr := startValkeyClusterContainer(ctx, t)
-	t.Cleanup(func() { _ = container.Terminate(ctx) })
+	addr, stop, err := startValkeyNode(ctx)
+	require.NoError(t, err, "start valkey cluster")
+	t.Cleanup(stop)
 	c := newValkeyClusterClient(addr)
 	t.Cleanup(func() { _ = c.Close() })
 	require.NoError(t, pingCluster(ctx, c), "ping valkey cluster")
@@ -72,28 +73,24 @@ func TerminateValkey() {
 		_ = sharedValkeyClient.Close()
 		sharedValkeyClient = nil
 	}
-	if sharedValkeyContainer == nil {
+	if sharedValkeyStop == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := sharedValkeyContainer.Terminate(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "terminate shared valkey: %v\n", err)
-	}
-	sharedValkeyContainer = nil
+	sharedValkeyStop()
+	sharedValkeyStop = nil
 }
 
 var (
-	sharedValkeyOnce      sync.Once
-	sharedValkeyContainer testcontainers.Container
-	sharedValkeyClient    *redis.ClusterClient
-	sharedValkeyErr       error
+	sharedValkeyOnce   sync.Once
+	sharedValkeyStop   func()
+	sharedValkeyClient *redis.ClusterClient
+	sharedValkeyErr    error
 )
 
 func ensureSharedValkeyCluster() {
 	sharedValkeyOnce.Do(func() {
 		ctx := context.Background()
-		container, addr, err := startValkeyClusterContainerNoT(ctx)
+		addr, stop, err := startValkeyNode(ctx)
 		if err != nil {
 			sharedValkeyErr = fmt.Errorf("start shared valkey cluster: %w", err)
 			return
@@ -101,20 +98,35 @@ func ensureSharedValkeyCluster() {
 		c := newValkeyClusterClient(addr)
 		if err := pingCluster(ctx, c); err != nil {
 			_ = c.Close()
-			_ = container.Terminate(ctx)
+			stop()
 			sharedValkeyErr = fmt.Errorf("ping shared valkey cluster: %w", err)
 			return
 		}
-		sharedValkeyContainer = container
+		sharedValkeyStop = stop
 		sharedValkeyClient = c
 	})
 }
 
-func startValkeyClusterContainer(ctx context.Context, t *testing.T) (testcontainers.Container, string) {
-	t.Helper()
+// startValkeyNode brings up a single-node cluster-mode Valkey owning every
+// slot, preferring a server binary on PATH and falling back to a container —
+// the same order pkg/testutil already uses for NATS, so a machine with no
+// Docker can still run the Valkey-backed integration tests. The returned stop
+// func releases whichever backend was used.
+func startValkeyNode(ctx context.Context) (string, func(), error) {
+	if addr, stop, err := startValkeyBinary(); err == nil {
+		return addr, stop, nil
+	}
 	container, addr, err := startValkeyClusterContainerNoT(ctx)
-	require.NoError(t, err, "start valkey cluster container")
-	return container, addr
+	if err != nil {
+		return "", nil, err
+	}
+	return addr, func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := container.Terminate(stopCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "terminate valkey container: %v\n", err)
+		}
+	}, nil
 }
 
 func startValkeyClusterContainerNoT(ctx context.Context) (testcontainers.Container, string, error) {

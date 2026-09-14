@@ -11,6 +11,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -70,11 +71,11 @@ func newHandler(store SearchStore, mongo MongoStore, users SearchUsersClient, ca
 }
 
 func (h *handler) Register(r *natsrouter.Router) {
-	natsrouter.Register(r, subject.SearchMessagesPattern(h.cfg.SiteID), h.searchMessages)
-	natsrouter.Register(r, subject.SearchRoomsPattern(h.cfg.SiteID), h.searchRooms)
-	natsrouter.Register(r, subject.SearchAppsPattern(h.cfg.SiteID), h.searchApps)
-	natsrouter.Register(r, subject.SearchUsersPattern(h.cfg.SiteID), h.searchUsers)
-	natsrouter.Register(r, subject.SearchOrgsPattern(h.cfg.SiteID), h.searchOrgs)
+	natsrouter.Register(r, subject.SearchMessagesPattern(h.cfg.SiteID), natsmetrics.MethodSearchMessages, h.searchMessages)
+	natsrouter.Register(r, subject.SearchRoomsPattern(h.cfg.SiteID), natsmetrics.MethodSearchRooms, h.searchRooms)
+	natsrouter.Register(r, subject.SearchAppsPattern(h.cfg.SiteID), natsmetrics.MethodSearchApps, h.searchApps)
+	natsrouter.Register(r, subject.SearchUsersPattern(h.cfg.SiteID), natsmetrics.MethodSearchUsers, h.searchUsers)
+	natsrouter.Register(r, subject.SearchOrgsPattern(h.cfg.SiteID), natsmetrics.MethodSearchOrgs, h.searchOrgs)
 }
 
 func (h *handler) withRequestTimeout(parent context.Context) (context.Context, context.CancelFunc) {

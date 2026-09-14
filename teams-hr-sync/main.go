@@ -78,12 +78,18 @@ func run() error {
 	if cfg.GraphTokenURL != "" {
 		opts = append(opts, msgraph.WithTokenURL(cfg.GraphTokenURL))
 	}
-	graph := msgraph.NewGroupReaderClient(msgraph.Config{
+	graph, err := msgraph.NewGroupReaderClient(msgraph.Config{
 		TenantID:              cfg.TeamsTenantID,
 		ClientID:              cfg.TeamsClientID,
 		ClientSecret:          cfg.TeamsClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
+		ProxyURL:              cfg.GraphProxyURL,
+		ProxyUsername:         cfg.GraphProxyUsername,
+		ProxyPassword:         cfg.GraphProxyPassword,
 	}, opts...)
+	if err != nil {
+		return fmt.Errorf("build group reader client: %w", err)
+	}
 	// Injection point: swap DefaultMapper / DefaultConverter for custom
 	// naming or derivation conventions (see teams-hr-sync/README.md).
 	mapper := transform.DefaultMapper{}

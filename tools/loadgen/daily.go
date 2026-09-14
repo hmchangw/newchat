@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"net/http"
 	"os"
 	"slices"

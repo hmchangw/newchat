@@ -22,7 +22,7 @@ import (
 // reason matching, and construct fresh *Error values via the named
 // constructors when a caller needs a wrapped message or extra metadata.
 var (
-	errInvalidRole           = errcode.BadRequest("invalid role: must be owner or member")
+	errInvalidRole           = errcode.BadRequest("invalid role: must be owner or user")
 	errOnlyOwners            = errcode.Forbidden("only owners can update roles", errcode.WithReason(errcode.RoomNotOwner))
 	errOnlyOwnersCanRemove   = errcode.Forbidden("only owners can remove members", errcode.WithReason(errcode.RoomNotOwner))
 	errOnlyOwnersCanAddToRes = errcode.Forbidden("only owners can add members to a restricted room", errcode.WithReason(errcode.RoomNotOwner))
@@ -50,7 +50,7 @@ var (
 	errEmptyCreateRequest = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
 	errBotInChannel       = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
 	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
-	// Bots hold plain member roles only.
+	// Bots hold the plain user role only.
 	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
 	errChannelNameRequired = errcode.BadRequest("channel name is required")
 	errChannelNameTooLong  = errcode.BadRequest("channel name must be at most 100 characters")

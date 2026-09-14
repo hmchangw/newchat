@@ -25,7 +25,7 @@ type fakeStore struct {
 	InsertRoomFn             func(ctx context.Context, r *Room) error
 	FindRoomFn               func(ctx context.Context, id string) (*Room, error)
 	UpsertSubscriptionFn     func(ctx context.Context, s *Subscription) (bool, error)
-	DeleteSubscriptionFn     func(ctx context.Context, r, u string) (bool, error)
+	DeleteSubscriptionFn     func(ctx context.Context, r, u string) (subID, account string, deleted bool, err error)
 	FindUserFn               func(ctx context.Context, id string) (*model.User, error)
 	ListRoomMemberAccountsFn func(ctx context.Context, roomID string) ([]string, error)
 }
@@ -40,7 +40,7 @@ func (f *fakeStore) FindRoom(ctx context.Context, id string) (*Room, error) {
 func (f *fakeStore) UpsertSubscription(ctx context.Context, s *Subscription) (bool, error) {
 	return f.UpsertSubscriptionFn(ctx, s)
 }
-func (f *fakeStore) DeleteSubscription(ctx context.Context, r, u string) (bool, error) {
+func (f *fakeStore) DeleteSubscription(ctx context.Context, r, u string) (string, string, bool, error) {
 	return f.DeleteSubscriptionFn(ctx, r, u)
 }
 func (f *fakeStore) FindUser(ctx context.Context, id string) (*model.User, error) {
@@ -477,7 +477,7 @@ func TestHandleRemove_EmitsSysmsgWhenSomethingChanged(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -676,9 +676,9 @@ func TestHandleAdd_NewMembersReceiveRoomKey(t *testing.T) {
 	}
 }
 
-// TestHandleAdd_ExistingMembersNoKeyFanOut: a duplicate add (created=false)
-// already has the key from its original add, so it must not trigger a
-// keyStore.Get or a fresh key-event publish.
+// TestHandleAdd_ExistingMembersNoKeyFanOut: a duplicate add (created=false) gets
+// no key fan-out. The key is still resolved up front (heal-before-commit), but
+// with no newly-added account there is no key-event publish.
 func TestHandleAdd_ExistingMembersNoKeyFanOut(t *testing.T) {
 	store := &fakeStore{
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
@@ -703,13 +703,14 @@ func TestHandleAdd_ExistingMembersNoKeyFanOut(t *testing.T) {
 	resp, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
 	require.NoError(t, err)
 	assert.Empty(t, resp.Added.UserIDs)
-	assert.False(t, getCalled, "keyStore.Get is skipped when nothing was newly added")
+	assert.True(t, getCalled, "key is resolved up front, before any subscription commit")
 	assert.Empty(t, pub.subjects, "no key fan-out for a pre-existing member")
 }
 
-// TestHandleAdd_NoCurrentKeyDoesNotFailOp: a legacy/broken room with no
-// stored key must not fail add-member — just skip the fan-out.
-func TestHandleAdd_NoCurrentKeyDoesNotFailOp(t *testing.T) {
+// TestHandleAdd_NoCurrentKeySelfHeals: a legacy/never-keyed room no longer skips
+// the fan-out. Add-member mints a fresh key (SetIfAbsent) and fans it out so the
+// new member can decrypt going forward — going-forward-only, but no silent drop.
+func TestHandleAdd_NoCurrentKeySelfHeals(t *testing.T) {
 	store := &fakeStore{
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
@@ -719,9 +720,16 @@ func TestHandleAdd_NoCurrentKeyDoesNotFailOp(t *testing.T) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
 	}
+	var minted []byte
+	setIfAbsentCalls := 0
 	keyStore := &fakeKeyStore{
 		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
 			return nil, roomkeystore.ErrNoCurrentKey
+		},
+		SetIfAbsentFn: func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+			setIfAbsentCalls++
+			minted = pair.PrivateKey
+			return &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: pair}, nil
 		},
 	}
 	pub := &fakePublisher{}
@@ -729,9 +737,52 @@ func TestHandleAdd_NoCurrentKeyDoesNotFailOp(t *testing.T) {
 	c := withIdentity(t, "r1", ident())
 
 	resp, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
-	require.NoError(t, err, "missing key must not fail add-member")
+	require.NoError(t, err, "missing key self-heals; must not fail add-member")
 	assert.Equal(t, []string{"bob-id"}, resp.Added.UserIDs)
-	assert.Empty(t, pub.subjects, "nothing to fan out when there is no current key")
+	assert.Equal(t, 1, setIfAbsentCalls, "absent key must be minted exactly once")
+	require.Len(t, minted, 32, "minted key is a fresh 32-byte secret")
+	require.Len(t, pub.subjects, 1, "the minted key is fanned out to the new member")
+	var evt model.RoomKeyEvent
+	require.NoError(t, json.Unmarshal(pub.payloads[0], &evt))
+	assert.Equal(t, "r1", evt.RoomID)
+	assert.Equal(t, 0, evt.Version)
+	assert.Equal(t, minted, evt.PrivateKey)
+}
+
+// TestHandleAdd_PresentKeyNotReminted: when the room already has a key, add-member
+// fans out that key without minting (idempotent — no SetIfAbsent).
+func TestHandleAdd_PresentKeyNotReminted(t *testing.T) {
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		UpsertSubscriptionFn: func(_ context.Context, _ *Subscription) (bool, error) { return true, nil },
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
+		},
+	}
+	setIfAbsentCalls := 0
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return &roomkeystore.VersionedKeyPair{Version: 2, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("existing-key-bytes")}}, nil
+		},
+		SetIfAbsentFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+			setIfAbsentCalls++
+			return nil, errors.New("must not mint when key present")
+		},
+	}
+	pub := &fakePublisher{}
+	h := newHandler(store, "site-a", nil, (&captureOutbox{}).publish, keyStore, roomkeysender.NewSender(pub))
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.NoError(t, err)
+	assert.Equal(t, 0, setIfAbsentCalls, "present key must not be re-minted")
+	require.Len(t, pub.subjects, 1)
+	var evt model.RoomKeyEvent
+	require.NoError(t, json.Unmarshal(pub.payloads[0], &evt))
+	assert.Equal(t, 2, evt.Version)
+	assert.Equal(t, []byte("existing-key-bytes"), evt.PrivateKey)
 }
 
 // TestHandleAdd_KeyStoreGetErrorFailsOp: unlike ErrNoCurrentKey, an infra
@@ -757,6 +808,36 @@ func TestHandleAdd_KeyStoreGetErrorFailsOp(t *testing.T) {
 	_, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "get room key")
+}
+
+// TestHandleAdd_KeyFailureShortCircuitsBeforeCommit: the key is resolved before
+// any subscription is committed, so an infra key failure strands no member — a
+// retry re-runs the whole add cleanly (regression for the commit-then-heal race).
+func TestHandleAdd_KeyFailureShortCircuitsBeforeCommit(t *testing.T) {
+	upsertCalled := false
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		UpsertSubscriptionFn: func(_ context.Context, _ *Subscription) (bool, error) {
+			upsertCalled = true
+			return true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
+		},
+	}
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return nil, errors.New("mongo down")
+		},
+	}
+	h := newHandler(store, "site-a", nil, (&captureOutbox{}).publish, keyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.Error(t, err)
+	assert.False(t, upsertCalled, "no subscription may commit before the room key is resolved")
 }
 
 // TestHandleAdd_KeyFanOutSendFailureDoesNotFailOp: a per-account Send
@@ -791,6 +872,61 @@ func isErrcode(err error, out **errcode.Error) bool {
 	}
 	*out = e
 	return true
+}
+
+// A transient FindUser failure must not strand the federation. The user doc is
+// the only place the removal's destination site lives (the subscription's own
+// siteId is the ROOM's site, and u carries just _id/account/isBot), so losing
+// that lookup after the delete has committed means the remote site is never
+// told and nothing will retry: the row is gone, so a retry sees wasThere=false
+// and skips federation for good.
+func TestHandleRemove_TransientFindUserFailureLeavesTheSubscriptionIntact(t *testing.T) {
+	deletes := 0
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
+			deletes++
+			return "sub-1", "bob", true, nil
+		},
+		FindUserFn: func(_ context.Context, _ string) (*model.User, error) {
+			return nil, errors.New("mongo down")
+		},
+	}
+	ob := &captureOutbox{}
+	h := newHandler(store, "site-a", nil, ob.publish, testKeyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.Error(t, err, "the caller must learn the removal did not complete, so it can retry")
+	assert.Zero(t, deletes, "the destination must be resolved before the row that identifies it is deleted")
+}
+
+// A user doc that is genuinely gone is not an outage: there is no remote site to
+// notify, so the local removal proceeds.
+func TestHandleRemove_MissingUserDocStillRemovesLocally(t *testing.T) {
+	deletes := 0
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
+			deletes++
+			return "sub-1", "bob", true, nil
+		},
+		FindUserFn: func(_ context.Context, _ string) (*model.User, error) {
+			return nil, ErrNotFound
+		},
+	}
+	ob := &captureOutbox{}
+	h := newHandler(store, "site-a", nil, ob.publish, testKeyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	resp, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, deletes, "a vanished user doc must not block the local removal")
+	assert.Equal(t, []string{"bob-id"}, resp.Removed.UserIDs)
 }
 
 // dm.ensure wrote neither roomType nor name, so the rows matched no list bucket

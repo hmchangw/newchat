@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -129,9 +130,9 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		memberSite[member.Account] = user.SiteID
 		// Human members get owner+member so they can admin the migrated room; bot
 		// and platform-admin accounts stay member-only.
-		roles := []model.Role{model.RoleOwner, model.RoleMember}
+		roles := []model.Role{model.RoleOwner, model.RoleUser}
 		if model.IsBot(member.Account) || model.IsPlatformAdminAccount(member.Account) {
-			roles = []model.Role{model.RoleMember}
+			roles = []model.Role{model.RoleUser}
 		}
 		// JoinedAt = the chat's creation time, a meaningful historical value, not the
 		// migration run time (acceptedAt). Teams exposes no per-member add time; this is
@@ -176,6 +177,12 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, room.ID, removed); err != nil {
 			return fmt.Errorf("delete departed subs: %w", err)
 		}
+		// Bust AFTER the write, one batched round trip: same store method
+		// (DeleteSubscriptionsByAccounts) as processRemoveOrg's live path,
+		// which busts every removed account — a departed member's cached
+		// positive decision must die immediately here too, not linger for
+		// the L2 TTL.
+		subauthcache.BustSubs(ctx, h.valkey, room.ID, removed)
 	}
 
 	added := make([]string, 0, len(newSubs))
@@ -284,7 +291,7 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 	}
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal membership event: %w", err)
+		return errcode.MarshalFailed("membership event", err)
 	}
 	// Envelope for the internal lane only — outbox.Publish builds its own below.
 	// Timestamp is acceptedAt, not time.Now(): it becomes the ES external doc
@@ -297,7 +304,7 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		Timestamp:  acceptedAt.UnixMilli(),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal internal inbox envelope: %w", err)
+		return errcode.MarshalFailed("internal inbox envelope", err)
 	}
 	seed := fmt.Sprintf("%s:%s:%d", room.ID, eventType, acceptedAt.UnixMilli())
 	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
@@ -315,7 +322,7 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		siteEvt.Accounts = siteAccounts
 		siteData, err := json.Marshal(siteEvt)
 		if err != nil {
-			return fmt.Errorf("marshal federated membership event (dest %s): %w", destSite, err)
+			return errcode.MarshalFailed("federated membership event", err)
 		}
 		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
 		if err := h.federate(ctx, room.ID, destSite, eventType, siteData, dedupID, acceptedAt.UnixMilli()); err != nil {
@@ -349,7 +356,7 @@ func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room,
 
 	allPayload, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal joinedAt-refresh event: %w", err)
+		return errcode.MarshalFailed("joinedAt-refresh event", err)
 	}
 	// Local internal lane → room-site spotlight (inbox-worker doesn't consume it;
 	// the room-site Mongo copy was already updated by the caller).
@@ -361,7 +368,7 @@ func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room,
 		Timestamp:  acceptedAt.UnixMilli(),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal internal joinedAt-refresh envelope: %w", err)
+		return errcode.MarshalFailed("internal joinedAt-refresh envelope", err)
 	}
 	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberJoinedAtRefreshed), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
 		return fmt.Errorf("local inbox joinedAt-refresh publish: %w", err)
@@ -379,7 +386,7 @@ func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room,
 		siteEvt.Accounts = siteAccounts
 		payload, err := json.Marshal(siteEvt)
 		if err != nil {
-			return fmt.Errorf("marshal joinedAt-refresh event (dest %s): %w", destSite, err)
+			return errcode.MarshalFailed("federated joinedAt-refresh event", err)
 		}
 		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
 		if err := h.federate(ctx, room.ID, destSite, model.InboxMemberJoinedAtRefreshed, payload, dedupID, acceptedAt.UnixMilli()); err != nil {

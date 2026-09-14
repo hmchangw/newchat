@@ -8,8 +8,13 @@ STEPS            ?=
 # reads ENCRYPTION_ENABLED via env interpolation (defaulting to true). Flip to
 # `ENCRYPTION_ENABLED=false make up` for a plaintext comparison run.
 export ENCRYPTION_ENABLED ?= true
+# Daily presets include rooms above room-service's production default. Export
+# the override into the root compose invocation instead of declaring a partial
+# room-service in this standalone overlay (which makes `docker compose run`
+# invalid because the service has neither image nor build).
+export MAX_ROOM_SIZE ?= 6000
 
-.PHONY: up stack-up overlay-up image seed teardown run run-dashboards run-max-rps run-daily down logs seed-members teardown-members reset-members run-sustained run-capacity seed-roomread teardown-roomread seed-botroom teardown-botroom run-max-room-size soak-seed soak-run soak-teardown
+.PHONY: up stack-up overlay-up image seed teardown run run-dashboards run-max-rps run-daily down logs seed-members teardown-members reset-members run-sustained run-capacity seed-roomread teardown-roomread seed-sublist teardown-sublist seed-botroom teardown-botroom run-max-room-size soak-seed soak-run soak-teardown
 
 up: stack-up overlay-up
 
@@ -73,6 +78,14 @@ teardown-roomread:
 	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
 	$(COMPOSE) exec -T loadgen /loadgen teardown --workload=room-read --preset=$(PRESET)
 
+seed-sublist:
+	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
+	$(COMPOSE) exec -T loadgen /loadgen seed --workload=subscription-list --preset=$(PRESET)
+
+teardown-sublist:
+	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
+	$(COMPOSE) exec -T loadgen /loadgen teardown --workload=subscription-list --preset=$(PRESET)
+
 reset-members:
 	@test -n "$(PRESET)" || (echo "PRESET=<members-*> required" && exit 1)
 	$(MAKE) teardown-members PRESET=$(PRESET)
@@ -109,7 +122,7 @@ run-dashboards:
 	$(COMPOSE) --profile dashboards up -d
 	$(MAKE) run PRESET=$(PRESET) RATE=$(RATE) DURATION=$(DURATION)
 
-run-max-rps: ## Ramp RPS to find the max under SLO (WORKLOAD=messages|thread|history|room-read|read-receipt PRESET=.. STEPS=..)
+run-max-rps: ## Ramp RPS to find the max under SLO (WORKLOAD=messages|thread|history|room-read|read-receipt|subscription-list PRESET=.. STEPS=..)
 	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
 	$(COMPOSE) --profile dashboards up -d cadvisor prometheus
 	$(COMPOSE) exec -T loadgen /loadgen max-rps \

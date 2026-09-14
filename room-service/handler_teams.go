@@ -59,7 +59,7 @@ func (h *Handler) teamsRoomCall(c *natsrouter.Context, _ model.TeamsRoomCallRequ
 		return nil, err
 	}
 
-	members, err := h.store.ListRoomMembers(ctx, roomID, nil, nil, false)
+	members, _, err := h.store.ListRoomMembers(ctx, roomID, nil, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("list room members: %w", err)
 	}
@@ -125,7 +125,7 @@ func (h *Handler) teamsMeeting(c *natsrouter.Context, _ model.TeamsMeetingReques
 		return &model.TeamsMeetingReply{ID: rec.MeetingID, JoinURL: rec.JoinURL}, nil
 	}
 
-	members, err := h.store.ListRoomMembers(ctx, roomID, nil, nil, false)
+	members, _, err := h.store.ListRoomMembers(ctx, roomID, nil, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("list room members: %w", err)
 	}

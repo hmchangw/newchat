@@ -3,7 +3,8 @@ package errcode
 import "testing"
 
 func TestUserReasons(t *testing.T) {
-	// #nosec G101 -- reason-code table, not credentials; asserts each Reason's wire string. nosemgrep: gosec.G101-1
+	// #nosec G101 -- reason-code table, not credentials; asserts each Reason's wire string.
+	// nosemgrep: gosec.G101-1
 	cases := map[Reason]string{
 		UserAppNotFound:          "app_not_found",
 		UserAppDisabled:          "app_disabled",

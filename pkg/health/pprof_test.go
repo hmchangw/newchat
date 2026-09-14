@@ -15,6 +15,7 @@ import (
 // code, closing the body. It targets the in-process listener the test owns.
 func getStatus(t *testing.T, base, path string) int {
 	t.Helper()
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(base + path) // #nosec G107 -- test requests its own in-process listener URL, not attacker-controlled
 	require.NoError(t, err, "path %s", path)
 	require.NoError(t, resp.Body.Close())

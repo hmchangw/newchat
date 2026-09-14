@@ -72,6 +72,8 @@ func TestSessionManager_Resolve_ReusesSessionForSameCookie(t *testing.T) {
 
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	// local debug tool served over plain HTTP on localhost
+	// nosemgrep: cookie-missing-httponly, cookie-missing-secure
 	req2.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 	second := sm.resolve(rec2, req2)
 

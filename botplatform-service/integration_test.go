@@ -51,7 +51,7 @@ func newIntegrationRouter(t *testing.T, db *mongo.Database, cfg *config) *gin.En
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	require.NoError(t, session.NewMongoStore(db).EnsureIndexes(context.Background()))
-	st := newStoreMongo(db)
+	st := newStoreMongo(db, nil, nil, 0) // nil breaker fences nothing; nil valkey disables the session cache
 	h := newHandler(st, cfg)
 	r := gin.New()
 	registerRoutes(r, h)

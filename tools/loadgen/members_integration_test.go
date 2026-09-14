@@ -101,7 +101,7 @@ func TestMembersSustained_EndToEnd(t *testing.T) {
 	cfg := &config{
 		NatsURL:     natsURL,
 		SiteID:      siteID,
-		MetricsAddr: ":19099",
+		MetricsAddr: "127.0.0.1:19099",
 		MaxInFlight: 50,
 	}
 	args := []string{

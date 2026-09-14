@@ -110,3 +110,26 @@ func TestParams_Require_Empty(t *testing.T) {
 	_, err := p.Require("account")
 	require.Error(t, err)
 }
+
+// The examples above pin specific patterns; this pins the property they are
+// examples of. pkg/obs's TestEverySubscriptionSubjectIsBounded accepts
+// rt.natsSubject as a bounded subscription subject on exactly this basis — a
+// placeholder that survived into natsSubject would put an entity value into the
+// nats_slow_consumer_events_total subject label, one series per entity.
+func TestParsePattern_NatsSubjectNeverKeepsAPlaceholder(t *testing.T) {
+	patterns := []string{
+		"chat.user.{account}.request",
+		"chat.user.{account}.request.room.{roomID}.{siteID}.msg.history",
+		"chat.user.request.rooms.list",
+		"fanout.{a}.{b}",
+		"{a}.{b}.{c}",
+		"chat.room.{roomID}.{siteID}.msg.send",
+	}
+	for _, p := range patterns {
+		t.Run(p, func(t *testing.T) {
+			got := parsePattern(p).natsSubject
+			assert.NotContains(t, got, "{", "a placeholder reached the subscription subject")
+			assert.NotContains(t, got, "}", "a placeholder reached the subscription subject")
+		})
+	}
+}

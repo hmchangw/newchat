@@ -11,8 +11,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 )
@@ -350,8 +348,7 @@ func (s *mongoStore) archiveRetired(ctx context.Context, roomID string, version 
 		options.UpdateOne().SetUpsert(true),
 	)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1,
-			metric.WithAttributes(attribute.String("op", "ArchiveRetired")))
+		roomkeymetrics.RecordStoreError(ctx, "ArchiveRetired")
 		slog.ErrorContext(ctx, "archive retired room key failed",
 			"room_id", roomID, "version", version, "error", err)
 	}
@@ -371,8 +368,7 @@ func (s *mongoStore) repairIndexes(ctx context.Context) {
 		// operator-actionable condition (an index changed out from under us),
 		// not a transient blip. Alert on this counter rather than on the absence
 		// of expiry, which is invisible until the collection has already grown.
-		roomkeymetrics.StoreErrors.Add(ctx, 1,
-			metric.WithAttributes(attribute.String("op", "RepairIndexes")))
+		roomkeymetrics.RecordStoreError(ctx, "RepairIndexes")
 		slog.ErrorContext(ctx, "retired room key TTL index unavailable; archiving without expiry",
 			"error", err)
 	}

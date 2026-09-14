@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -27,10 +25,12 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/timeutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -80,10 +80,13 @@ type Handler struct {
 	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
 	// routeMode (ROOM_SUBJECT_MODE) gates same-site room .event namespaces; cross-site always global.
 	routeMode subject.RoomRouteMode
+	// appName is the cached bot app-name lookup (wraps appNameLookup); nil-safe
+	// because BotAwareDisplayName skips a nil lookup.
+	appName preview.AppNameLookup
 }
 
 func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender, routeMode subject.RoomRouteMode) *Handler {
-	return &Handler{
+	h := &Handler{
 		store:            store,
 		siteID:           siteID,
 		publish:          publish,
@@ -92,6 +95,8 @@ func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, key
 		keyFanoutWorkers: defaultKeyFanoutWorkers,
 		routeMode:        routeMode,
 	}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+	return h
 }
 
 // bustRoomMeta best-effort invalidates a room's L2 (Valkey) metadata entry
@@ -311,7 +316,7 @@ func (h *Handler) processRemoveMember(ctx context.Context, data []byte) (err err
 	// Accepted as a documented limitation; see docs/superpowers/specs/2026-05-08-room-encryption-keys-design.md.
 	currentPair, err := h.keyStore.Get(ctx, req.RoomID)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+		roomkeymetrics.RecordStoreError(ctx, "Get")
 		return fmt.Errorf("get room key: %w", err)
 	}
 
@@ -370,6 +375,25 @@ func (h *Handler) cleanupThreadMembership(ctx context.Context, roomID string, ac
 	return nil
 }
 
+// appNameLookup adapts store.GetApp to preview.AppNameLookup: no match is ("", nil)
+// so BotAwareDisplayName degrades to the composed name.
+func (h *Handler) appNameLookup(ctx context.Context, botAccount string) (string, error) {
+	app, err := h.store.GetApp(ctx, botAccount)
+	if errors.Is(err, ErrAppNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return app.Name, nil
+}
+
+// botAwareName renders a sys-msg participant's name (member or requester),
+// substituting the registered app name for a bot account.
+func (h *Handler) botAwareName(ctx context.Context, u *model.User) string {
+	return preview.BotAwareDisplayName(ctx, h.appName, u.EngName, u.ChineseName, u.Account)
+}
+
 func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.RemoveMemberRequest, currentPair *roomkeystore.VersionedKeyPair) (err error) {
 	if req.Timestamp <= 0 {
 		req.Timestamp = time.Now().UTC().UnixMilli()
@@ -396,6 +420,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 			if err := h.store.RemoveRole(ctx, req.Account, req.RoomID, model.RoleOwner); err != nil {
 				return fmt.Errorf("demote dual-member owner: %w", err)
 			}
+			// Bust AFTER the write: the cached Roles drove canBypassLargeRoomCap
+			// in the gatekeeper and must not keep serving owner-level authz.
+			subauthcache.BustSub(ctx, h.valkey, req.RoomID, req.Account)
 		}
 		return nil
 	}
@@ -404,6 +431,10 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	if _, err := h.store.DeleteSubscription(ctx, req.RoomID, req.Account); err != nil {
 		return fmt.Errorf("delete subscription: %w", err)
 	}
+	// Bust AFTER the write: a removed member's cached positive decision must
+	// die immediately, not linger for the L2 TTL (the security case this
+	// invalidation exists for).
+	subauthcache.BustSub(ctx, h.valkey, req.RoomID, req.Account)
 
 	// Individual-only branch (dual-members returned above), so the account has
 	// truly left: scrub its thread footprint (#308).
@@ -503,9 +534,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp))
 	var content string
 	if isSelfLeave {
-		content = formatLeft(&user.User)
+		content = formatLeft(h.botAwareName(ctx, &user.User))
 	} else {
-		content = formatRemovedUser(requester, &user.User)
+		content = formatRemovedUser(h.botAwareName(ctx, requester), h.botAwareName(ctx, &user.User))
 	}
 	sysMsg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(seed, "rmindiv"),
@@ -610,6 +641,10 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts); err != nil {
 			return fmt.Errorf("delete subscriptions by accounts: %w", err)
 		}
+		// Bust AFTER the write, in one batched round trip: each removed
+		// account's cached positive decision must die immediately, not linger
+		// for the L2 TTL.
+		subauthcache.BustSubs(ctx, h.valkey, req.RoomID, accounts)
 		// accounts is exactly the set that truly lost membership (survivors
 		// filtered out above), so scrub their thread footprint too (#308).
 		if err := h.cleanupThreadMembership(ctx, req.RoomID, accounts); err != nil {
@@ -708,7 +743,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		UserID:      requester.ID,
 		UserAccount: requester.Account,
 		Type:        model.MessageTypeMemberRemoved,
-		Content:     formatRemovedOrg(requester, name, tcName, req.OrgID),
+		Content:     formatRemovedOrg(h.botAwareName(ctx, requester), name, tcName, req.OrgID),
 		SysMsgData:  sysMsgPayload,
 		CreatedAt:   now,
 	}
@@ -980,7 +1015,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		user := userMap[c.Account]
 		// newSub stamps u.isBot from the account; room is the channel fetched by
 		// req.RoomID so RoomType/SiteID/Name/ID all match the prior inline build.
-		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt)
+		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleUser}, room.Name, false, acceptedAt)
 		// Pre-resolved above the candidate debug log; shared pointer is safe —
 		// nothing mutates through it after this point.
 		sub.HistorySharedSince = historySharedSinceAt
@@ -996,14 +1031,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	// pair cannot go stale between here and the fan-out below.
 	var pair *roomkeystore.VersionedKeyPair
 	if len(subs) > 0 {
+		// Self-heal a key-absent room instead of permanently failing the "added"
+		// fan-out (new member couldn't decrypt, no retry). See keyPairOrHeal.
 		var err error
-		pair, err = h.keyStore.Get(ctx, req.RoomID)
+		pair, err = h.keyPairOrHeal(ctx, req.RoomID)
 		if err != nil {
-			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
-			return fmt.Errorf("get room key for subscription fan-out: %w", err)
-		}
-		// A keyless "added" event would leave the new member unable to decrypt with no retry.
-		if err := requireKeyPair(ctx, pair); err != nil {
 			return err
 		}
 	}
@@ -1227,11 +1259,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			sysMsgData, _ := json.Marshal(membersAdded)
 			seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
 				fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
-			content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
+			content := addedContent(h.botAwareName(ctx, requester), sysIndividuals, req.Orgs, func(a string) string {
 				if u, ok := userMap[a]; ok {
-					return &u
+					return h.botAwareName(ctx, &u)
 				}
-				return nil
+				return ""
 			})
 			sysMsg := model.Message{
 				ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
@@ -1373,7 +1405,7 @@ func buildChannelSubs(requester *model.User, users []model.User, room *model.Roo
 	subs = append(subs, preRead(newSub(idgen.GenerateUUIDv7(), requester, room, []model.Role{model.RoleOwner}, room.Name, false, acceptedAt), acceptedAt))
 	for i := range users {
 		u := &users[i]
-		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt))
+		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleUser}, room.Name, false, acceptedAt))
 	}
 	return subs
 }
@@ -1671,7 +1703,7 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPair *roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
 	pair, err := h.keyStore.Get(ctx, roomID)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+		roomkeymetrics.RecordStoreError(ctx, "Get")
 		return nil, fmt.Errorf("get room key: %w", err)
 	}
 	if pair != nil {
@@ -1679,10 +1711,39 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 	}
 	ver, err := h.keyStore.Set(ctx, roomID, *fallbackPair)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Set")))
+		roomkeymetrics.RecordStoreError(ctx, "Set")
 		return nil, fmt.Errorf("store room key: %w", err)
 	}
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
+}
+
+// keyPairOrHeal returns the room's current key, minting and persisting a fresh
+// key when the store holds none. A key-absent room is a never-keyed channel
+// (legacy / pre-encryption); the mint unblocks going-forward messages but does
+// NOT recover history that a lost key had encrypted — it is going-forward-only.
+// RecordKeyAbsent still fires on the mint so ops can spot a lost-key event.
+// SetIfAbsent (not Set) converges concurrent minters — JetStream redelivery or a
+// racing worker — on a single v0 key instead of fanning out rival bytes.
+func (h *Handler) keyPairOrHeal(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error) {
+	pair, err := h.keyStore.Get(ctx, roomID)
+	if err != nil {
+		roomkeymetrics.RecordStoreError(ctx, "Get")
+		return nil, fmt.Errorf("get room key: %w", err)
+	}
+	if pair != nil {
+		return pair, nil
+	}
+	roomkeymetrics.RecordKeyAbsent(ctx, "")
+	fallback, err := roomkeystore.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generate fallback room key: %w", err)
+	}
+	committed, err := h.keyStore.SetIfAbsent(ctx, roomID, *fallback)
+	if err != nil {
+		roomkeymetrics.RecordStoreError(ctx, "SetIfAbsent")
+		return nil, fmt.Errorf("store fallback room key: %w", err)
+	}
+	return committed, nil
 }
 
 func (h *Handler) processCreateRoomChannel(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, pair *roomkeystore.VersionedKeyPair, requestID string, acceptedAt, now time.Time) error {
@@ -1880,7 +1941,7 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		AddedUsersCount: addedUsersCount,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal room_created sys data: %w", err)
+		return errcode.MarshalFailed("room_created sys data", err)
 	}
 	msg1 := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "room_created"),
@@ -1910,10 +1971,13 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		AddedUsersCount: addedUsersCount,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal members_added sys data: %w", err)
+		return errcode.MarshalFailed("members_added sys data", err)
 	}
-	content := addedContent(requester, req.ResolvedUsers, req.ResolvedOrgs, func(a string) *model.User {
-		return userByAccount[a]
+	content := addedContent(h.botAwareName(ctx, requester), req.ResolvedUsers, req.ResolvedOrgs, func(a string) string {
+		if u, ok := userByAccount[a]; ok {
+			return h.botAwareName(ctx, u)
+		}
+		return ""
 	})
 	msg2 := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "members_added"),
@@ -1940,7 +2004,7 @@ func (h *Handler) publishCanonical(ctx context.Context, msg *model.Message, site
 	}
 	data, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal MessageEvent: %w", err)
+		return errcode.MarshalFailed("MessageEvent", err)
 	}
 	return h.publish(ctx, subject.MsgCanonicalCreated(siteID), data, natsutil.CanonicalDedupID(&evt))
 }
@@ -2288,7 +2352,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 
 	sysData, err := json.Marshal(model.RoomRenamedSysData{NewName: req.NewName, ByAccount: req.Account})
 	if err != nil {
-		return fmt.Errorf("marshal sys data: %w", err)
+		return errcode.MarshalFailed("room_renamed sys data", err)
 	}
 	requester, err := h.store.GetUser(ctx, req.Account)
 	if err != nil && !errors.Is(err, ErrUserNotFound) {
@@ -2296,7 +2360,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	}
 	requesterLabel := req.Account
 	if requester != nil {
-		requesterLabel = displayName(requester)
+		requesterLabel = h.botAwareName(ctx, requester)
 	}
 	msg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "room_renamed"),
@@ -2331,7 +2395,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 		RoomID: req.RoomID, NewName: req.NewName, Timestamp: req.Timestamp,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal rename inbox payload: %w", err)
+		return errcode.MarshalFailed("rename inbox payload", err)
 	}
 	now := time.Now().UTC().UnixMilli()
 	// Same-site search feed: search-sync re-indexes the room name from this
@@ -2347,7 +2411,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	}
 	internalRenameData, err := json.Marshal(internalRename)
 	if err != nil {
-		return fmt.Errorf("marshal internal rename event: %w", err)
+		return errcode.MarshalFailed("internal rename event", err)
 	}
 	// Best-effort: log, don't Nak. Returning here would redeliver the whole
 	// handler, and UpdateRoomName / UpdateSubscriptionNamesForRoom (already
@@ -2467,7 +2531,7 @@ func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requ
 	}
 	pData, err := json.Marshal(memberEvt)
 	if err != nil {
-		return fmt.Errorf("marshal member_added inbox payload: %w", err)
+		return errcode.MarshalFailed("member_added inbox payload", err)
 	}
 	// Dedup keys on intrinsic room identity (stable across retries and
 	// re-subscribes) plus the destination site, NOT the request ID — the router
@@ -2497,7 +2561,7 @@ func (h *Handler) fanOutRoomKeyToSurvivors(ctx context.Context, roomID string, p
 // absence and returns a permanent error so nothing keyless is ever published.
 func requireKeyPair(ctx context.Context, pair *roomkeystore.VersionedKeyPair) error {
 	if pair == nil {
-		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1)
+		roomkeymetrics.RecordKeyAbsent(ctx, "")
 		return permanent(errcode.Internal("room key absent", errcode.WithCause(errRoomKeyAbsent)))
 	}
 	return nil
@@ -2546,7 +2610,7 @@ func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 		// no recipient can be served, so count the whole batch and bail. The
 		// caller treats fan-out as best-effort and JetStream redelivers.
 		slog.Error("marshal room key for fan-out", "error", err, "roomId", roomID, "accounts", len(accounts))
-		roomkeymetrics.FanoutErrors.Add(ctx, int64(len(accounts)), metric.WithAttributes(attribute.String("roomId", roomID)))
+		roomkeymetrics.RecordFanoutErrors(ctx, int64(len(accounts)))
 		return
 	}
 	workers := h.keyFanoutWorkers
@@ -2572,7 +2636,7 @@ func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 			}()
 			if err := h.keySender.SendDataContext(ctx, acct, data); err != nil {
 				slog.ErrorContext(ctx, "send room key", "error", err, "account", acct, "roomId", roomID)
-				roomkeymetrics.FanoutErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("roomId", roomID)))
+				roomkeymetrics.RecordFanoutErrors(ctx, 1)
 				failed.Add(1)
 				return
 			}

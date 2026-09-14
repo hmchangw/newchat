@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
+	"math/rand/v2" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sort"
 	"strings"
 	"sync"

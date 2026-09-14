@@ -1,0 +1,395 @@
+package poolartifact
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"testing"
+
+	"github.com/minio/minio-go/v7"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// fakeObjects is an in-memory object store keyed by "bucket/key".
+type fakeObjects struct {
+	data         map[string][]byte
+	contentTypes map[string]string
+	putErr       error
+	getErr       error
+}
+
+func newFakeObjects() *fakeObjects {
+	return &fakeObjects{data: map[string][]byte{}, contentTypes: map[string]string{}}
+}
+
+func (f *fakeObjects) put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string, ifAbsent bool) error {
+	if f.putErr != nil {
+		return f.putErr
+	}
+	if ifAbsent {
+		if _, exists := f.data[bucket+"/"+key]; exists {
+			return fmt.Errorf("%w: %s/%s", ErrObjectExists, bucket, key)
+		}
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	f.data[bucket+"/"+key] = b
+	f.contentTypes[bucket+"/"+key] = contentType
+	return nil
+}
+
+// get models minio's real shape for a missing object, which is the whole
+// point of the fake: GetObject does NOT fail eagerly, it hands back a reader
+// whose first Read returns the NoSuchKey ErrorResponse. A fake that returned
+// ErrObjectNotFound from get itself would exercise a path minio never takes —
+// and would let a classifier that cannot see through the read path's %w
+// wrapping pass.
+func (f *fakeObjects) get(_ context.Context, bucket, key string) (io.ReadCloser, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	b, ok := f.data[bucket+"/"+key]
+	if !ok {
+		return io.NopCloser(errReader{minio.ErrorResponse{
+			Code: "NoSuchKey", Message: "The specified key does not exist.",
+		}}), nil
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+// errReader fails on the first Read, the way minio's lazy object does.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+func testArtifact() *Artifact {
+	return &Artifact{
+		RunID: "run-1", SiteID: "site-a", ConfigDigest: "dig-1",
+		Accounts: []string{"alice", "bob"},
+	}
+}
+
+// The object store is a transport hop, so the contract on both ends must be
+// the one Load already enforces for files: same validation, same gzip rule.
+func TestStore_PutLoadRoundTrip(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "pool-bucket", "clientsim")
+	key := s.Key("site-a", "run-1", "pool.json.gz")
+
+	require.NoError(t, s.Put(context.Background(), key, testArtifact()))
+
+	stored := f.data["pool-bucket/"+key]
+	require.NotEmpty(t, stored)
+	assert.Equal(t, []byte{0x1f, 0x8b}, stored[:2], "a .gz key must store gzip bytes")
+
+	got, err := s.Load(context.Background(), key, "site-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice", "bob"}, got.Accounts)
+	assert.Equal(t, "run-1", got.RunID)
+}
+
+// Run-scoped keys are what make the object store double as the record of
+// which accounts a given run used.
+func TestStore_KeyIsRunScoped(t *testing.T) {
+	s := newStore(newFakeObjects(), "b", "clientsim")
+	assert.Equal(t, "clientsim/site-a/run-1/pool.json.gz", s.Key("site-a", "run-1", "pool.json.gz"))
+
+	bare := newStore(newFakeObjects(), "b", "")
+	assert.Equal(t, "site-a/run-1/pool.json.gz", bare.Key("site-a", "run-1", "pool.json.gz"),
+		"an empty prefix must not leave a leading slash")
+}
+
+// The consumer must refuse an artifact belonging to another site as loudly
+// over the wire as it does from a file — a mismatched pool connects accounts
+// that do not exist on the site under test.
+func TestStore_LoadRejectsAnotherSitesArtifact(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	key := s.Key("site-a", "run-1", "pool.json.gz")
+	require.NoError(t, s.Put(context.Background(), key, testArtifact()))
+
+	_, err := s.Load(context.Background(), key, "site-b")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "site")
+}
+
+// Credentials and location have no safe default: a half-configured store that
+// silently pointed at the wrong bucket would surface as an empty pool hours
+// into a run.
+func TestStoreConfig_Validate(t *testing.T) {
+	full := StoreConfig{Endpoint: "e", AccessKey: "a", SecretKey: "s", Bucket: "b"}
+	require.NoError(t, full.Validate())
+
+	tests := []struct {
+		name string
+		mut  func(*StoreConfig)
+		want string
+	}{
+		{name: "no endpoint", mut: func(c *StoreConfig) { c.Endpoint = "" }, want: "POOL_S3_ENDPOINT"},
+		{name: "no access key", mut: func(c *StoreConfig) { c.AccessKey = "" }, want: "POOL_S3_ACCESS_KEY"},
+		{name: "no secret key", mut: func(c *StoreConfig) { c.SecretKey = "" }, want: "POOL_S3_SECRET_KEY"},
+		{name: "no bucket", mut: func(c *StoreConfig) { c.Bucket = "" }, want: "POOL_S3_BUCKET"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := full
+			tt.mut(&cfg)
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+// The URL is what a deployment sets, so its parse errors are startup errors.
+func TestParsePoolURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          string
+		bucket, key string
+		wantErr     string
+	}{
+		{name: "bucket and key", in: "s3://my-bucket/clientsim/site-a/run-1/pool.json.gz",
+			bucket: "my-bucket", key: "clientsim/site-a/run-1/pool.json.gz"},
+		{name: "nested key", in: "s3://b/a/b/c.json.gz", bucket: "b", key: "a/b/c.json.gz"},
+		{name: "no key", in: "s3://only-bucket", wantErr: "object key"},
+		{name: "empty key", in: "s3://only-bucket/", wantErr: "object key"},
+		{name: "wrong scheme", in: "http://host/key", wantErr: "s3://"},
+		{name: "not a url", in: "::::", wantErr: "parse"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bucket, key, err := ParsePoolURL(tt.in)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.bucket, bucket)
+			assert.Equal(t, tt.key, key)
+		})
+	}
+}
+
+// Both tools accept a file path instead, so an unset store is a valid
+// configuration. Configured is what lets them tell "not using S3" apart from
+// "using S3, badly configured" — the second must fail at startup.
+func TestStoreConfig_Configured(t *testing.T) {
+	var unset StoreConfig
+	assert.False(t, unset.Configured(), "an entirely unset store is not in use")
+	defaultsOnly := StoreConfig{Prefix: "clientsim", UseSSL: true}
+	assert.False(t, defaultsOnly.Configured(),
+		"layout knobs carry envDefaults, so they cannot signal intent on their own")
+
+	partial := StoreConfig{Bucket: "b"}
+	assert.True(t, partial.Configured(), "one field set means someone meant to use it")
+	assert.Error(t, partial.Validate(), "...and a partial config must then fail loudly")
+}
+
+func TestNewStore_RejectsIncompleteConfig(t *testing.T) {
+	_, err := NewStore(&StoreConfig{Endpoint: "localhost:9000"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "POOL_S3_ACCESS_KEY")
+}
+
+// Constructing the client must not dial: a consumer that only fails on the
+// first read gives a clearer error than one that fails at startup for an
+// endpoint that is merely slow to come up.
+func TestNewStore_DoesNotDial(t *testing.T) {
+	s, err := NewStore(&StoreConfig{
+		Endpoint: "127.0.0.1:1", AccessKey: "a", SecretKey: "s", Bucket: "b", Prefix: "p",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "p/site-a/run-1/pool.json.gz", s.Key("site-a", "run-1", "pool.json.gz"))
+}
+
+// A producer must not be able to publish something the consumer will refuse.
+// Put runs the same validation Write does, before it touches the network.
+func TestStore_PutRejectsWhatLoadWouldRefuse(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	tests := []struct {
+		name string
+		a    *Artifact
+		want string
+	}{
+		{name: "no accounts", a: &Artifact{RunID: "r", SiteID: "s", ConfigDigest: "d"}, want: "empty accounts"},
+		{name: "no runID", a: &Artifact{SiteID: "s", ConfigDigest: "d", Accounts: []string{"a"}}, want: "empty runID"},
+		{name: "duplicate account", a: &Artifact{RunID: "r", SiteID: "s", ConfigDigest: "d",
+			Accounts: []string{"a", "a"}}, want: "duplicate"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := s.Put(context.Background(), "k.json.gz", tt.a)
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.want)
+			assert.Empty(t, f.data, "nothing may be stored when validation failed")
+		})
+	}
+}
+
+// Transport failures reach the caller rather than yielding an empty pool: a
+// consumer that started on a silently-missing artifact would connect nobody
+// and report a healthy-looking zero.
+func TestStore_PropagatesTransportErrors(t *testing.T) {
+	boom := errors.New("network is unreachable")
+
+	f := newFakeObjects()
+	f.putErr = boom
+	err := newStore(f, "b", "p").Put(context.Background(), "k.json.gz", testArtifact())
+	assert.ErrorIs(t, err, boom)
+
+	g := newFakeObjects()
+	g.getErr = boom
+	_, err = newStore(g, "b", "p").Load(context.Background(), "k.json.gz", "site-a")
+	assert.ErrorIs(t, err, boom)
+}
+
+// An object stored under a key without .gz is plain JSON on both ends. The
+// filename is the only thing deciding it, so the two directions cannot
+// disagree — the same rule the file path uses.
+func TestStore_UncompressedKeyRoundTrips(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	require.NoError(t, s.Put(context.Background(), "plain.json", testArtifact()))
+
+	assert.Equal(t, byte('{'), f.data["b/plain.json"][0], "a key without .gz stores plain JSON")
+	got, err := s.Load(context.Background(), "plain.json", "site-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice", "bob"}, got.Accounts)
+}
+
+// The manifest is plain JSON under a plain key, so labelling every object
+// application/gzip made tooling that reads object metadata unable to parse
+// it without guessing. Content type follows the key, like compression does.
+func TestStore_ContentTypeFollowsTheKey(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	ctx := context.Background()
+
+	require.NoError(t, s.Put(ctx, "pool.json.gz", testArtifact()))
+	assert.Equal(t, "application/gzip", f.contentTypes["b/pool.json.gz"])
+
+	require.NoError(t, s.PutJSON(ctx, "pool-manifest.json", map[string]string{"a": "b"}))
+	assert.Equal(t, "application/json", f.contentTypes["b/pool-manifest.json"])
+
+	require.NoError(t, s.PutJSON(ctx, "big-manifest.json.gz", map[string]string{"a": "b"}))
+	assert.Equal(t, "application/gzip", f.contentTypes["b/big-manifest.json.gz"])
+}
+
+// A missing object has to be distinguishable from a broken one: the exporter
+// treats "nothing published yet" as the normal first run and any other
+// failure as an error, and it cannot tell them apart from an opaque string.
+func TestStore_LoadReportsAMissingObject(t *testing.T) {
+	s := newStore(newFakeObjects(), "b", "p")
+	_, err := s.Load(context.Background(), "never-written.json.gz", "site-a")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrObjectNotFound)
+}
+
+// Key composes prefix/siteID/runID/name with path.Join, which NORMALISES
+// "..": a segment that escapes writes the artifact into another site's scope,
+// or out of the prefix entirely. Both segments come from deployment config,
+// so this is a guard against a typo or a copied env, not an attacker — but a
+// pool silently published over another site's is exactly the failure the run
+// digest exists to prevent, arriving by a different door.
+func TestValidateKeySegment(t *testing.T) {
+	for _, ok := range []string{"site-a", "run-1", "a.b_c-1", "S1"} {
+		assert.NoError(t, ValidateKeySegment(ok), "%q is a legal segment", ok)
+	}
+	for _, bad := range []string{"", ".", "..", "../other", "a/b", "-lead", "a b", "sit/e"} {
+		assert.Error(t, ValidateKeySegment(bad), "%q must be rejected", bad)
+	}
+}
+
+// The escape has to be impossible at the composer, not merely unlikely at the
+// callers: Key is exported and a future caller will not re-derive the rule.
+func TestStore_KeyStaysUnderThePrefix(t *testing.T) {
+	s := newStore(newFakeObjects(), "b", "clientsim")
+	assert.Equal(t, "clientsim/site-a/run-1/pool.json.gz", s.Key("site-a", "run-1", "pool.json.gz"))
+}
+
+// The overwrite guard was Load-then-Put: two exporters can both see the run
+// unpublished and both write, and the loser's population is what a fleet
+// reads. The claim has to be the write itself.
+func TestStore_PutIfAbsentClaimsTheKeyExactlyOnce(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	key := s.Key("site-a", "run-1", "pool.json.gz")
+
+	require.NoError(t, s.PutIfAbsent(context.Background(), key, testArtifact()))
+
+	second := testArtifact()
+	second.Accounts = []string{"carol"}
+	err := s.PutIfAbsent(context.Background(), key, second)
+	require.ErrorIs(t, err, ErrObjectExists, "the second claim must lose, not overwrite")
+
+	got, err := s.Load(context.Background(), key, "site-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice", "bob"}, got.Accounts, "the first writer's population must survive")
+}
+
+// A producer-side rejection must happen before the key is claimed, or a bad
+// artifact burns a run ID nothing can reuse.
+func TestStore_PutIfAbsentValidatesBeforeClaiming(t *testing.T) {
+	f := newFakeObjects()
+	s := newStore(f, "b", "p")
+	key := s.Key("site-a", "run-1", "pool.json.gz")
+
+	require.Error(t, s.PutIfAbsent(context.Background(), key, &Artifact{RunID: "r", SiteID: "s"}))
+	require.NoError(t, s.PutIfAbsent(context.Background(), key, testArtifact()),
+		"the rejected write must not have claimed the key")
+}
+
+// The exposure is identical at both ends — pool-export uploads the account
+// list, clientsim downloads it, and both carry the access key ID — so the rule
+// lives here rather than being written twice and drifting.
+func TestStoreConfig_PlaintextEndpoint(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint string
+		useSSL   bool
+		want     bool
+	}{
+		{"tls anywhere is fine", "minio.svc.cluster.local:9000", true, false},
+		{"plaintext to a remote host warns", "minio.svc.cluster.local:9000", false, true},
+		{"plaintext to localhost is the dev loop", "localhost:9000", false, false},
+		{"plaintext to 127.0.0.1 is the dev loop", "127.0.0.1:9000", false, false},
+		{"plaintext to ::1 is the dev loop", "[::1]:9000", false, false},
+		{"a bare remote host with no port still warns", "minio.example.com", false, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			c := StoreConfig{Endpoint: tt.endpoint, UseSSL: tt.useSSL}
+			assert.Equal(t, tt.want, c.PlaintextEndpoint())
+		})
+	}
+}
+
+// asAlreadyExists is the other half of the conditional write: without it a
+// lost claim reads as an opaque transport failure and exportPool aborts
+// instead of reconciling.
+func TestAsAlreadyExists(t *testing.T) {
+	assert.ErrorIs(t, asAlreadyExists(fmt.Errorf("put: %w",
+		minio.ErrorResponse{Code: "PreconditionFailed"})), ErrObjectExists)
+	assert.ErrorIs(t, asAlreadyExists(fmt.Errorf("put: %w",
+		minio.ErrorResponse{StatusCode: 412})), ErrObjectExists)
+
+	other := errors.New("connection reset")
+	assert.NotErrorIs(t, asAlreadyExists(other), ErrObjectExists)
+	assert.ErrorIs(t, asAlreadyExists(other), other, "an unrelated error must pass through unchanged")
+}
+
+// asNotFound must not claim every minio error is a missing object.
+func TestAsNotFound_OnlyClassifiesNoSuchKey(t *testing.T) {
+	denied := fmt.Errorf("get: %w", minio.ErrorResponse{Code: "AccessDenied"})
+	assert.NotErrorIs(t, asNotFound(denied), ErrObjectNotFound)
+	assert.ErrorIs(t, asNotFound(denied), denied)
+}

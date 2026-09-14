@@ -1,0 +1,255 @@
+# user-presence-service — Production Readiness Review
+
+**Service:** `user-presence-service` · **Date:** 2026-08-31 · **Branch:** `claude/production-readiness-report-hwcw8i`
+**Method:** 6 independent expert agents scoring against `CLAUDE.md` and industry practice for Go microservices at scale.
+
+## Overall score: 2.8 / 5
+
+Idiomatic, densely WHY-commented Go with correct `errcode` Tier-1 usage, exemplary DI in the core binary, and a genuinely careful hot path — a single-round-trip Lua recompute, deduped pipelined batch reads, a precise Mongo projection via `pkg/userstore`, and clean sweeper termination.
+
+Three findings dominate. **The bulk-presence RPC that `notification-worker`'s push gate calls has no responder anywhere in the repo** — and the two sides also speak different payload shapes and disagree on chunk size by 5×, so the gate cannot be enabled by configuration alone. It is dead-by-flag today; flipping that flag would fail three ways. **The sweep index is a single untagged cluster key** while every per-account key is hash-tagged, so 100% of hello, heartbeat, activity and bye traffic for the entire site funnels into one Valkey master's single-threaded loop — the service's scaling ceiling, invisible until it is hit. And **`Sweep` drains 100 stale accounts per second**, so a gateway restart dropping 50k connections leaves those users shown as online for about eight minutes, long past the 45-second staleness threshold.
+
+Underneath: the `sync/` sub-binary re-declares the shared Valkey and presence knobs and hand-dials the cluster, against a rule the store's own comments state explicitly. Coverage is 45.1%.
+
+| # | Dimension | Score |
+|---|-----------|-------|
+| 1 | Go code quality | 4 / 5 |
+| 2 | Architecture | 3 / 5 |
+| 3 | Test coverage | 1 / 5 |
+| 4 | Maintainability | 3 / 5 |
+| 5 | Integration | 3 / 5 |
+| 6 | Performance | 3 / 5 |
+
+| Severity | critical | high | medium | low | nitpick | Total |
+|----------|---|---|---|---|---|---|
+| Count | 1 | 14 | 21 | 15 | 10 | **61** |
+
+---
+
+## 2. Go code quality — 4 / 5
+
+Idiomatic, densely WHY-commented Go with correct `errcode` Tier-1 usage, structured `slog` throughout and zero forbidden patterns — undercut by a total absence of `errors.Is`, silently-swallowed type assertions in the Lua reply decoder, and the `sync/` sub-binary re-hand-rolling config and dial that `pkg/valkeyutil` exists to own.
+
+### Findings
+- `high` — `sync/main.go` re-declares the shared Valkey knobs (`VALKEY_ADDRS`, `VALKEY_PASSWORD`) as its own fields and hand-dials `redis.NewClusterClient` instead of mounting `valkeyutil.Config` + `valkeyutil.ConnectRaw` — `user-presence-service/sync/main.go:30-31`, `:91-93`
+  CLAUDE.md §6 Configuration: "A knob shared by more than one service is declared once, in the package that owns the thing it configures… Never re-declare the env tag and `envDefault` in a service." The sibling binary in the same directory does it correctly (`main.go:53`, `:120`). Consequences are concrete: the sync's client carries no o11y instrumentation and is never pinged at startup, and `presencestore/store.go:185-190`'s own doc comment states this exact duplication was already removed once. `PRESENCE_STALE_THRESHOLD` / `PRESENCE_CONNS_TTL` (`sync/main.go:24-25`) are the same defect against `presencestore` — the two binaries feed the same Lua scripts and their defaults agree only by luck.
+
+- `medium` — Redis sentinel errors compared with `==`/`!=` instead of `errors.Is` — `user-presence-service/presencestore/store.go:300`, `:305`
+  ```go
+  if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+  ```
+  These are the only two such sites in the repo; `pkg/valkeyutil/valkey.go:164,189,232` uses `errors.Is(err, redis.Nil)` everywhere. go-redis wraps pipeline errors in some paths, so a wrapped `redis.Nil` would escape both guards and turn an ordinary cache miss into a failed `BatchGet` (and a 500-equivalent on `QueryBatch`). There is no `errors.Is`/`errors.As` anywhere in the 3121-line service.
+
+- `medium` — Lua reply type assertions silently discard failure — `user-presence-service/presencestore/store.go:209-211`
+  ```go
+  changed, _ := res[0].(int64)
+  effective, _ := res[1].(string)
+  nextDeadline, _ := res[2].(int64)
+  ```
+  The arity check on `:206` is careful, but a wrong element *type* (e.g. a Valkey/Redis version returning a different numeric encoding) yields `changed=false, effective="", nextDeadline=0` with no error — presence silently stops publishing transitions and `reschedule` ZADDs every account to score 0, permanently hot in the sweep index. CLAUDE.md §3: "Never ignore errors silently — comment if intentionally discarded."
+
+- `medium` — A parsed `*errcode.Error` from a peer is downgraded to an opaque string error — `user-presence-service/peer_client.go:56-58`
+  ```go
+  if errResp, ok := errcode.Parse(reply.Data); ok {
+      return nil, fmt.Errorf("remote presence query: %s", errResp.Message)
+  }
+  ```
+  `errcode.Parse` is the sanctioned Tier-3 cross-site decode, but formatting with `%s` discards the code/reason, so no caller can `errors.As` it — and the test is forced into string matching to compensate (`peer_client_test.go:89-90`), the very pattern CLAUDE.md §3 bans. Wrap with `%w` or return the `*errcode.Error`.
+
+- `low` — Bare `return err` in five places, each relying on the callee having wrapped — `user-presence-service/sweeper.go:46`, `handler.go:221`, `presencestore/store.go:234`, `:237`, `sync/reconcile.go:61`
+  CLAUDE.md §3 is unconditional ("Never return bare `err`"); the caller loses which of the two branches in `mutate` failed.
+
+- `low` — `QueryBatch` and `QueryBatchPeer` assemble near-identical response loops with divergent normalization — `handler.go:144-153` vs `handler.go:224-237`
+  Only the client-facing path guards `status == model.StatusNone`; the peer leaf guards only `!ok`. The divergence is currently masked by `BatchGet` mapping `""` to offline (`presencestore/store.go:305`), so this is a latent inconsistency, not a live bug.
+
+- `nitpick` — Single-method interfaces not `-er`-suffixed: `UserDirectory` (`store.go:16`), `PeerPresenceClient` (`peer_client.go:20`). CLAUDE.md §3 Naming. The `sync/` package gets this right (`activeLister`, `userResolver`, `presenceReader`, `externalApplier`).
+
+- `nitpick` — Redundant `slog.SetDefault(slog.New(slog.NewJSONHandler(...)))` — `sync/main.go:58`; `pkg/obs/bootstrap.go:14` already installs a JSON default in `init()` before any `main()` runs.
+
+- `nitpick` — Go 1.22+ makes the per-iteration copy `site, accounts := site, accounts` dead — `handler.go:189` (repo is on Go 1.25).
+
+- `low` — SAST audit-coverage gap (environmental, not a service defect): gosec and the 18 repo-owned semgrep rules are clean repo-wide; `govulncheck` and the semgrep registry packs could not run (egress blocked), so dependency-CVE and generic-pattern coverage is unverified for this service.
+
+### Recommendations
+- `high` — Replace `sync/main.go`'s Valkey block with `Valkey valkeyutil.Config` + `Validate()` + `valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))`, matching `main.go:53,77,120`; move the two `PRESENCE_*` duration knobs into a single `presencestore`-owned config struct both binaries mount.
+- `medium` — Switch both `redis.Nil` comparisons to `errors.Is` (`presencestore/store.go:300,305`); add a repo-owned semgrep rule for `== redis.Nil` since this pattern recurred once already.
+- `medium` — Make the three assertions in `Store.run` checked, returning `fmt.Errorf("presence script %q: reply element %d has type %T", account, i, res[i])` on mismatch.
+- `medium` — Propagate the peer `*errcode.Error` with `%w` (or return it directly) in `peer_client.go:57`, then rewrite `peer_client_test.go:89-90` to assert via `errors.As` instead of substring matching.
+- `low` — Wrap the five bare `return err` sites with what the calling function was doing (e.g. `fmt.Errorf("sweep tick: %w", err)` in `sweeper.go:46`).
+- `low` — Extract the shared response-assembly loop from `QueryBatch`/`QueryBatchPeer` into one helper so the `StatusNone` normalization cannot drift again.
+- `nitpick` — Rename `UserDirectory` → `UserResolver` (or `SiteResolver`) and `PeerPresenceClient` → `PeerQuerier`; delete `handler.go:189` and `sync/main.go:58`.
+
+---
+
+## 3. Architecture — 3 / 5
+
+The core binary is exemplary DI (consumer-owned interfaces, constructor injection, compile-time store assertion, correct `shutdown.Wait` ordering), but the contract with notification-worker's push gate does not exist, and the nested `sync/` binary re-declares shared knobs and bypasses `valkeyutil`.
+
+### Findings
+- `high` — notification-worker's push gate requests `chat.presence.{siteID}.request.snapshot` (`pkg/subject/subject.go:1729-1732`, used at `notification-worker/presence.go:61`), but user-presence-service registers only `PresenceQueryBatch`/`PresenceQueryBatchPeer`/the four `chat.user.…presence` patterns (`user-presence-service/main.go:172-178`). No handler for `PresenceSnapshot` exists anywhere in the repo. The gate is dead-by-flag (`PRESENCE_RPC_ENABLED` default `false`, `notification-worker/main.go:65`); flipping it yields a 2s timeout per chunk and fail-open on every message.
+- `high` — the payload contract is also incompatible, not just the subject: the gate marshals `model.PresenceSnapshotRequest` and expects `PresenceSnapshotReply{Presences map[string]Presence{aggregatedStatus}}` (`pkg/model/presence.go:3-16`), while the service speaks `PresenceQuery` → `PresenceQueryResponse{States []PresenceState{status}}` (`pkg/model/presence.go:78-95`). One side must be adapted; no adapter exists. The working consumer, `user-service/presenceclient/client.go:36`, uses the real `PresenceQueryBatchPeer` subject — the presence service's contract is fine, notification-worker's is invented.
+- `high` — batch limits disagree across the same boundary: `PRESENCE_BATCH_SIZE` defaults to 512 (`notification-worker/main.go:63`) while `PRESENCE_BATCH_MAX` defaults to 100 (`user-presence-service/main.go:40`), and the handler hard-rejects over-limit batches (`user-presence-service/handler.go:167-169`). Even after fixing subject and payload, the default wiring would `BadRequest` every full chunk.
+- `high` — `sync/` dials Valkey with a raw `redis.NewClusterClient` and re-declares `VALKEY_ADDRS`/`VALKEY_PASSWORD` itself (`user-presence-service/sync/main.go:31-32,89-91`) instead of `valkeyutil.Config` + `ConnectRaw` as the parent does (`main.go:53,120`). This is the exact duplication `presencestore/store.go:185-190` documents as ended, and it violates the CLAUDE.md shared-knob rule; the sync's Valkey traffic is also uninstrumented and carries a different dial policy against the same keyspace.
+- `medium` — `sync/` re-declares `PRESENCE_STALE_THRESHOLD` and `PRESENCE_CONNS_TTL` with its own `envDefault`s (`sync/main.go:23-24`), duplicating `PresenceConfig` (`main.go:42,44`). Both values are fed into the *same* `computeLua` stale-pruning path via `NewValkeyStoreFromClient`; a drift between the two deployments makes `SetExternal` prune connections on a different threshold than the owning service.
+- `medium` — a second, independently deployed binary lives inside another service's directory (`user-presence-service/sync/main.go` with its own `deploy/Dockerfile`, `azure-pipelines.yml`, `docker-compose.yml`), contrary to "new service at repo root, not under `cmd/` or `internal/`". Correspondingly `presencestore/` is code shared by two binaries but sits outside `pkg/`.
+- `medium` — the sweeper is an unpartitioned global scan: `sweepKey` is a single un-hash-tagged ZSET read with `Count: 500` per tick (`presencestore/store.go:18,319-321`) and every replica runs its own ticker (`main.go:180-186`). There is no leader election or sharding, so N replicas repeat identical work and expiry throughput is capped at ~100 accounts/s at the default 5s interval; a burst of disconnects backlogs rather than shedding.
+- `low` — ownership of the Valkey client is split: `main.go:120` dials it, `store.Close()` (`presencestore/store.go:341`) closes it at `main.go:204`. A failure between dial and store construction leaks the client.
+- `low` — `PRESENCE_HEARTBEAT_INTERVAL` is parsed and validated (`main.go:41,92`) but never read by any code in the service — a dead operator knob that implies a server-side cadence the service does not enforce.
+- `nitpick` — `NewNATSPeerPresenceClient` is exported but returns the unexported `*natsPeerPresenceClient` (`peer_client.go:32`); callers outside `package main` cannot name the type. Either unexport the constructor or export the struct.
+
+### Recommendations
+- `high` — Pick one presence RPC contract. Preferred: delete `subject.PresenceSnapshot`, `model.PresenceSnapshotRequest/Reply/Presence` and point `bulkPresenceSource` at `subject.PresenceQueryBatchPeer` with `PresenceQuery`/`PresenceQueryResponse`, mapping `PresenceState.Status` into the gate. Add a cross-service test that asserts the subject the worker requests equals a subject the presence service registers.
+- `high` — Align the batch limits after the contract fix: default `PRESENCE_BATCH_SIZE` to the presence service's `BATCH_MAX`, or have `newBulkPresenceSource` clamp; a silent `BadRequest` per chunk is invisible fail-open.
+- `high` — Replace `sync/`'s raw cluster dial with `valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))` and mount `valkeyutil.Config` as a named field; delete the two re-declared `VALKEY_*` tags.
+- `medium` — Move the stale/conns-TTL knobs into `presencestore` as a single `TTLConfig`-style struct owned there, mounted by both binaries with `envPrefix:"PRESENCE_"`, so the value feeding `computeLua` has one declaration.
+- `medium` — Promote the sync to a repo-root service (`user-presence-sync/`) and move `presencestore` to `pkg/presencestore`, restoring the flat-service + shared-code-in-`pkg` convention.
+- `medium` — Shard or lease the sweep: hash-tag per-shard sweep ZSETs (`presence:sweep:{n}`) with replicas claiming shards, or run the sweeper as a singleton; and make the `500` cap a config knob with a "sweep backlog" metric.
+- `low` — Either wire `PRESENCE_HEARTBEAT_INTERVAL` into a server-side expectation or delete it, and have `main` own the Valkey client's `Close` rather than `store.Close()`.
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is 45.1% — below the 60% line this audit scores as `critical` (CLAUDE.md §4 requires 80%) — and the gap is not cosmetic: the entire Valkey presence store, the sweeper loop and every handler store-error branch are unexercised by the default test gate.
+
+### Findings
+- `critical` — Coverage is **45.1% (459 statements)**, far under the CLAUDE.md §4 80% minimum and under 60%. — `user-presence-service/` (per `coverage_by_service.txt`)
+- `high` — The whole `presencestore` package scores **0.0% on all 20 functions** in the default profile: it has no untagged tests at all, so every assertion about the Lua precedence ladder, CAS status write and sweep index lives behind `//go:build integration` and is invisible to `make test`. — `user-presence-service/presencestore/store.go:36-341`, `presencestore/integration_test.go:1`
+  This is the service's entire business logic; a Lua edit can ship green through the normal gate.
+- `high` — `Sweeper.Run` is **0%**: the ticker loop, the `ctx.Done()` return and the `slog.Error` branch on a failed tick are never run. `main.go` blocks shutdown on `sweepDone` closing when `Run` returns, so the graceful-shutdown contract is asserted nowhere. — `user-presence-service/sweeper.go:27`, `main.go:193-201`
+- `medium` — No test drives a **store error** through `Hello`, `Ping`, `Activity` or `Bye` (each ~88.9%; `Bye` 77.8%, also missing its unchanged/no-publish path). Only `QueryBatchPeer`/`QueryBatch` cover store failure. — `handler.go:48`, `handler.go:66`, `handler.go:82`, `handler.go:98`
+- `medium` — `peer_client_test.go` is an **untagged unit test that boots a real NATS server on a TCP port**, contrary to "Never connect to real databases, NATS, or external services in unit tests". It also makes `make test` port- and timing-dependent (`TestNATSPeerPresenceClient_Timeout`). — `user-presence-service/peer_client_test.go:193-206`
+- `medium` — Integration tests use `testutil.StartValkeyCluster` (per-test container) rather than the mandated default `SharedValkeyCluster` + `t.Cleanup(FlushValkey)`. The in-code justification is self-refuting — it invokes the "store wrapper that calls `Close()`" exception and then states the test never calls `Close()`. 14 call sites spin 14 clusters. — `integration_test.go:18-26`, `presencestore/integration_test.go:19-23`, `sync/valkey_integration_test.go:16,33`
+- `medium` — `presencestore.PublishState`'s two failure branches (marshal error, publish error) are never exercised: the shared `capturedPublish.fn` unconditionally returns `nil`, so no test asserts a publish failure is swallowed rather than propagated. — `presencestore/store.go:39-45`, `handler_test.go:25-29`
+- `low` — `Store.ActiveAccounts` and `Store.Close` have **no test at any build tag** — `ActiveAccounts` is the sole entry point of the Teams sync, mocked in `sync/` but never run against Valkey. — `presencestore/store.go:279`, `presencestore/store.go:341`
+- `low` — `main()` is a single 140-line untestable function (0%); the fail-fast config validation at `main.go:77-106` (six positivity checks, read-preference parse) has no test, unlike `sync/main.go` which at least extracts `run() error`. — `main.go:69-106`
+- `low` — `BatchGet`'s duplicate-account dedupe and `run`'s arity guard are unreachable from any existing test. — `presencestore/store.go:295-297`, `presencestore/store.go:206`
+- `low` — Staleness is waited on with `time.Sleep(40ms)` against a 10ms threshold; wall-clock-dependent and flaky under a loaded CI runner. — `integration_test.go:115`
+- `nitpick` — `NewSweeper(store, ..., 0)` in three tests passes a zero interval; safe only because `Run` is never called, and it will panic `time.NewTicker` the moment someone adds the missing `Run` test. — `sweeper_test.go:20,38,48`
+
+Positives worth preserving: `sync/reconcile.go` is at **100%** with genuine degradation coverage (Graph lookup failure, id-map persist failure, per-account apply failure, index add/remove failure); `handler_test.go` covers the federation fan-out fallbacks (peer error → offline, unknown account → offline, local-store error fatal) properly, table-driven where it matters, with `NewMockPresenceStore` and an injected publish func rather than a live NATS conn.
+
+### Recommendations
+- `high` — Add an untagged `presencestore/store_test.go` using a `redis` test double or `miniredis`-equivalent for the pure Go paths (`run` arity guard, `reschedule` ZREM-vs-ZADD selection, `BatchGet` dedupe/`redis.Nil`/error, `PublishState` marshal+publish failures), so the package is not 0% under `make test`.
+- `high` — Test `Sweeper.Run`: a real ticker at a small interval plus a cancelled context, asserting `Run` returns and that a `tick` error does not terminate the loop. This is the graceful-shutdown precondition `main.go` relies on.
+- `medium` — Extend the four fire-and-forget handler tests into one table-driven suite covering `{store error, changed=false, empty account, empty connID}` per handler — closes `Bye` (77.8%) and the `88.9%` trio.
+- `medium` — Convert `peer_client_test.go` to an interface-level test (or move it under `//go:build integration` with `testutil.NATS(t)`); no untagged test should bind a port.
+- `medium` — Switch all four Valkey integration files to `testutil.SharedValkeyCluster(t)` + `t.Cleanup(func(){ testutil.FlushValkey(t) })` and delete the self-refuting justification comment.
+- `medium` — Add integration coverage for `ActiveAccounts` (write two connections, drop one, assert sweep-index membership) — it is the sync's contract with the store.
+- `low` — Extract `main()` into `run(cfg Config) error` + a `validate(cfg) error`, mirroring `sync/main.go`, and table-test the six positivity checks and the read-preference parse.
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Small, well-factored files with unusually good WHY-comments, but the `sync/` sibling binary silently re-declares shared Valkey/presence knobs that the main binary owns, one comment asserts a compile-time guarantee that does not exist, and a config knob is parsed and validated but never read.
+
+### Findings
+- `high` — `sync/` re-declares `VALKEY_ADDRS`/`VALKEY_PASSWORD` and dials `redis.NewClusterClient` directly instead of mounting `valkeyutil.Config` + `ConnectRaw` — `user-presence-service/sync/main.go:30-31`, `sync/main.go:91-93`. CLAUDE.md §6 Configuration forbids re-declaring a shared knob per service; `presencestore/store.go:185-190` states the rule explicitly ("exactly the duplication valkeyutil exists to end") and the sibling binary in the same directory breaks it. It also loses the instrumentation the main binary deliberately buys.
+- `high` — `PRESENCE_STALE_THRESHOLD` / `PRESENCE_CONNS_TTL` defaults are literally duplicated in two files (`main.go:42,44` = 45s/5m; `sync/main.go:24-25` = 45s/5m) and `sync/deploy/docker-compose.yml:8-23` sets neither, while `deploy/docker-compose.yml:20,23` parameterizes both. Both processes run the same `computeLua` against the same keys, so an operator override moves the service's staleness window and leaves the sync pruning on 45s. Two writers, one keyspace, two sources of truth.
+- `medium` — `PresenceConfig.HeartbeatInterval` is parsed, range-validated and logged, but no code path reads it — `main.go:41`, `:92`, `:99`; the only other reference is `deploy/docker-compose.yml:19`. Dead config that reads as an enforced knob.
+- `medium` — the compile-time assertion comment is false: "including SetExternal" — `main.go:65-67`, but `PresenceStore` (`store.go:470-498`) declares no `SetExternal`. `presencestore.Store.SetExternal` (`presencestore/store.go:267`) is constrained only by `sync`'s own `externalApplier` (`sync/store.go:183-185`). The comment claims a guard that the type system is not providing.
+- `medium` — `Hello`/`Ping`/`Activity`/`Bye` are four copies of one 13-line shape (validate account+connID → store call → publish-on-change) — `handler.go:250-313`. Adding a fifth connection event means a fifth copy; a fix to the validation branch means four edits.
+- `medium` — the same store is integration-tested twice, from two packages, with two near-identical harnesses: `newTestStore` (`integration_test.go:22-26`, package `main`) and `newStore` (`presencestore/integration_test.go:19-23`, package `presencestore`), and the precedence ladder is asserted in both (`integration_test.go:129` vs `presencestore/integration_test.go:47-82`). The root file tests a type its package does not own.
+- `medium` — status strings are duplicated as Lua literals with no compile-time link to `model.PresenceStatus` — `presencestore/store.go:95-109` (`'offline'`, `'away'`, `'in-call'`, `'busy'`, `'appear_offline'`) vs `pkg/model/presence.go:22-28`. Renaming a constant compiles clean and breaks the ladder at runtime; only the integration suite catches it.
+- `low` — the store computes its own wall clock (`presencestore/store.go:231`) while `Handler` and `Sweeper` both take an injectable `now` (`handler.go:234`, `sweeper.go:516`). The inconsistent seam is why every staleness/deadline behavior needs a container.
+- `low` — vendor leakage into the generic store: the key is `:azure` (`presencestore/store.go:23`) and `KEYS[4]=azure` (`:67,:88-92`) while the API surface calls it "external" (`SetExternal`, `externalScript`). Two names for one concept.
+- `low` — magic `Count: 500` sweep page size, unnamed and un-tunable, beside a configurable `BatchMax` — `presencestore/store.go:320`.
+- `nitpick` — `run` silently swallows reply-shape mismatches via unchecked assertions (`changed, _ := res[0].(int64)`) — `presencestore/store.go:209-211`; arity is checked at `:206` but element types degrade to zero values.
+- `nitpick` — "per review" comments reference an out-of-band conversation a future reader cannot retrieve — `presencestore/store.go:50-51`, `:259`.
+- `nitpick` — redundant per-iteration loop-var copy `site, accounts := site, accounts` (`handler.go:397`); dead since Go 1.22, and `go.mod` is on 1.25.13.
+
+### Recommendations
+- `high` — Replace `sync`'s ad-hoc Valkey config+dial with `Valkey valkeyutil.Config` + `valkeyutil.ConnectRaw`, and move `StaleThreshold`/`ConnsTTL` into a single exported `presencestore.Config` (env tags declared once) that both binaries mount, per CLAUDE.md §6.
+- `high` — Set `PRESENCE_STALE_THRESHOLD` and `PRESENCE_CONNS_TTL` in `sync/deploy/docker-compose.yml` from the same `${...}` vars as the service compose, so local dev cannot diverge.
+- `medium` — Delete `HeartbeatInterval` (and its validation branch), or wire it into a served client-config reply; do not keep a knob that only exists to be validated.
+- `medium` — Either add `SetExternal(ctx, account, status, ttl)` to `PresenceStore` or correct the `main.go:65-67` comment. Prefer correcting the comment: `sync` legitimately owns that seam via `externalApplier`.
+- `medium` — Collapse the four connection handlers into one generic helper over a `connRequest` interface (`ConnectionID() string`, already satisfied by `model.Hello/Ping/Activity/ByeRequest`), leaving four two-line registrations; convert `handler_test.go:64-153` to one table.
+- `medium` — Move all store integration tests into `presencestore/` (they already have a `TestMain` there) and delete `user-presence-service/integration_test.go`, keeping `handler_test.go` mock-only.
+- `low` — Generate the Lua status literals from `pkg/model` constants (`fmt.Sprintf` the script tail once at init), or add a unit test asserting each literal equals its `model.PresenceStatus`.
+
+---
+
+## 6. Integration — 3 / 5
+
+Subject builders, `pkg/model` contracts and publish-site `Timestamp` discipline are clean and fully documented, but the bulk-presence RPC that `notification-worker`'s push gate depends on has no responder anywhere in the repo.
+
+**`docs/client-api.md` obligation: BINDS.** Six client-facing handlers on `chat.user.…` are registered (`user-presence-service/main.go:172-178`): four `RegisterVoid` events (`hello`/`ping`/`activity`/`bye`), `chat.user.{account}.request.presence.{siteID}.manual.set`, and `chat.user.presence.{siteID}.query.batch`. All six are documented in §8.1–8.7 (`docs/client-api.md:7170-7355`) with field tables, examples and error cases, and both derived views carry them without drift (`docs/client-api/request-reply.md:2396-2406`, `docs/client-api/events.md:1055-1089`). `chat.server.request.presence.{siteID}.query.batch` is correctly marked server-internal. No documentation gap found.
+
+### Findings
+- `high` — the bulk presence snapshot RPC `chat.presence.{siteID}.request.snapshot` has **no registered responder** in the repo; `user-presence-service` serves only `query.batch` / `query.batch.peer` — `pkg/subject/subject.go:1730`, `user-presence-service/main.go:172-178`
+  `notification-worker`'s push gate requests that subject (`notification-worker/presence.go:61`) and `docs/notification-worker-downstream-contracts.md:318` names this service as its owner. Every request would time out and fail open, so busy/in-call DND suppression never engages. Masked today only by `PRESENCE_RPC_ENABLED` defaulting to false (`notification-worker/main.go:65`); `docs/client-api.md:4874` already promises the behavior "once presence reporting is enabled server-side".
+- `high` — the two sides speak different shapes, so the gate cannot be enabled by config alone: the worker expects `PresenceSnapshotReply{presences: map[account]{aggregatedStatus}}` while the service returns `PresenceQueryResponse{states: []PresenceState}` — `pkg/model/presence.go:8-16` vs `pkg/model/presence.go:91-95`, `user-presence-service/handler.go:340-363`
+  Two parallel bulk-presence contracts in one `pkg/model` file with no adapter between them.
+- `medium` — chunk-size mismatch on that same contract: the worker chunks at 512 accounts (`notification-worker/main.go:63`) while the presence service rejects anything over `PRESENCE_BATCH_MAX=100` (`user-presence-service/main.go:40`, `handler.go:345,375`)
+  Whoever implements the snapshot handler with the existing guard gets `bad_request` on every default-sized chunk.
+- `medium` — `PRESENCE_STALE_THRESHOLD` / `PRESENCE_CONNS_TTL` are declared twice with duplicated `envDefault`s — `user-presence-service/main.go:42,44` and `user-presence-service/sync/main.go:24-25` — instead of once in `presencestore`, which owns the thing they configure (CLAUDE.md §6 "shared knob declared once")
+  Both processes construct a store over the *same* Valkey keyspace (`main.go:125`, `sync/main.go:99`); a drift makes the sweeper and the Teams sync disagree on which connections are live, i.e. flapping effective status — the same failure class the `ROOM_KEY_RETIRED_TTL` rule exists to prevent.
+- `medium` — the sync daemon dials Valkey from its own ad-hoc `VALKEY_ADDRS`/`VALKEY_PASSWORD` fields rather than the shared `valkeyutil.Config` — `user-presence-service/sync/main.go:30-31` vs `user-presence-service/main.go:53`
+  It therefore also skips the instrumented dial the main service deliberately chose (`main.go:116-120`), so half the writes to the presence keyspace are unobservable.
+- `low` — `PRESENCE_HEARTBEAT_INTERVAL` is parsed and validated but never read by any code path — `user-presence-service/main.go:41,92,99`
+  It reads as a server tunable; the cadence is purely client-side. `deploy/docker-compose.yml:19` sets `15s` while `docs/client-api.md:7229` documents ~30 s, so the knob actively misleads.
+- `nitpick` — `QueryBatch` swallows peer errors inside the errgroup and returns `nil` (`handler.go:413-419`), which is correct per §8.6, but the degraded accounts are indistinguishable from genuinely offline ones in the reply; no per-site partial-failure signal reaches the client.
+
+**Verified clean:** every subject comes from a `pkg/subject` builder (no raw `fmt.Sprintf` in the service); `Timestamp` is set at the publish site via `now.UTC().UnixMilli()` for both the handler and sweeper paths (`presencestore/store.go:36-43`); no JetStream, OUTBOX/INBOX, Cassandra bucketing or `idgen` surface applies, and the service correctly ships no `bootstrap.go`.
+
+### Recommendations
+- `high` — Implement `handler.Snapshot` on `subject.PresenceSnapshot(cfg.SiteID)` returning `model.PresenceSnapshotReply`, reusing `store.BatchGet` + the `QueryBatch` fan-out; or delete `subject.PresenceSnapshot` and `PresenceSnapshotRequest/Reply` and repoint `notification-worker` at `PresenceQueryBatch`. Two contracts for one need is the defect.
+- `high` — Whichever direction is chosen, reconcile `PRESENCE_BATCH_SIZE` (512) with `PRESENCE_BATCH_MAX` (100) and add a subject-level contract test that a request built by the worker is accepted by the presence handler.
+- `medium` — Move `StaleThreshold`/`ConnsTTL` into a `presencestore.TTLConfig` mounted as a named field by both `main.go` and `sync/main.go`, so the two processes cannot diverge.
+- `medium` — Switch `sync/main.go` to `valkeyutil.Config` + `valkeyutil.ConnectRaw(..., Instrumented(sdk))` to match the main service's dial policy.
+- `low` — Delete `PRESENCE_HEARTBEAT_INTERVAL` (and its compose entry), or document it as client-advisory and publish it to clients.
+- `low` — Add `aggregatedStatus`-vs-`status` naming to the §8 docs if the snapshot RPC ships, so the two presence views stay traceable to one another.
+
+---
+
+## 7. Performance — 3 / 5
+
+Careful hot-path design (single-round-trip Lua recompute, deduped pipelined `BatchGet`, precise Mongo projection via `pkg/userstore`, clean sweeper termination), undermined by a single-slot global sweep index that every heartbeat writes to and a sweep loop that cannot drain a mass-disconnect.
+
+### Findings
+- `high` — The sweep index is one untagged cluster key, `presence:sweep`, while all per-account keys are hash-tagged `{account}` — `presencestore/store.go:18,20-23`. Every mutating op ends in `reschedule` → `ZAdd`/`ZRem` on that one key (`presencestore/store.go:216-227,236`), so 100% of heartbeat, hello, activity and bye traffic for the whole site funnels into one Valkey master's single-threaded loop, on a ZSET whose cardinality is the online-user count. This is the service's scaling ceiling and it is invisible until the shard saturates.
+
+- `high` — Every presence mutation costs two sequential Valkey round trips, not one: the script, then a separate `reschedule` — `presencestore/store.go:230-240`. The split is forced by the finding above (the script's KEYS are all one slot, `sweepKey` is another), so fixing the hot key also halves heartbeat RTT. Note `pingScript` was already optimised to skip a status GET (`presencestore/store.go:120-138`) — a saving an order of magnitude smaller than the extra RTT it sits beside.
+
+- `high` — `Sweep` drains at most 500 accounts per tick, each at 2 serial round trips, with no inner loop until the backlog clears — `presencestore/store.go:317-339`. At the default `SWEEP_INTERVAL=5s` that is 100 stale accounts/sec. A gateway pod restart dropping 50k connections leaves those users displayed as online for ~8 minutes, long past `STALE_THRESHOLD=45s`.
+
+- `medium` — Every replica runs its own sweeper over the same global ZSET (`main.go:180-186`, `sweeper.go:29-40`) with no lease or atomic claim, so Valkey sweep load is N× replicas. Correctness survives only because the Lua CAS at `presencestore/store.go:111-116` makes exactly one replica see `changed=1`; the wasted round trips land on the already-hot sweep slot.
+
+- `medium` — A single unreachable peer site adds `PEER_TIMEOUT` (3s) to *every* `QueryBatch`, because `errgroup.Wait` blocks on the slowest branch — `handler.go:212-224`, `peer_client.go:47-58`. There is no breaker, no negative cache and no failure memory, so the notification hot path pays the full timeout on each request for the whole outage, and `slog.Error` at `handler.go:218` amplifies it into one log line per request per failed peer.
+
+- `medium` — No admission cap on the fire-and-forget routes (`main.go:158-170`); `natsrouter` spawns one goroutine per message unbounded (`pkg/natsrouter/doc.go:6-11`). The trade-off is deliberate and well-argued in the comment (a saturated semaphore silently drops presence updates), but the consequence is unbudgeted: a reconnect storm creates unbounded goroutines each contending for the Valkey pool. Goroutines do terminate — `HandlerTimeout(10s)` bounds them — so this is a saturation risk, not a leak.
+
+- `low` — `statusKey` is `SET` with no expiry and never deleted, including on the offline transition (`presencestore/store.go:111-116`); the account is `ZREM`'d from the sweep index at the same moment (`presencestore/store.go:216-221`), so nothing ever revisits the key. Bounded by lifetime user population rather than truly unbounded, but never reclaimed.
+
+- `low` — `Store.mutate` hardcodes `time.Now()` (`presencestore/store.go:231`) while `Handler` and `Sweeper` both carry an injectable `now` (`handler.go:29`, `sweeper.go:23`). That asymmetry is why the integration test resorts to `time.Sleep(40ms)` to age a connection (`integration_test.go:115`).
+
+- `nitpick` — `PRESENCE_HEARTBEAT_INTERVAL` is parsed and validated (`main.go:41,92`) but read nowhere; operators tuning it change nothing.
+
+### Recommendations
+- `high` — Shard the sweep index into `presence:sweep:{N}` buckets (hash the account), one ZSET per slot. This removes the single hot node and lets each bucket's ZADD be folded into the account's own script only if co-located; otherwise keep the two-RTT shape but spread it.
+- `high` — Make `Sweep` loop until the due-set is empty (or a per-tick deadline), and pipeline the per-account script + reschedule pairs instead of issuing them serially.
+- `medium` — Add a per-peer circuit breaker (or short negative cache) around `natsPeerPresenceClient.QueryPeer` so a down site fails fast instead of costing 3s per query, and rate-limit the peer-failure log.
+- `medium` — Take a sweep lease (e.g. `SET NX PX` on a lock key) so one replica sweeps per interval.
+- `low` — Expire `statusKey` with a TTL comfortably above `CONNS_TTL`, refreshed on each write.
+- `low` — Inject `now` into `presencestore.Store` and delete the `time.Sleep` in `integration_test.go:115`.
+- `nitpick` — Remove `HEARTBEAT_INTERVAL` or wire it (e.g. derive `STALE_THRESHOLD` from it) so the two cannot be configured into disagreement.
+
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dim | Evidence | Why |
+|---|-----|--------|-----|----------|-----|
+| 1 | `high` | **Decide the fate of the presence-snapshot contract, all three layers of it** | Architecture / Integration | **no responder** for `chat.presence.{siteID}.request.snapshot` anywhere in the repo (`pkg/subject/subject.go:1729-1732`, called at `notification-worker/presence.go:61`; this service registers only `PresenceQueryBatch`/`Peer` at `main.go:172-178`); **incompatible payloads** — `PresenceSnapshotReply{presences: map[account]{aggregatedStatus}}` vs `PresenceQueryResponse{states: []PresenceState}` (`pkg/model/presence.go:8-16` vs `:91-95`); **5× chunk mismatch** — worker chunks at 512 (`notification-worker/main.go:63`), service rejects over 100 (`main.go:40`, `handler.go:167-169`) | Three of six experts found this independently. The gate is dead-by-flag (`PRESENCE_RPC_ENABLED` default false), so nothing is broken today — but **flipping one boolean would fail three separate ways**, and the flag reads as a feature toggle rather than an unimplemented contract. Either implement the responder and adapter and align the batch limits, or delete the subject, the model types and the worker's call site. The working consumer (`user-service/presenceclient/client.go:36`) shows what the real contract looks like. |
+| 2 | `high` | **Hash-tag or shard the sweep index** | Performance | `presence:sweep` is one untagged cluster key while every per-account key is `{account}`-tagged (`presencestore/store.go:18`, `:20-23`); every mutation ends in `reschedule` → `ZAdd`/`ZRem` on it (`:216-227`, `:236`) | **All presence write traffic for the whole site funnels into one Valkey master's single-threaded loop**, on a ZSET whose cardinality is the online-user count. This is the service's scaling ceiling and it is invisible until reached. Fixing it also fixes item 3: the two-round-trip split exists **only** because the script's keys and `sweepKey` are in different slots. |
+| 3 | `high` | **Collapse the mutation path back to one round trip** | Performance | script then separate `reschedule` at `presencestore/store.go:230-240` | Every presence mutation costs **two sequential Valkey round trips**. Worth noting the proportion: `pingScript` was already optimised to skip a status GET (`:120-138`) — **a saving an order of magnitude smaller than the extra RTT sitting beside it.** Item 2 is the precondition. |
+| 4 | `high` | **Let `Sweep` drain its backlog** | Performance | at most 500 accounts/tick, 2 serial round trips each, no inner loop (`presencestore/store.go:317-339`); `SWEEP_INTERVAL=5s` | **100 stale accounts per second.** A gateway pod restart dropping 50k connections leaves those users displayed as online for ~8 minutes — against a 45-second staleness threshold that the product promises. Loop until the backlog clears or a budget expires. |
+| 5 | `high` | **Make `sync/` use `valkeyutil` and the shared knobs** | Arch / Quality / Maint / Integration | re-declares `VALKEY_ADDRS`/`VALKEY_PASSWORD` at `sync/main.go:30-31` and hand-dials at `:91-93`, vs `valkeyutil.Config` + `ConnectRaw` at `main.go:53`, `:120`; **`presencestore/store.go:185-190` documents this exact duplication as ended**; `PRESENCE_STALE_THRESHOLD`/`PRESENCE_CONNS_TTL` duplicated at `main.go:42`, `:44` and `sync/main.go:24-25`, with `sync/deploy/docker-compose.yml:8-23` setting neither | Found by four of six experts. **Two writers, one keyspace, two sources of truth**: both processes feed the same `computeLua` stale-pruning path, so an operator override moves the service's staleness window and **leaves the sync pruning on the old one.** The sync's Valkey traffic is also uninstrumented and carries a different dial policy against the same keyspace. |
+| 6 | `critical` | **Raise coverage from 45.1% — starting with `presencestore` and the sweeper** | Test coverage | below the 60% line; **all 20 `presencestore` functions at 0.0% in the default profile** (`presencestore/store.go:36-341`) because every assertion lives behind `//go:build integration`; `Sweeper.Run` 0% (`sweeper.go:27`) although `main.go:193-201` blocks shutdown on it | The Lua precedence ladder, the CAS status write and the sweep index — **the entire correctness core** — are invisible to `make test`, and the graceful-shutdown contract is asserted nowhere. This is also why items 2–4 could regress silently. |
+| 7 | `medium` | **Add a breaker or negative cache for unreachable peers** | Performance | `errgroup.Wait` blocks on the slowest branch at `handler.go:212-224`, `peer_client.go:47-58`; error logged per request at `handler.go:218` | **A single unreachable peer site adds the full 3 s `PEER_TIMEOUT` to *every* `QueryBatch`** for the duration of the outage — on the notification hot path — with no failure memory, and one log line per request per failed peer amplifying it. |
+| 8 | `medium` | **Give the sweeper a lease** | Performance / Arch | every replica runs its own ticker over the same global ZSET (`main.go:180-186`, `sweeper.go:29-40`), no leader election or sharding | N replicas repeat identical work, and **the wasted round trips land on the already-hot sweep slot** from item 2. Correctness survives only because the Lua CAS at `presencestore/store.go:111-116` lets exactly one replica see `changed=1` — a subtle guarantee to be relying on for load control. |
+| 9 | `medium` | **Bind the Lua status literals to `model.PresenceStatus`** | Maintainability | `'offline'`, `'away'`, `'in-call'`, `'busy'`, `'appear_offline'` as Lua literals at `presencestore/store.go:95-109` vs the constants at `pkg/model/presence.go:22-28` | **Renaming a constant compiles clean and breaks the precedence ladder at runtime** — and, per item 6, only the integration suite would catch it. Interpolate the constants into the script rather than restating them. |
+| 10 | `medium` | **Fix the false compile-time-guarantee comment, and the dead knob** | Maintainability | `main.go:65-67` claims the assertion covers "including SetExternal", but `PresenceStore` (`store.go:470-498`) **declares no `SetExternal`** — it is constrained only by `sync`'s own `externalApplier` (`sync/store.go:183-185`); `PresenceConfig.HeartbeatInterval` parsed, range-validated and logged at `main.go:41`, `:92`, `:99`, **read by nothing** | A comment that claims a guard the type system is not providing is worse than no comment, and a validated-but-unread knob reads as enforced when it is inert. |
+
+**Also worth doing.** Compare Redis sentinel errors with `errors.Is` rather than `==`/`!=` (`presencestore/store.go:300`, `:305`), and stop swallowing the type assertions in the Lua reply decoder. Fix the untagged unit test that **boots a real NATS server on a TCP port** (`peer_client_test.go:193-206`) — it violates CLAUDE.md's no-real-infra rule and makes `make test` port- and timing-dependent. Switch the integration suite to the mandated `SharedValkeyCluster` + `t.Cleanup(FlushValkey)`: the in-code justification for `StartValkeyCluster` **invokes the "wrapper that calls `Close()`" exception and then states the test never calls `Close()`**, and 14 call sites currently spin 14 clusters. Drive a store error through `Hello`/`Ping`/`Activity`/`Bye` (only the query paths cover it), and exercise `PublishState`'s two failure branches — the shared capture unconditionally returns nil, so **nothing asserts a publish failure is swallowed rather than propagated.** Collapse `Hello`/`Ping`/`Activity`/`Bye`, four copies of one 13-line shape (`handler.go:250-313`). And decide where the second binary and `presencestore/` belong: a separately deployed binary living inside another service's directory, with shared code outside `pkg/`, is the structural reason item 5 was easy to get wrong.

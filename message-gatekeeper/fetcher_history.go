@@ -74,7 +74,7 @@ func (f *historyParentFetcher) FetchQuotedParent(
 ) (*cassandra.QuotedParentMessage, error) {
 	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
-		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
+		return nil, errcode.MarshalFailed("GetMessageByID request", err)
 	}
 
 	subj := subject.MsgGet(account, roomID, siteID)

@@ -50,3 +50,60 @@ rules:
           - pattern: $CC.BackOff = $X
           - pattern: |
               jetstream.ConsumerConfig{..., BackOff: $X, ...}
+
+  - id: jsretry-marshal-failure-must-be-permanent
+    languages: [go]
+    severity: ERROR
+    message: >
+      Marshaling a fixed struct is deterministic — a value the encoder rejects (a
+      NaN float, an erroring custom marshaler) is rejected identically on every
+      redelivery. A bare wrapped error here makes jsretry Nak a message that can
+      never succeed: it burns the consumer's MaxDeliver budget and then drops the
+      message silently, or head-of-line blocks a MaxDeliver=-1 lane forever. Use
+      errcode.MarshalFailed("<what>", err). If this marshal is NOT on a path that
+      reaches a jsretry settle point (best-effort fan-out, a fail-open read),
+      suppress with `// nosemgrep: jsretry-marshal-failure-must-be-permanent --
+      <reason>` on the line above.
+    paths:
+      # Only packages whose marshal errors can reach a jsretry settle decision.
+      # A worker added later must be added here too.
+      include:
+        - "broadcast-worker/"
+        - "bot-message-worker/"
+        - "hr-sync-worker/"
+        - "inbox-worker/"
+        - "message-gatekeeper/"
+        - "message-worker/"
+        - "notification-worker/"
+        - "outbox-worker/"
+        - "pkg/outbox/"
+        - "push-notification-service/"
+        - "room-worker/"
+      exclude:
+        - "**/*_test.go"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $D, $E := $P.Marshal(...)
+              if $E != nil {
+                ...
+                return fmt.Errorf(...)
+              }
+          - pattern: |
+              $D, $E := $P.Marshal(...)
+              if $E != nil {
+                ...
+                return $X, fmt.Errorf(...)
+              }
+          - pattern: |
+              $D, $E = $P.Marshal(...)
+              if $E != nil {
+                ...
+                return fmt.Errorf(...)
+              }
+          - pattern: |
+              $D, $E = $P.Marshal(...)
+              if $E != nil {
+                ...
+                return $X, fmt.Errorf(...)
+              }

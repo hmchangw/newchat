@@ -476,12 +476,13 @@ func (mr *MockRoomStoreMockRecorder) ListRoomBotApps(ctx, roomID any) *gomock.Ca
 }
 
 // ListRoomMembers mocks base method.
-func (m *MockRoomStore) ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error) {
+func (m *MockRoomStore) ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListRoomMembers", ctx, roomID, limit, offset, enrich)
 	ret0, _ := ret[0].([]model.RoomMember)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // ListRoomMembers indicates an expected call of ListRoomMembers.

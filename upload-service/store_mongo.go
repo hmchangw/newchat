@@ -12,50 +12,32 @@ import (
 
 type mongoStore struct {
 	subscriptions *mongo.Collection
-	rooms         *mongo.Collection
 	uploads       *mongo.Collection
 }
 
-// NewMongoStore returns a Store backed by the subscriptions, rooms, and uploads collections.
+// NewMongoStore returns a Store backed by the subscriptions and uploads collections.
 func NewMongoStore(db *mongo.Database) *mongoStore {
 	return &mongoStore{
 		subscriptions: db.Collection("subscriptions"),
-		rooms:         db.Collection("rooms"),
 		uploads:       db.Collection("uploads"),
 	}
 }
 
-func (s *mongoStore) IsMember(ctx context.Context, roomID, account string) (bool, error) {
-	// Existence check — a projected FindOne is lighter than CountDocuments
-	// (which runs an aggregation) and stops at the first index match.
-	err := s.subscriptions.FindOne(ctx,
-		bson.M{"roomId": roomID, "u.account": account},
-		options.FindOne().SetProjection(bson.M{"_id": 1}),
-	).Err()
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return false, nil
-		}
-		return false, fmt.Errorf("find subscription for room %s: %w", roomID, err)
-	}
-	return true, nil
-}
-
-func (s *mongoStore) GetRoomSiteID(ctx context.Context, roomID string) (string, error) {
-	var room struct {
+func (s *mongoStore) MemberSiteID(ctx context.Context, roomID, account string) (string, bool, error) {
+	var sub struct {
 		SiteID string `bson:"siteId"`
 	}
-	err := s.rooms.FindOne(ctx,
-		bson.M{"_id": roomID},
-		options.FindOne().SetProjection(bson.M{"siteId": 1}),
-	).Decode(&room)
+	err := s.subscriptions.FindOne(ctx,
+		bson.M{"roomId": roomID, "u.account": account},
+		options.FindOne().SetProjection(bson.M{"siteId": 1, "_id": 0}),
+	).Decode(&sub)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return "", fmt.Errorf("get room %s: %w", roomID, ErrRoomNotFound)
+			return "", false, nil
 		}
-		return "", fmt.Errorf("get room %s: %w", roomID, err)
+		return "", false, fmt.Errorf("find subscription for room %s: %w", roomID, err)
 	}
-	return room.SiteID, nil
+	return sub.SiteID, true, nil
 }
 
 func (s *mongoStore) GetUpload(ctx context.Context, fileID string) (*upload, error) {

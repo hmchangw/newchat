@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -53,7 +54,7 @@ func TestRegister_Success(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.msg.test",
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.msg.test", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hello " + req.Name + " from " + c.Param("account")}, nil
 		})
@@ -74,7 +75,7 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 	metrics := natsmetrics.NewFromProvider(mp).Publisher("site-a")
 	r := New(nc, "room-service", WithMetrics(metrics))
 
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.member.list",
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.member.list", natsmetrics.MethodListMembers,
 		func(_ *Context, req testReq) (*testResp, error) {
 			if req.Name == "deny" {
 				return nil, errcode.Forbidden("not allowed")
@@ -87,9 +88,12 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 		require.NoError(t, err)
 	}
 
-	wantResults := map[string]int64{"success": 1, "forbidden": 1, "bad_request": 1}
+	// A handled request is one rpc.server.call.duration observation. Per
+	// semconv the successful call carries no error.type at all, so it is keyed
+	// here by its absence rather than by a "success" label value.
+	wantResults := map[string]uint64{"": 1, "forbidden": 1, "bad_request": 1}
 	var (
-		results       map[string]int64
+		results       map[string]uint64
 		replyAttempts int64
 	)
 	require.Eventually(t, func() bool {
@@ -97,26 +101,28 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 		if err := reader.Collect(context.Background(), &rm); err != nil {
 			return false
 		}
-		results = map[string]int64{}
+		results = map[string]uint64{}
 		replyAttempts = 0
 		for _, scope := range rm.ScopeMetrics {
 			for _, metric := range scope.Metrics {
-				sum, ok := metric.Data.(metricdata.Sum[int64])
-				if !ok {
-					continue
-				}
-				for _, point := range sum.DataPoints {
-					attrs := map[string]string{}
-					for _, kv := range point.Attributes.ToSlice() {
-						attrs[string(kv.Key)] = kv.Value.AsString()
+				switch data := metric.Data.(type) {
+				case metricdata.Histogram[float64]:
+					if metric.Name != "rpc.server.call.duration" {
+						continue
 					}
-					switch metric.Name {
-					case "chat.nats.request.handled":
-						if attrs["operation"] != "member_read" {
+					for _, point := range data.DataPoints {
+						attrs := attrsOfPoint(point.Attributes)
+						if attrs["rpc.method"] != "list_members" || attrs["rpc.system.name"] != "nats" {
 							return false
 						}
-						results[attrs["result"]] += point.Value
-					case "chat.nats.publish.attempts":
+						results[attrs["error.type"]] += point.Count
+					}
+				case metricdata.Sum[int64]:
+					if metric.Name != "chat.nats.publish.failures" {
+						continue
+					}
+					for _, point := range data.DataPoints {
+						attrs := attrsOfPoint(point.Attributes)
 						if attrs["destination_kind"] == "client_response" && attrs["operation"] == "client_response" {
 							replyAttempts += point.Value
 						}
@@ -124,10 +130,12 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 				}
 			}
 		}
-		return assert.ObjectsAreEqual(wantResults, results) && replyAttempts == 3
+		return assert.ObjectsAreEqual(wantResults, results)
 	}, time.Second, 10*time.Millisecond)
 	assert.Equal(t, wantResults, results)
-	assert.Equal(t, int64(3), replyAttempts)
+	// Every reply in this test is delivered, and a successful client response
+	// is no longer counted — the family exists only to attribute failures.
+	assert.Zero(t, replyAttempts, "successful replies must not be recorded")
 }
 
 func TestRegister_ParamsExtraction(t *testing.T) {
@@ -135,7 +143,7 @@ func TestRegister_ParamsExtraction(t *testing.T) {
 	r := New(nc, "test-service")
 
 	var captured Params
-	Register(r, "chat.user.{account}.request.room.{roomID}.{siteID}.msg.test",
+	Register(r, "chat.user.{account}.request.room.{roomID}.{siteID}.msg.test", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			captured = c.Params
 			return &testResp{}, nil
@@ -154,7 +162,7 @@ func TestRegister_InvalidJSON(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			t.Fatal("handler should not be called for invalid JSON")
 			return nil, nil
@@ -172,7 +180,7 @@ func TestRegister_HandlerError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, fmt.Errorf("something broke")
 		})
@@ -190,7 +198,7 @@ func TestRegisterNoBody_Success(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterNoBody(r, "chat.user.{account}.request.rooms.get.{roomID}",
+	RegisterNoBody(r, "chat.user.{account}.request.rooms.get.{roomID}", natsmetrics.MethodGetMessage,
 		func(c *Context) (*testResp, error) {
 			return &testResp{Greeting: "room " + c.Param("roomID")}, nil
 		})
@@ -227,7 +235,7 @@ func TestMiddleware_ExecutionOrder(t *testing.T) {
 	r.Use(makeMiddleware("B"))
 	r.Use(makeMiddleware("C"))
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			order = append(order, "handler")
 			return &testResp{}, nil
@@ -255,7 +263,7 @@ func TestMiddleware_ShortCircuit(t *testing.T) {
 	})
 
 	handlerCalled := false
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			handlerCalled = true
 			return &testResp{}, nil
@@ -274,7 +282,7 @@ func TestRecovery_CatchesPanic(t *testing.T) {
 	r := New(nc, "test-service")
 	r.Use(Recovery())
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			panic("boom!")
 		})
@@ -292,7 +300,7 @@ func TestRegister_NoParams(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "static.subject",
+	Register(r, "static.subject", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hello " + req.Name}, nil
 		})
@@ -310,7 +318,7 @@ func TestRegister_RouteError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, errcode.NotFound("thing not found")
 		})
@@ -329,7 +337,7 @@ func TestRegister_RouteErrorSimple(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, errcode.BadRequest(fmt.Sprintf("user %s not allowed", "alice"))
 		})
@@ -348,7 +356,7 @@ func TestRegister_InternalErrorNotExposed(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, fmt.Errorf("database connection refused")
 		})
@@ -412,7 +420,7 @@ func TestErrcodeError_WrappedInFmtErrorf(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, fmt.Errorf("context: %w", errcode.Forbidden("not allowed"))
 		})
@@ -457,7 +465,7 @@ func TestContext_Abort(t *testing.T) {
 		// Don't call Next
 	})
 
-	Register(r, "test.abort",
+	Register(r, "test.abort", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			handlerCalled = true
 			return &testResp{}, nil
@@ -475,7 +483,7 @@ func TestRequestID_Generated(t *testing.T) {
 	r.Use(RequestID())
 
 	var capturedID string
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			val, ok := c.Get("requestID")
 			require.True(t, ok)
@@ -495,7 +503,7 @@ func TestRequestID_FromHeader(t *testing.T) {
 	r.Use(RequestID())
 
 	var capturedID string
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			capturedID = c.MustGet("requestID").(string)
 			return &testResp{}, nil
@@ -517,7 +525,7 @@ func TestRegisterNoBody_HandlerError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterNoBody(r, "test.{id}",
+	RegisterNoBody(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context) (*testResp, error) {
 			return nil, fmt.Errorf("something failed")
 		})
@@ -534,7 +542,7 @@ func TestRegisterNoBody_RouteError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterNoBody(r, "test.{id}",
+	RegisterNoBody(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context) (*testResp, error) {
 			return nil, errcode.NotFound("item not found")
 		})
@@ -553,7 +561,7 @@ func TestLogging_LogsRequest(t *testing.T) {
 	r := New(nc, "test-service")
 	r.Use(Logging())
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "ok"}, nil
 		})
@@ -571,7 +579,7 @@ func TestRegister_TypedInternalError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, errcode.Internal("failed to load data")
 		})
@@ -773,7 +781,7 @@ func TestRegister_PayloadCapture(t *testing.T) {
 		nc := startTestNATS(t)
 		r := New(nc, "test-service")
 		r.Use(RequestID())
-		Register(r, "test.{id}", func(c *Context, req testReq) (*testResp, error) {
+		Register(r, "test.{id}", natsmetrics.MethodGetMessage, func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hi " + req.Name}, nil
 		})
 
@@ -805,7 +813,7 @@ func TestRegisterOptionalBody_EmptyPayloadYieldsZeroValue(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt.test",
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt.test", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "name=" + req.Name}, nil
 		})
@@ -821,7 +829,7 @@ func TestRegisterOptionalBody_NonEmptyPayloadUnmarshals(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt2.test",
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt2.test", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "name=" + req.Name}, nil
 		})
@@ -838,7 +846,7 @@ func TestRegisterOptionalBody_MalformedPayloadIsBadRequest(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt3.test",
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt3.test", natsmetrics.MethodGetMessage,
 		func(c *Context, req testReq) (*testResp, error) {
 			t.Fatal("handler must not run on malformed payload")
 			return nil, nil
@@ -851,4 +859,108 @@ func TestRegisterOptionalBody_MalformedPayloadIsBadRequest(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(resp.Data, &envelope))
 	assert.Equal(t, "bad_request", envelope.Code)
+}
+
+func attrsOfPoint(set attribute.Set) map[string]string {
+	out := map[string]string{}
+	for _, kv := range set.ToSlice() {
+		out[string(kv.Key)] = kv.Value.String()
+	}
+	return out
+}
+
+func serverCallMethods(t *testing.T, reader *sdkmetric.ManualReader) []string {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var methods []string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok || m.Name != "rpc.server.call.duration" {
+				continue
+			}
+			for _, point := range hist.DataPoints {
+				methods = append(methods, attrsOfPoint(point.Attributes)["rpc.method"])
+			}
+		}
+	}
+	return methods
+}
+
+// RegisterVoid declares no method and must stay out of the RPC family entirely:
+// with no reply subject there is no round trip to time. Asserted after
+// Shutdown, because the handler runs in a goroutine whose `defer r.wg.Done()`
+// unwinds strictly after the record site would have fired — that ordering is
+// the edge this catches, and a recordRPC guard lost in a later refactor would
+// show up here as one sample instead of none.
+func TestRouter_RegisterVoidRecordsNoRPCSample(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "user-presence-service", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+	done := make(chan struct{})
+	RegisterVoid(r, "chat.user.{account}.event.presence.site-a.ping",
+		func(_ *Context, _ testReq) error { close(done); return nil })
+
+	require.NoError(t, nc.PublishMsg(context.Background(), &nats.Msg{
+		Subject: "chat.user.alice.event.presence.site-a.ping",
+		Data:    []byte(`{"name":"ok"}`),
+	}))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("void handler never ran")
+	}
+	require.NoError(t, r.Shutdown(context.Background()))
+	assert.Empty(t, serverCallMethods(t, reader))
+}
+
+// A value outside the vocabulary is only reachable by writing RPCMethod("…")
+// deliberately, bypassing the constants. It must not panic: metrics are opt-in,
+// so a telemetry defect should never take a chat service down. It degrades to
+// semconv's _OTHER, which is bounded and alertable.
+func TestRegisterDegradesUndeclaredMethodToOther(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "test", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+
+	require.NotPanics(t, func() {
+		Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open",
+			natsmetrics.RPCMethod("not_registered"),
+			func(_ *Context, _ testReq) (*testResp, error) { return &testResp{Greeting: "ok"}, nil })
+	})
+
+	_, err := nc.Request(context.Background(),
+		"chat.user.alice.request.room.room-a.site-a.open", []byte(`{"name":"ok"}`), 2*time.Second)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]string{"_OTHER"}, serverCallMethods(t, reader))
+	}, time.Second, 10*time.Millisecond)
+}
+
+// MethodNone is the RegisterVoid marker and the zero RPCMethod, so a
+// request/reply registration can pass it — the compiler requires the argument
+// but cannot require a meaningful one. It must still record: the route has a
+// reply and a real round trip, so losing its duration series would be a silent
+// telemetry hole. Bounded to _OTHER, the same as any out-of-vocabulary value.
+func TestRegisterWithMethodNoneStillRecords(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "test", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open", natsmetrics.MethodNone,
+		func(_ *Context, _ testReq) (*testResp, error) { return &testResp{Greeting: "ok"}, nil })
+
+	_, err := nc.Request(context.Background(),
+		"chat.user.alice.request.room.room-a.site-a.open", []byte(`{"name":"ok"}`), 2*time.Second)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]string{"_OTHER"}, serverCallMethods(t, reader))
+	}, time.Second, 10*time.Millisecond)
 }

@@ -34,7 +34,9 @@ func handlerEngine(t *testing.T, lister subscriptionLister, account string) *gin
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set(ctxAccountKey, account) })
-	r.GET("/api/v1/subscriptions", newHandler(lister, testDefaultLimit, testMaxLimit).ListSubscriptions)
+	h := newHandler(lister, testDefaultLimit, testMaxLimit)
+	r.GET("/api/v1/subscriptions", h.ListSubscriptions)
+	r.GET("/api/v1/subscriptions/count", h.CountSubscriptions)
 	return r
 }
 
@@ -235,4 +237,32 @@ func gunzipBody(t *testing.T, w *httptest.ResponseRecorder) string {
 	out, err := io.ReadAll(zr)
 	require.NoError(t, err)
 	return string(out)
+}
+
+// TestHandler_CountBindsUnread pins the unread query → CountRequest mapping
+// (omitted stays nil, distinct from false) and delegates to the shared count.
+func TestHandler_CountBindsUnread(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  models.CountRequest
+	}{
+		{"unread true", "unread=true", models.CountRequest{Unread: boolPtr(true)}},
+		{"unread false", "unread=false", models.CountRequest{Unread: boolPtr(false)}},
+		{"unread omitted stays nil", "", models.CountRequest{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lister := NewMocksubscriptionLister(gomock.NewController(t))
+			lister.EXPECT().
+				CountSubscriptionsFor(gomock.Any(), "alice", tc.want).
+				Return(&models.CountResponse{Count: 3}, nil)
+
+			w := httptest.NewRecorder()
+			handlerEngine(t, lister, "alice").ServeHTTP(w,
+				httptest.NewRequest(http.MethodGet, "/api/v1/subscriptions/count?"+tc.query, nil))
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.JSONEq(t, `{"count":3}`, w.Body.String())
+		})
+	}
 }

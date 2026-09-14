@@ -1,3 +1,49 @@
+// Package userstore resolves user records by id or account, behind a four-layer
+// stack that keeps resolving them while MongoDB is unreachable.
+//
+// # The layers, outermost first
+//
+//   - Cache (cache.go) — a pod-local LRU+TTL, USER_CACHE_SIZE / USER_CACHE_TTL.
+//   - l2Store (l2.go) — the shared Valkey tier, USER_L2_TTL, with refresh-on-read
+//     and a TTL slide that keeps an entry alive when the source is down.
+//   - breakerStore (breaker.go) — fences the Mongo read so a stalled server costs
+//     one server-selection timeout rather than one per lookup.
+//   - mongoStore (this file) — the source of truth.
+//
+// Resilient (l2.go) composes all four, and that is how callers should build it.
+// The order is load-bearing rather than stylistic: the breaker must be INNERMOST
+// and the caches outermost, so an open breaker still serves both cache tiers —
+// during the outage that opened it they are the only tiers that can answer.
+// Hand-wiring compiles just as well in the wrong order and silently loses outage
+// survival, which is why the order lives in one constructor.
+//
+// # Why this package is not shaped like the other L2 tiers
+//
+// The six sibling tiers cache one value under one key and most are built on
+// valkeyutil.Tier. This one is a store with three decorators, for two reasons
+// that tier cannot express:
+//
+//   - A user is reachable through TWO key spaces, "user:id:{id}" and
+//     "user:acct:{account}", each holding the whole record. Aliasing one to the
+//     other would cost a second round trip, and in cluster mode the two keys hash
+//     to different slots anyway.
+//   - FindUsersByAccounts resolves a whole mention set in one MGET, folding the
+//     stale entries into the batch the misses are already fetching. Tier is
+//     single-key, single-value and has no bulk path.
+//
+// # Invalidation
+//
+// Bust (l2.go) drops both key spaces, and NOTHING CALLS IT YET: a rename is
+// reconciled only by the TTL and by refresh-on-read. That is a known gap rather
+// than a wired invariant, and it matters more than a stale name usually would,
+// because message-worker persists the display name onto the immutable Cassandra
+// message row. hr-sync-worker is the sole writer of engName/chineseName and so
+// the single choke point that should call it. The pod-local L1 has no
+// cross-process invalidation at all; its staleness is bounded by USER_CACHE_TTL.
+//
+// Not-found is never cached, in either tier: ErrUserNotFound is an answer from a
+// healthy database, so it neither fills a cache entry nor counts against the
+// breaker (see BreakerFailure).
 package userstore
 
 import (

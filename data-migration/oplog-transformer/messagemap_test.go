@@ -13,6 +13,8 @@ import (
 func loadDoc(t *testing.T, name string) []byte {
 	t.Helper()
 	// #nosec G304 -- test fixture read from the fixed local testdata/ dir with caller-supplied constant names
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(filepath.Join("testdata", name))
 	require.NoError(t, err)
 	return b

@@ -13,6 +13,15 @@ services:
       - GRAPH_CLIENT_ID=${GRAPH_CLIENT_ID}
       - GRAPH_CLIENT_SECRET=${GRAPH_CLIENT_SECRET}
       - GRAPH_TLS_INSECURE_SKIP_VERIFY=${GRAPH_TLS_INSECURE_SKIP_VERIFY:-false}
+      # Graph egress proxy (optional). GRAPH_PROXY_URL takes precedence over the
+      # standard proxy env vars below; the credentials are for a proxy that
+      # authenticates: HTTP Basic for http/https, the RFC 1929
+      # sub-negotiation for socks5.
+      - GRAPH_PROXY_URL=${GRAPH_PROXY_URL:-}
+      - GRAPH_PROXY_USERNAME=${GRAPH_PROXY_USERNAME:-}
+      - GRAPH_PROXY_PASSWORD=${GRAPH_PROXY_PASSWORD:-}
+      # Fallback: for Graph too when GRAPH_PROXY_URL is empty, and for any
+      # non-Graph egress either way.
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - NO_PROXY=${NO_PROXY:-}

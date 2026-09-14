@@ -726,6 +726,21 @@ const (
 	MessageTypeTeamsMeetStarted = "teams_meet_started"
 )
 
+// Legacy member types exist only on migrated Cassandra rows — nothing in this repo
+// produces them, and the plural shape is not the tell (MessageTypeMembersAdded is
+// current). history-service rewrites them to their modern equivalents on the wire, so
+// clients never see them; these constants are for classifying the STORED type.
+//
+// A replay tool that ever republished historical rows onto MESSAGES-CANONICAL would
+// put them on the live paths too, where they would classify as system messages —
+// correct, but worth knowing before building one.
+const (
+	// MessageTypeLegacyMembersRemoved is the migrated form of MessageTypeMemberRemoved.
+	MessageTypeLegacyMembersRemoved = "members_removed"
+	// MessageTypeLegacyMembersLeft is the migrated form of MessageTypeMemberLeft.
+	MessageTypeLegacyMembersLeft = "members_left"
+)
+
 // systemMessageTypes is the set of system/event Message.Type values (not user content),
 // for fast membership checks. Keep in sync with the MessageType* constants above.
 var systemMessageTypes = map[string]struct{}{
@@ -736,6 +751,11 @@ var systemMessageTypes = map[string]struct{}{
 	MessageTypeRoomRenamed:      {},
 	MessageTypeRoomRestricted:   {},
 	MessageTypeTeamsMeetStarted: {},
+	// Legacy types belong here too: the readers that classify by stored type are the
+	// preview walk and the search backfill, and both must treat a migrated membership
+	// notice as the system message it is.
+	MessageTypeLegacyMembersRemoved: {},
+	MessageTypeLegacyMembersLeft:    {},
 }
 
 // IsSystemMessageType reports whether t is a known system-message type. A normal

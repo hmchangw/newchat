@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/roomsubcache"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 // fakeRecorder counts cache outcomes for assertions.
@@ -22,13 +23,13 @@ func (r *fakeRecorder) Error(context.Context) { r.errs++ }
 
 func TestValkeyCache_Get_RecordsHit(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
 	require.NoError(t, cache.Set(ctx, "room1", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
-	_, err := cache.Get(ctx, "room1")
-	require.NoError(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.True(t, ok)
 
 	assert.Equal(t, 1, rec.hits)
 	assert.Equal(t, 0, rec.misses)
@@ -37,12 +38,12 @@ func TestValkeyCache_Get_RecordsHit(t *testing.T) {
 
 func TestValkeyCache_Get_RecordsMiss(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "absent")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "absent")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 1, rec.misses)
@@ -51,13 +52,13 @@ func TestValkeyCache_Get_RecordsMiss(t *testing.T) {
 
 func TestValkeyCache_Get_RecordsErrorOnTransportFailure(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.getErr = errors.New("valkey down")
+	client := valkeyfake.New()
+	client.FailGet(errors.New("valkey down"))
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "room1")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 0, rec.misses)
@@ -66,14 +67,14 @@ func TestValkeyCache_Get_RecordsErrorOnTransportFailure(t *testing.T) {
 
 func TestValkeyCache_Get_RecordsErrorOnOversizeBlob(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.store["room:v3:room1:subs"] = strings.Repeat("x", 200)
+	client := valkeyfake.New()
+	client.Seed("room:v4:room1:subs", strings.Repeat("x", 200), time.Minute)
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client,
 		roomsubcache.WithMaxValueBytes(100), roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "room1")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 0, rec.misses)
@@ -82,13 +83,13 @@ func TestValkeyCache_Get_RecordsErrorOnOversizeBlob(t *testing.T) {
 
 func TestValkeyCache_Get_RecordsErrorOnMalformedJSON(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.store["room:v3:room1:subs"] = "{not json"
+	client := valkeyfake.New()
+	client.Seed("room:v4:room1:subs", "{not json", time.Minute)
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "room1")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 0, rec.misses)
@@ -99,7 +100,7 @@ func TestValkeyCache_Get_RecordsErrorOnMalformedJSON(t *testing.T) {
 // recording against the package-default recorder.
 func TestValkeyCache_Get_NoMetricsOption_NoPanic(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 
 	assert.NotPanics(t, func() {

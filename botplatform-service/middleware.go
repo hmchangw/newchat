@@ -38,9 +38,17 @@ func accessLogMiddleware() gin.HandlerFunc {
 	}
 }
 
+// sessionFinder is the only thing requireBot needs from a session store. It is
+// narrowed to one method so the middleware can be handed the cached,
+// breaker-fenced lookup rather than a full session.Store, which in practice
+// meant the raw Mongo one.
+type sessionFinder interface {
+	FindSessionByHash(ctx context.Context, hash string) (*session.Session, error)
+}
+
 // requireBot enforces plain-bearer identity via x-user-id + x-auth-token; the three token-shape
 // failures collapse to one 401/invalid_token, but a distinct 403/not_a_bot tells wrong-audience from wrong-token.
-func requireBot(sessions session.Store) gin.HandlerFunc {
+func requireBot(sessions sessionFinder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 
@@ -52,7 +60,7 @@ func requireBot(sessions session.Store) gin.HandlerFunc {
 			return
 		}
 
-		sess, err := sessions.FindByHash(ctx, sessiontoken.Hash(token))
+		sess, err := sessions.FindSessionByHash(ctx, sessiontoken.Hash(token))
 		switch {
 		case errors.Is(err, session.ErrNotFound):
 			errhttp.Write(ctx, c, errBotInvalidToken)

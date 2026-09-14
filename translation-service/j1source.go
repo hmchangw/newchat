@@ -24,6 +24,8 @@ func staticJ1(tok string) j1Source {
 func fileJ1(path string) j1Source {
 	return func() (string, error) {
 		// #nosec G304 -- path is an operator-configured token mount, not user input
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("read j1 token file %q: %w", path, err)

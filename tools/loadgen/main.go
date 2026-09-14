@@ -31,9 +31,11 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/poolartifact"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	soakrun "github.com/hmchangw/chat/tools/loadgen/internal/soak/run"
 )
 
 // dialNATS opens a NATS connection for the load generator. The tool emits no
@@ -86,6 +88,12 @@ type config struct {
 	// when it is empty.
 	AuthURL string `env:"AUTH_URL" envDefault:""`
 
+	// Pool is the object store the clientsim pool artifact is published to.
+	// Declared in poolartifact because clientsim reads the same knobs: two
+	// copies of the tags is how the two ends end up on different buckets.
+	// Unset is valid — only pool-export requires it.
+	Pool poolartifact.StoreConfig
+
 	Bottleneck bottleneckConfig `envPrefix:"BOTTLENECK_"`
 	Soak       soakConfig       `envPrefix:"SOAK_"`
 }
@@ -93,7 +101,7 @@ type config struct {
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown|soak|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|pool-export|run|teardown|soak|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
 		os.Exit(2)
 	}
 	cfg, err := env.ParseAs[config]()
@@ -126,6 +134,8 @@ func dispatch(ctx context.Context, cfg *config) int {
 		return runTeardown(ctx, cfg, os.Args[2:])
 	case "soak":
 		return runSoak(ctx, cfg, os.Args[2:])
+	case "pool-export":
+		return runPoolExport(ctx, cfg, os.Args[2:])
 	case "members-sustained":
 		return runMembersSustained(ctx, cfg, os.Args[2:])
 	case "members-capacity":
@@ -152,7 +162,7 @@ func dispatch(ctx context.Context, cfg *config) int {
 
 func runSeed(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("seed", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|members|history|read-receipt|room-read|thread-read|botroom|soak")
+	workload := fs.String("workload", "messages", "messages|thread|members|history|read-receipt|room-read|thread-read|subscription-list|botroom|soak")
 	preset := fs.String("preset", "", "preset name")
 	seed := fs.Int64("seed", 42, "RNG seed")
 	readRatio := fs.Float64("read-ratio", 0.7, "read-receipt only: fraction of each room's subscribers to mark as readers")
@@ -163,9 +173,17 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	// every send. Zero (default) means use the preset's built-in count.
 	users := fs.Int("users", 0, "override preset.Users for the messages workload (0 = use preset default; must match `loadgen daily --users` if you use both)")
 	parentsPerRoom := fs.Int("parents-per-room", 0, "thread workload: parent messages seeded per room (0 = default 8; must match the runtime default used by `loadgen max-rps`)")
+	poolOut := fs.String("pool-out", "", "write the clientsim pool artifact (ordered accounts) to this path; supported by --workload=messages and soak only; empty = skip")
 	_ = fs.Parse(args)
+	// Rejected rather than ignored: a seed that silently skips the artifact
+	// leaves clientsim with no pool file, and the failure surfaces one step
+	// later with nothing pointing back at the flag.
+	if *poolOut != "" && *workload != "messages" && *workload != "soak" {
+		fmt.Fprintf(os.Stderr, "--pool-out is supported only with --workload=messages or soak, got %q\n", *workload)
+		return 2
+	}
 	if *workload == "soak" {
-		return runSoakPhase(ctx, cfg, soakPhaseSeed, soakOptions{Seed: *seed, PageLimit: soakDefaultPageLimit})
+		return runSoakPhase(ctx, cfg, soakPhaseSeed, soakOptions{Seed: *seed, PageLimit: soakDefaultPageLimit, PoolOut: *poolOut})
 	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -173,7 +191,7 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	}
 	switch *workload {
 	case "messages":
-		return runSeedMessages(ctx, cfg, *preset, *seed, *users)
+		return runSeedMessages(ctx, cfg, *preset, *seed, *users, *poolOut)
 	case "thread":
 		return runSeedThread(ctx, cfg, *preset, *seed, *users, *parentsPerRoom)
 	case "members":
@@ -184,6 +202,8 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 		return runSeedReadReceipt(ctx, cfg, *preset, *seed, *readRatio)
 	case "room-read":
 		return runSeedRoomRead(ctx, cfg, *preset, *seed)
+	case "subscription-list":
+		return runSeedSubscriptionList(ctx, cfg, *preset, *seed)
 	case "thread-read":
 		return runSeedHistory(ctx, cfg, *preset, *seed)
 	case "botroom":
@@ -194,7 +214,7 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	}
 }
 
-func runSeedMessages(ctx context.Context, cfg *config, preset string, seed int64, usersOverride int) int {
+func runSeedMessages(ctx context.Context, cfg *config, preset string, seed int64, usersOverride int, poolOut string) int {
 	p, ok := BuiltinPreset(preset)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown preset: %s\n", preset)
@@ -216,6 +236,15 @@ func runSeedMessages(ctx context.Context, cfg *config, preset string, seed int64
 	if err := SeedRoomKeys(ctx, keyStore, fixtures.RoomKeys); err != nil {
 		slog.Error("seed room keys", "error", err)
 		return 1
+	}
+	if poolOut != "" {
+		runID := fmt.Sprintf("seed-%s-%d", p.Name, seed)
+		digest := seedConfigDigest(p.Name, seed, p.Users)
+		if err := writePoolArtifact(poolOut, runID, cfg.SiteID, digest, fixtures.Users); err != nil {
+			slog.Error("write pool artifact", "error", err, "path", poolOut)
+			return 1
+		}
+		slog.Info("pool artifact written", "path", poolOut, "accounts", len(fixtures.Users))
 	}
 	slog.Info("seed complete (messages)",
 		"preset", p.Name,
@@ -313,7 +342,7 @@ func runTeardownBotRoom(ctx context.Context, cfg *config, preset string, seed in
 
 func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("teardown", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|members|history|room-read|thread-read|botroom|soak")
+	workload := fs.String("workload", "messages", "messages|thread|members|history|room-read|thread-read|subscription-list|botroom|soak")
 	preset := fs.String("preset", "", "preset name (required to identify which room keys to delete)")
 	seed := fs.Int64("seed", 42, "RNG seed (must match the seed used at seed time)")
 	_ = fs.Parse(args)
@@ -335,6 +364,8 @@ func runTeardown(ctx context.Context, cfg *config, args []string) int {
 		return runTeardownHistory(ctx, cfg, *preset, *seed)
 	case "room-read":
 		return runTeardownRoomRead(ctx, cfg, *preset, *seed)
+	case "subscription-list":
+		return runTeardownSubscriptionList(ctx, cfg, *preset)
 	case "thread-read":
 		return runTeardownHistory(ctx, cfg, *preset, *seed)
 	case "botroom":
@@ -390,7 +421,7 @@ func runSoakPhase(
 	}
 	logSoakAssumptions(&cfg.Soak)
 	if phase == soakPhaseSeed {
-		return runSoakSeed(ctx, cfg, opts.Seed)
+		return runSoakSeed(ctx, cfg, opts.Seed, opts.PoolOut)
 	}
 	return runSoakWorkload(ctx, cfg, opts)
 }
@@ -402,7 +433,7 @@ func runSoakTeardown(ctx context.Context, cfg *config) int {
 	}
 	defer cleanup()
 
-	var cleaner soakCassandraCleaner
+	var cleaner soakrun.CassandraCleaner
 	if cfg.Soak.CassandraCleanup == "truncate" {
 		if cfg.CassandraHosts == "" {
 			slog.Error("CASSANDRA_HOSTS is required when SOAK_CASSANDRA_CLEANUP=truncate")
@@ -414,14 +445,14 @@ func runSoakTeardown(ctx context.Context, cfg *config) int {
 			return 1
 		}
 		defer cassutil.Close(session)
-		cleaner = &gocqlSoakCleaner{session: session, keyspace: cfg.CassandraKeyspace}
+		cleaner = soakrun.NewCassandraCleaner(session, cfg.CassandraKeyspace)
 	}
 
-	found, err := teardownSoak(
+	found, err := soakrun.Teardown(
 		ctx,
-		&mongoSoakStore{db: db},
+		soakrun.NewMongo(db),
 		cleaner,
-		&cfg.Soak,
+		soakTeardownConfigFrom(&cfg.Soak),
 		cfg.CassandraKeyspace,
 	)
 	if err != nil {
@@ -502,6 +533,52 @@ func runTeardownRoomRead(ctx context.Context, cfg *config, preset string, seed i
 		return 1
 	}
 	slog.Info("teardown complete (room-read)", "preset", preset)
+	return 0
+}
+
+func runSeedSubscriptionList(ctx context.Context, cfg *config, preset string, seed int64) int {
+	p, ok := BuiltinPreset(preset)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown preset: %s\n", preset)
+		return 2
+	}
+	db, _, cleanup, err := connectStores(ctx, cfg)
+	if err != nil {
+		return 1
+	}
+	defer cleanup()
+	fixtures := BuildSubscriptionListFixtures(&p, seed, cfg.SiteID, time.Now().UTC())
+	// No SeedRoomKeys: the list path never decrypts, so no room keys are written.
+	if err := Seed(ctx, db, &fixtures); err != nil {
+		slog.Error("seed", "error", err)
+		return 1
+	}
+	slog.Info("seed complete (subscription-list)",
+		"preset", p.Name,
+		"users", len(fixtures.Users),
+		"rooms", len(fixtures.Rooms),
+		"subs", len(fixtures.Subscriptions))
+	return 0
+}
+
+// No seed parameter: teardown drops the seeded collections wholesale, so unlike
+// the seeding side it does not depend on which fixtures were generated.
+func runTeardownSubscriptionList(ctx context.Context, cfg *config, preset string) int {
+	if _, ok := BuiltinPreset(preset); !ok {
+		fmt.Fprintf(os.Stderr, "unknown preset: %s\n", preset)
+		return 2
+	}
+	db, _, cleanup, err := connectStores(ctx, cfg)
+	if err != nil {
+		return 1
+	}
+	defer cleanup()
+	// No TeardownRoomKeys: runSeedSubscriptionList writes no room keys.
+	if err := Teardown(ctx, db); err != nil {
+		slog.Error("teardown", "error", err)
+		return 1
+	}
+	slog.Info("teardown complete (subscription-list)", "preset", preset)
 	return 0
 }
 
@@ -739,6 +816,8 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 }
 
 func writeMembersCSV(path string, c *MemberCollector) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)
@@ -1286,6 +1365,8 @@ func lastToken(subj string) string {
 }
 
 func writeCSVFile(path string, c *Collector) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)

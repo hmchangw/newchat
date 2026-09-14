@@ -12,6 +12,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+
+	"github.com/hmchangw/chat/pkg/flushloop"
 )
 
 const (
@@ -117,26 +119,19 @@ func (w *watcher) run(ctx context.Context) error {
 	flushCtx, stopFlush := context.WithCancel(ctx)
 	var flushWG sync.WaitGroup
 	flushWG.Go(func() {
-		t := time.NewTicker(w.checkpointMaxAge)
-		defer t.Stop()
-		for {
-			select {
-			case <-flushCtx.Done():
-				return
-			case <-t.C:
-				if err := cps.flush(flushCtx); err != nil {
-					w.log.Error("periodic checkpoint save failed", "error", err)
-				}
-			}
-		}
+		flushloop.Run(flushCtx, flushloop.Config{
+			Name:     "checkpoint save",
+			Interval: w.checkpointMaxAge,
+			Logger:   w.log,
+		}, cps.flush)
 	})
-	// Stop the flusher and persist the final frontier on any exit path.
+	// Persist the final frontier on any exit path, not just cancellation of the
+	// caller's ctx: stopFlush is what ends the loop, and flushloop's own final
+	// flush is what lands the frontier (bounded by its default timeout, where
+	// this was previously unbounded), so Wait returns only once it has.
 	defer func() {
 		stopFlush()
 		flushWG.Wait()
-		if err := cps.flush(context.WithoutCancel(ctx)); err != nil {
-			w.log.Error("final checkpoint save failed", "error", err)
-		}
 	}()
 
 	sinceSave := 0

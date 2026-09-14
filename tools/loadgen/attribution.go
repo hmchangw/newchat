@@ -118,6 +118,8 @@ func (e *bottleneckEngine) Diagnose(ctx context.Context, trip, pass *rpsStepResu
 	}
 	evals := make([]stageEval, 0, len(graph))
 	sawData := false
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, st := range graph {
 		ev := stageEval{st: st, backingUp: stageBackingUp(&st, trip, th)}
 		if ev.backingUp {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
@@ -2036,4 +2037,47 @@ type deliveryCountMsg struct {
 
 func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
+}
+
+func TestHandle_Attachment_PushPayloadFileInfo(t *testing.T) {
+	imgBlob, err := json.Marshal(cassandra.Attachment{
+		ID: "dl2qge1k5g7h", Title: "a_001.jpeg", Type: "file", FileType: "image/jpeg",
+	})
+	require.NoError(t, err)
+	fileBlob, err := json.Marshal(cassandra.Attachment{
+		ID: "f2", Title: "doc.pdf", Type: "file", FileType: "application/pdf",
+	})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name         string
+		attachments  [][]byte
+		wantFile     string
+		wantFileType string
+	}{
+		{"no attachment", nil, "", ""},
+		{"single image", [][]byte{imgBlob}, "a_001.jpeg", "image/jpeg"},
+		{"first attachment wins", [][]byte{imgBlob, fileBlob}, "a_001.jpeg", "image/jpeg"},
+		{"malformed first blob skipped", [][]byte{[]byte("{not json"), fileBlob}, "doc.pdf", "application/pdf"},
+		{"all blobs malformed", [][]byte{[]byte("{not json")}, "", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &stubMembers{out: map[string][]roomsubcache.Member{
+				"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}},
+			}}
+			emit := &recordingEmitter{}
+			h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+			require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+				ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+				Content: "hi", Attachments: tc.attachments, CreatedAt: time.Now(),
+			})))
+
+			require.Len(t, emit.emitted, 1, "one batch for the single non-sender recipient")
+			assert.Equal(t, tc.wantFile, emit.emitted[0].Data.FileName, "fileName")
+			assert.Equal(t, tc.wantFileType, emit.emitted[0].Data.FileType, "fileType")
+		})
+	}
 }

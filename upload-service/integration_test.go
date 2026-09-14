@@ -19,34 +19,47 @@ import (
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-func TestMongoStore_IsMemberAndGetRoomSiteID(t *testing.T) {
+func TestMongoStore_MemberSiteID(t *testing.T) {
 	db := testutil.MongoDB(t, "uploadsvc")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Local room: subscription carries the room's siteId.
 	_, err := db.Collection("subscriptions").InsertOne(ctx, bson.M{
-		"_id": "sub1", "roomId": "r1", "u": bson.M{"_id": "u1", "account": "alice"},
+		"_id": "sub1", "roomId": "r1", "siteId": "site-x", "u": bson.M{"_id": "u1", "account": "alice"},
 	})
 	require.NoError(t, err)
-	_, err = db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "r1", "name": "Room 1", "siteId": "site-x"})
+	// Cross-site room: only the mirrored subscription exists — no rooms doc at all.
+	_, err = db.Collection("subscriptions").InsertOne(ctx, bson.M{
+		"_id": "sub2", "roomId": "r-remote", "siteId": "site-remote", "u": bson.M{"_id": "u1", "account": "alice"},
+	})
+	require.NoError(t, err)
+	// Legacy subscription without siteId decodes to "".
+	_, err = db.Collection("subscriptions").InsertOne(ctx, bson.M{
+		"_id": "sub3", "roomId": "r-legacy", "u": bson.M{"_id": "u1", "account": "alice"},
+	})
 	require.NoError(t, err)
 
 	s := NewMongoStore(db)
 
-	member, err := s.IsMember(ctx, "r1", "alice")
+	siteID, member, err := s.MemberSiteID(ctx, "r1", "alice")
 	require.NoError(t, err)
 	require.True(t, member)
-
-	member, err = s.IsMember(ctx, "r1", "bob")
-	require.NoError(t, err)
-	require.False(t, member)
-
-	siteID, err := s.GetRoomSiteID(ctx, "r1")
-	require.NoError(t, err)
 	require.Equal(t, "site-x", siteID)
 
-	_, err = s.GetRoomSiteID(ctx, "missing")
-	require.True(t, errors.Is(err, ErrRoomNotFound))
+	siteID, member, err = s.MemberSiteID(ctx, "r-remote", "alice")
+	require.NoError(t, err)
+	require.True(t, member)
+	require.Equal(t, "site-remote", siteID)
+
+	siteID, member, err = s.MemberSiteID(ctx, "r-legacy", "alice")
+	require.NoError(t, err)
+	require.True(t, member)
+	require.Empty(t, siteID)
+
+	_, member, err = s.MemberSiteID(ctx, "r1", "bob")
+	require.NoError(t, err)
+	require.False(t, member)
 }
 
 func TestMongoStore_GetUpload(t *testing.T) {

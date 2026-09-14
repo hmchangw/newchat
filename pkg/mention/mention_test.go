@@ -307,3 +307,38 @@ func TestLookupAccountsFromParsed(t *testing.T) {
 		})
 	}
 }
+
+// TestResolve_PartialHitsSurviveLookupError pins the outage contract: a store
+// that answers some accounts and then fails must not lose the ones it answered.
+// pkg/userstore.Cache returns exactly this shape (L1 hits + error) when Mongo is
+// down, and dropping it means a mention that WAS resolvable is persisted as
+// plain text forever.
+func TestResolve_PartialHitsSurviveLookupError(t *testing.T) {
+	partial := []model.User{{ID: "u1", Account: "alice", EngName: "Alice"}}
+	lookup := func(context.Context, []string) ([]model.User, error) {
+		return partial, errors.New("mongo down")
+	}
+
+	got, err := Resolve(context.Background(), "hi @alice and @bob", lookup)
+	require.Error(t, err, "the caller must still learn the lookup degraded")
+	require.NotNil(t, got)
+
+	require.Len(t, got.Participants, 1, "the resolved half must survive")
+	assert.Equal(t, "alice", got.Participants[0].Account)
+	assert.Equal(t, "u1", got.Participants[0].UserID)
+	assert.ElementsMatch(t, []string{"alice", "bob"}, got.Accounts, "raw accounts stay intact")
+}
+
+func TestResolve_MentionAllSurvivesLookupError(t *testing.T) {
+	lookup := func(context.Context, []string) ([]model.User, error) {
+		return nil, errors.New("mongo down")
+	}
+
+	got, err := Resolve(context.Background(), "@all and @alice", lookup)
+	require.Error(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.MentionAll)
+	// @all needs no lookup, so it must resolve even when every user lookup fails.
+	require.Len(t, got.Participants, 1)
+	assert.Equal(t, "all", got.Participants[0].Account)
+}

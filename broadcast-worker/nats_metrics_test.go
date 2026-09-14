@@ -174,3 +174,52 @@ func TestBroadcastMetrics_ThreadViewPublishFailed_NilSafe(t *testing.T) {
 	var m *broadcastMetrics
 	assert.NotPanics(t, func() { m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated) })
 }
+
+// The metrics toggle is only real if a nil *broadcastMetrics survives
+// NewHandler. It did not: the constructor could not tell "explicitly disabled"
+// from "option not supplied", so it rebuilt the instruments against the global
+// meter and O11Y_ENABLED=false still paid for domain metrics on every publish.
+//
+// Wrapping is asserted alongside the field because the recorder reads the
+// context for its labels before the nil guard inside Delivery returns, so a
+// disabled handler that still wraps has not stopped doing the work.
+func TestNewHandler_MetricsToggle(t *testing.T) {
+	tests := []struct {
+		name        string
+		options     []handlerOption
+		wantMetrics bool
+	}{
+		{
+			name:        "explicitly disabled stays disabled",
+			options:     []handlerOption{withBroadcastMetrics(nil)},
+			wantMetrics: false,
+		},
+		{
+			name:        "option omitted keeps the default instruments",
+			options:     nil,
+			wantMetrics: true,
+		},
+		{
+			name: "explicit metrics are used as given",
+			options: []handlerOption{
+				withBroadcastMetrics(newBroadcastMetrics(sdkmetric.NewMeterProvider().Meter("test"))),
+			},
+			wantMetrics: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pub := &mockPublisher{}
+			h := NewHandler(nil, nil, pub, nil, nil, false, subject.RouteGlobal, tt.options...)
+
+			if !tt.wantMetrics {
+				assert.Nil(t, h.metrics, "disabled metrics must not be rebuilt")
+				assert.Same(t, pub, h.pub, "a disabled handler must not wrap the publisher in a recorder")
+				return
+			}
+			require.NotNil(t, h.metrics)
+			assert.IsType(t, &broadcastMetricPublisher{}, h.pub, "an enabled handler must record deliveries")
+		})
+	}
+}

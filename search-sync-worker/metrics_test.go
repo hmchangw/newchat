@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/mock/gomock"
@@ -343,4 +344,154 @@ func TestESParentResolver_RecordsResolveDuration(t *testing.T) {
 	}
 	assert.Equal(t, uint64(1), byOutcome["resolved"])
 	assert.Equal(t, uint64(1), byOutcome["unresolved"])
+}
+
+// recordItemFailure runs once per failed bulk action, and the loop that calls
+// it is bounded by the actions in one message — a Teams migration batch
+// contributes one action per migrated message, so a single message can drive
+// the whole inner loop. The path is only "cold" while Elasticsearch is
+// healthy; under the 429 backpressure these metrics exist to diagnose it runs
+// once per rejected action, up to BULK_BATCH_SIZE (500) per flush. Building an
+// attribute set per call there adds allocation pressure to a system already
+// under strain, so the labels are precomputed like every other recorder in
+// this file.
+func TestRecordItemFailure_DoesNotAllocate(t *testing.T) {
+	m := newSyncMetrics(noop.NewMeterProvider().Meter("test"))
+	c := m.forCollection("messages")
+	ctx := context.Background()
+
+	// One allocation is the floor for any OTel recording call: Add(ctx, n, opt)
+	// is variadic, so the option slice is built per call. The contract is parity
+	// with a peer that already precomputes its labels, not zero.
+	peer := testing.AllocsPerRun(200, func() {
+		c.recordMessages(ctx, dispAckedSuccess, 1)
+	})
+	allocs := testing.AllocsPerRun(200, func() {
+		c.recordItemFailure(ctx, "index", 429)
+	})
+
+	assert.Equal(t, peer, allocs,
+		"recording a bulk item failure must cost the same as a precomputed peer")
+}
+
+// Every action/status pair the classifier can produce must resolve to a
+// precomputed set, including statuses that bucket into a class.
+func TestRecordItemFailure_CoversEveryBoundedLabel(t *testing.T) {
+	m := newSyncMetrics(noop.NewMeterProvider().Meter("test"))
+	c := m.forCollection("messages")
+	ctx := context.Background()
+
+	for _, action := range []string{"index", "delete", "update"} {
+		for _, status := range []int{400, 404, 409, 413, 429, 500, 503, 418, 599, 0} {
+			require.NotPanics(t, func() { c.recordItemFailure(ctx, action, status) })
+		}
+	}
+	// An action outside the closed set still records, without minting a label.
+	require.NotPanics(t, func() { c.recordItemFailure(ctx, "not-an-action", 429) })
+}
+
+// An action outside allBulkActions must keep the status. bulkStatusLabel is
+// total, so the status is bounded whatever the action was, and it is the half
+// that carries the diagnosis — the fallback used to drop it, blinding the 429
+// signal for any action added to searchengine but not to allBulkActions.
+func TestRecordItemFailure_UnknownActionKeepsStatus(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	c := newSyncMetrics(mp.Meter("search-sync-test")).forCollection("messages")
+
+	c.recordItemFailure(context.Background(), "an-action-nobody-registered", 429)
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var got map[string]string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "search_sync_worker_bulk_item_failures" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			require.Len(t, sum.DataPoints, 1)
+			got = map[string]string{}
+			for _, kv := range sum.DataPoints[0].Attributes.ToSlice() {
+				got[string(kv.Key)] = kv.Value.String()
+			}
+		}
+	}
+	require.NotNil(t, got, "the failure must still be recorded")
+	assert.Equal(t, "429", got["status"], "the bounded status must survive an unknown action")
+	assert.Equal(t, "messages", got["collection"])
+	assert.NotContains(t, got, "action", "the unvetted action must not become a label")
+}
+
+// The fallback is precomputed like every other recorder here, so it costs the
+// same as the hit path.
+func TestRecordItemFailure_UnknownActionDoesNotAllocateMore(t *testing.T) {
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader()))
+	c := newSyncMetrics(mp.Meter("search-sync-test")).forCollection("messages")
+	ctx := context.Background()
+
+	known := testing.AllocsPerRun(50, func() { c.recordItemFailure(ctx, "index", 429) })
+	unknown := testing.AllocsPerRun(50, func() { c.recordItemFailure(ctx, "unregistered", 429) })
+
+	assert.Equal(t, known, unknown, "the fallback must not cost more than the precomputed hit")
+}
+
+// allBulkStatusLabels and bulkStatusLabel are two hand-maintained halves of one
+// closed set, and recordItemFailure indexes the precomputed maps with what the
+// classifier returns. A status case added to the classifier without a matching
+// entry here is a map miss, and a map miss yields a nil MeasurementOption that
+// the SDK dereferences — a panic on the telemetry path, taking down the bulk
+// flush it was only supposed to measure. Sweep the whole HTTP-status range so
+// the drift fails here instead.
+func TestBulkStatusLabel_OnlyReturnsRegisteredLabels(t *testing.T) {
+	registered := make(map[string]struct{}, len(allBulkStatusLabels))
+	for _, label := range allBulkStatusLabels {
+		registered[label] = struct{}{}
+	}
+	for status := range 1000 {
+		label := bulkStatusLabel(status)
+		assert.Contains(t, registered, label,
+			"bulkStatusLabel(%d) returned %q, which allBulkStatusLabels does not carry — "+
+				"add it there so the attribute sets are precomputed for it", status, label)
+	}
+}
+
+// And the recorder must survive that drift rather than panic on it, the way
+// search-service's durationOptFor already does. A metrics path must never be
+// able to take a request down: dropping a label loses a dimension, a nil option
+// loses the process.
+func TestRecordItemFailure_UnregisteredStatusLabelDoesNotPanic(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	c := newSyncMetrics(mp.Meter("search-sync-test")).forCollection("messages")
+
+	// Stand in for a classifier that gained a status label nobody registered.
+	label := bulkStatusLabel(429)
+	delete(c.statusOnlyOpts, label)
+	for _, action := range allBulkActions {
+		delete(c.itemFailureOpts, itemFailureKey{action, label})
+	}
+
+	require.NotPanics(t, func() { c.recordItemFailure(context.Background(), "index", 429) })
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var got map[string]string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "search_sync_worker_bulk_item_failures" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			require.Len(t, sum.DataPoints, 1)
+			got = map[string]string{}
+			for _, kv := range sum.DataPoints[0].Attributes.ToSlice() {
+				got[string(kv.Key)] = kv.Value.String()
+			}
+		}
+	}
+	require.NotNil(t, got, "the failure must still be counted, even unlabelled")
+	assert.Equal(t, "messages", got["collection"], "the collection survives; it is not the drifting half")
 }

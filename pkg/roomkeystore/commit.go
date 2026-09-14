@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
-
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 )
 
@@ -28,7 +25,7 @@ func CommitRotation(ctx context.Context, store Committer, roomID string, current
 			return &VersionedKeyPair{Version: version, KeyPair: *newPair}, nil
 		}
 		if !errors.Is(err, ErrNoCurrentKey) {
-			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Rotate")))
+			roomkeymetrics.RecordStoreError(ctx, "Rotate")
 			return nil, fmt.Errorf("rotate room key: %w", err)
 		}
 	}
@@ -37,7 +34,7 @@ func CommitRotation(ctx context.Context, store Committer, roomID string, current
 	slog.WarnContext(ctx, "no current room key; adopting a fresh key at v0", "roomID", roomID)
 	committed, err := store.SetIfAbsent(ctx, roomID, *newPair)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "SetIfAbsent")))
+		roomkeymetrics.RecordStoreError(ctx, "SetIfAbsent")
 		return nil, fmt.Errorf("store room key: %w", err)
 	}
 	return committed, nil

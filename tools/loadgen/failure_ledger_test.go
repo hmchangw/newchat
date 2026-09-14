@@ -218,6 +218,7 @@ func TestFailureWAL_ReplayIgnoresTornFinalRecord(t *testing.T) {
 	}))
 	require.NoError(t, wal.Close())
 	// #nosec G304 -- path is the test's own t.TempDir() WAL, reopened to append a torn record.
+	// nosemgrep: gosec.G304-1
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	require.NoError(t, err)
 	_, err = file.WriteString(`{"type":"observed","operationId":"message-1"`)

@@ -2,6 +2,7 @@ package roommetacache_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,39 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 )
+
+// TestMeta_RestrictedJSONRoundTrip pins the L2 (Valkey) wire format for the
+// Restricted/ExternalAccess denorm: set values survive a marshal/unmarshal so
+// GetRoomMeta serves the room's real access state to newSub (#416), and the
+// zero value stays omitempty-absent (an old cached entry decodes to false).
+func TestMeta_RestrictedJSONRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		restricted, externalAccess bool
+	}{
+		{"both false", false, false},
+		{"both true", true, true},
+		{"restricted only", true, false},
+		{"externalAccess only", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := roommetacache.Meta{ID: "r1", SiteID: "site-a", Restricted: tc.restricted, ExternalAccess: tc.externalAccess}
+			b, err := json.Marshal(in)
+			require.NoError(t, err)
+
+			var out roommetacache.Meta
+			require.NoError(t, json.Unmarshal(b, &out))
+			assert.Equal(t, tc.restricted, out.Restricted)
+			assert.Equal(t, tc.externalAccess, out.ExternalAccess)
+		})
+	}
+
+	// A pre-#416 cached entry (no restricted/externalAccess keys) decodes to false.
+	var legacy roommetacache.Meta
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"r1","siteId":"site-a"}`), &legacy))
+	assert.False(t, legacy.Restricted)
+	assert.False(t, legacy.ExternalAccess)
+}
 
 // stubProvider is a minimal MetaProvider used by WrapStore tests.
 type stubProvider struct {

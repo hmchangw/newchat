@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -84,14 +85,16 @@ func run() error {
 	}
 	blobs := newMinioBlobStore(minioClient, cfg.MinioBucket)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
 
 	h := newHandler(store, store, blobs, &cfg)
 
-	router := natsrouter.DefaultGuarded(nc, "media-service", cfg.Guard)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.DefaultGuarded(nc, "media-service", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	registerEmojiNATS(router, h, cfg.SiteID)
 
 	gin.SetMode(gin.ReleaseMode)

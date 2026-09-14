@@ -813,7 +813,7 @@ func TestSubscriptionJSON(t *testing.T) {
 			RoomID:   "r1",
 			RoomType: model.RoomTypeChannel,
 			SiteID:   "site-a",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		}
 
@@ -842,7 +842,7 @@ func TestSubscriptionJSON_AlertAlwaysPresent(t *testing.T) {
 		RoomID:   "r1",
 		RoomType: model.RoomTypeChannel,
 		SiteID:   "site-a",
-		Roles:    []model.Role{model.RoleMember},
+		Roles:    []model.Role{model.RoleUser},
 		JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
@@ -882,7 +882,7 @@ func TestDMSubscriptionJSON_EmbeddedFlattensWithHRInfo(t *testing.T) {
 			User:     model.SubscriptionUser{ID: "u-alice", Account: "alice"},
 			RoomID:   "r-dm-1",
 			SiteID:   "site-A",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			Name:     "bob-dm",
 			RoomType: model.RoomTypeDM,
 			JoinedAt: time.Date(2026, 5, 14, 0, 0, 0, 0, time.UTC),
@@ -921,7 +921,7 @@ func TestDMSubscriptionJSON_HRInfoOmittedWhenNil(t *testing.T) {
 			User:     model.SubscriptionUser{ID: "u-alice", Account: "alice"},
 			RoomID:   "r-c-1",
 			SiteID:   "site-A",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			RoomType: model.RoomTypeChannel,
 			JoinedAt: time.Date(2026, 5, 14, 0, 0, 0, 0, time.UTC),
 		},
@@ -1008,6 +1008,9 @@ func TestRoleValues(t *testing.T) {
 	}
 	if model.RoleAdmin != "admin" {
 		t.Errorf("RoleAdmin = %q", model.RoleAdmin)
+	}
+	if model.RoleUser != "user" {
+		t.Errorf("RoleUser = %q", model.RoleUser)
 	}
 	if model.RoleMember != "member" {
 		t.Errorf("RoleMember = %q", model.RoleMember)
@@ -1324,7 +1327,7 @@ func TestSubscriptionUpdateEventJSON(t *testing.T) {
 			User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
 			RoomID:   "r1",
 			SiteID:   "site-a",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		},
 		Action:    "added",
@@ -2014,6 +2017,31 @@ func TestListRoomMembersResponseJSON(t *testing.T) {
 	assert.Equal(t, resp, dst)
 }
 
+func TestListRoomMembersResponseJSON_HasMore(t *testing.T) {
+	t.Run("hasMore rides the wire", func(t *testing.T) {
+		resp := model.ListRoomMembersResponse{
+			Members: []model.RoomMember{{
+				ID:     "rm1",
+				RoomID: "r1",
+				Member: model.RoomMemberEntry{ID: "alice", Type: model.RoomMemberIndividual, Account: "alice"},
+			}},
+			HasMore: true,
+		}
+		data, err := json.Marshal(&resp)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"hasMore":true`)
+		var dst model.ListRoomMembersResponse
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, resp, dst)
+	})
+
+	t.Run("hasMore is always present when false", func(t *testing.T) {
+		data, err := json.Marshal(&model.ListRoomMembersResponse{Members: []model.RoomMember{}})
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"members":[],"hasMore":false}`, string(data))
+	})
+}
+
 func TestRoomMemberEntry_DisplayFields_JSON(t *testing.T) {
 	entry := model.RoomMemberEntry{
 		ID: "u1", Type: model.RoomMemberIndividual, Account: "alice",
@@ -2043,7 +2071,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(data, &got))
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "appName", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q should be omitted when zero", k)
 	}
@@ -2062,26 +2090,26 @@ func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(data, &got))
 	assert.Equal(t, "org-1", got["id"])
 	assert.Equal(t, "org", got["type"])
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "appName", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q must not be persisted to BSON", k)
 	}
 }
 
-func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
-	t.Run("bot member name round-trips via JSON", func(t *testing.T) {
+func TestRoomMemberEntry_AppName_RoundTrip(t *testing.T) {
+	t.Run("bot member appName round-trips via JSON", func(t *testing.T) {
 		entry := model.RoomMemberEntry{
 			ID:      "u-bot",
 			Type:    model.RoomMemberIndividual,
 			Account: "weather.bot",
-			Name:    "Weather App",
+			AppName: "Weather App",
 		}
 		data, err := json.Marshal(&entry)
 		require.NoError(t, err)
 
 		var raw map[string]any
 		require.NoError(t, json.Unmarshal(data, &raw))
-		assert.Equal(t, "Weather App", raw["name"])
+		assert.Equal(t, "Weather App", raw["appName"])
 		_, hasEngName := raw["engName"]
 		assert.False(t, hasEngName, "engName must be absent for bot entry")
 		_, hasChineseName := raw["chineseName"]
@@ -2092,19 +2120,19 @@ func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
 		assert.Equal(t, entry, dst)
 	})
 
-	t.Run("name not persisted to BSON", func(t *testing.T) {
+	t.Run("appName not persisted to BSON", func(t *testing.T) {
 		entry := model.RoomMemberEntry{
 			ID:      "u-bot",
 			Type:    model.RoomMemberIndividual,
 			Account: "weather.bot",
-			Name:    "Weather App",
+			AppName: "Weather App",
 		}
 		data, err := bson.Marshal(&entry)
 		require.NoError(t, err)
 		var got bson.M
 		require.NoError(t, bson.Unmarshal(data, &got))
-		_, hasName := got["name"]
-		assert.False(t, hasName, "name must not be persisted to BSON")
+		_, hasAppName := got["appName"]
+		assert.False(t, hasAppName, "appName must not be persisted to BSON")
 	})
 
 	t.Run("orgName and orgDescription round-trip via JSON", func(t *testing.T) {
@@ -4198,7 +4226,7 @@ func TestSubscriptionJSON_RestrictedAndExternalAccess(t *testing.T) {
 	s := model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a",
-		Roles: []model.Role{model.RoleMember}, Name: "x", RoomType: model.RoomTypeChannel,
+		Roles: []model.Role{model.RoleUser}, Name: "x", RoomType: model.RoomTypeChannel,
 		JoinedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Restricted: true, ExternalAccess: true,
 	}
@@ -4842,7 +4870,7 @@ func TestSubscriptionEnrichmentFields_RoundTrip(t *testing.T) {
 		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID:   "r1",
 		SiteID:   "site-a",
-		Roles:    []model.Role{model.RoleMember},
+		Roles:    []model.Role{model.RoleUser},
 		JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Room: &model.SubscriptionRoom{
 			SiteID:    "site-a",
@@ -4866,7 +4894,7 @@ func TestSubscriptionBaseMetadata_RoundTrip(t *testing.T) {
 		User:              model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID:            "r1",
 		SiteID:            "site-a",
-		Roles:             []model.Role{model.RoleMember},
+		Roles:             []model.Role{model.RoleUser},
 		RoomType:          model.RoomTypeChannel,
 		JoinedAt:          time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		HasUnread:         true,
@@ -5260,6 +5288,25 @@ func TestIsSystemMessageType(t *testing.T) {
 	assert.False(t, model.IsSystemMessageType("unknown"), "unknown is not a system type")
 }
 
+// Migrated rows carry plural member types nothing produces any more. They are still
+// system messages, and the paths that read Cassandra directly — the room-list preview
+// walk and the search backfill — classify by the STORED type, so leaving them out
+// makes a membership notice eligible as a room preview and as searchable content.
+func TestIsSystemMessageType_LegacyMigratedTypes(t *testing.T) {
+	for _, st := range []string{
+		model.MessageTypeLegacyMembersRemoved,
+		model.MessageTypeLegacyMembersLeft,
+	} {
+		assert.True(t, model.IsSystemMessageType(st), "%q is a legacy system type", st)
+	}
+	assert.Equal(t, "members_removed", model.MessageTypeLegacyMembersRemoved)
+	assert.Equal(t, "members_left", model.MessageTypeLegacyMembersLeft)
+
+	// members_added is NOT legacy despite being plural — it is the current type for
+	// an add, so the plural/singular shape is not the rule.
+	assert.Equal(t, "members_added", model.MessageTypeMembersAdded)
+}
+
 func TestSendMessageRequest_TypeRoundTripAndOmitEmpty(t *testing.T) {
 	// omitempty: absent Type serializes to no "type" key (json + bson).
 	jbytes, err := json.Marshal(&model.SendMessageRequest{ID: "m1", Content: "hi", RequestID: "r1"})
@@ -5342,7 +5389,7 @@ func TestSubscriptionJSON_ThreadUnreadRoundTrip(t *testing.T) {
 	s := model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", RoomType: model.RoomTypeChannel, SiteID: "site-a",
-		Roles: []model.Role{model.RoleMember}, JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Roles: []model.Role{model.RoleUser}, JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		ThreadUnread: []string{"p1", "p2"},
 	}
 	roundTrip(t, &s, &model.Subscription{})
@@ -5501,6 +5548,24 @@ func TestMessageAppInfoJSON(t *testing.T) {
 	assert.Contains(t, string(b), `"isSubscribed":false`)
 }
 
+func TestMessage_IsHiddenThreadReply(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  model.Message
+		want bool
+	}{
+		{"plain channel message", model.Message{}, false},
+		{"thread reply not shown in channel", model.Message{ThreadParentMessageID: "p1", TShow: false}, true},
+		{"thread reply also shown in channel", model.Message{ThreadParentMessageID: "p1", TShow: true}, false},
+		{"tshow without a parent is not a reply", model.Message{TShow: true}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.msg.IsHiddenThreadReply())
+		})
+	}
+}
+
 func TestSubscriptionMentionEvent_RoundTrip(t *testing.T) {
 	src := &model.SubscriptionMentionEvent{
 		RoomID:      "room-1",
@@ -5618,4 +5683,105 @@ func TestRoomAndSubscriptionTypesDisagreeOnABotDM(t *testing.T) {
 	assert.Equal(t, model.RoomTypeBotDM, model.DMRoomType("alice", "weather.bot"))
 	assert.Equal(t, model.RoomTypeBotDM, model.SubscriptionRoomType("weather.bot")) // alice's row
 	assert.Equal(t, model.RoomTypeDM, model.SubscriptionRoomType("alice"))          // the bot's row
+}
+
+func TestNormalizeRole(t *testing.T) {
+	tests := []struct {
+		name string
+		in   model.Role
+		want model.Role
+	}{
+		{"legacy member becomes user", model.RoleMember, model.RoleUser},
+		{"user passes through", model.RoleUser, model.RoleUser},
+		{"owner passes through", model.RoleOwner, model.RoleOwner},
+		{"admin passes through", model.RoleAdmin, model.RoleAdmin},
+		{"unknown role passes through", model.Role("auditor"), model.Role("auditor")},
+		{"empty passes through", model.Role(""), model.Role("")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.NormalizeRole(tt.in))
+		})
+	}
+}
+
+func TestNormalizeRoles(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []model.Role
+		want []model.Role
+	}{
+		{"nil stays nil", nil, nil},
+		{"empty stays empty", []model.Role{}, []model.Role{}},
+		{"legacy member rewritten", []model.Role{model.RoleMember}, []model.Role{model.RoleUser}},
+		{
+			"mixed slice keeps order",
+			[]model.Role{model.RoleOwner, model.RoleMember, model.RoleAdmin},
+			[]model.Role{model.RoleOwner, model.RoleUser, model.RoleAdmin},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.NormalizeRoles(tt.in))
+		})
+	}
+}
+
+func TestNormalizeRoles_DoesNotMutateInput(t *testing.T) {
+	in := []model.Role{model.RoleMember}
+	_ = model.NormalizeRoles(in)
+	assert.Equal(t, []model.Role{model.RoleMember}, in)
+}
+
+func TestRoleJSON_LegacyMemberMarshalsAsUser(t *testing.T) {
+	b, err := json.Marshal(model.RoleMember)
+	require.NoError(t, err)
+	assert.JSONEq(t, `"user"`, string(b))
+}
+
+func TestRoleJSON_LegacyMemberUnmarshalsAsUser(t *testing.T) {
+	var r model.Role
+	require.NoError(t, json.Unmarshal([]byte(`"member"`), &r))
+	assert.Equal(t, model.RoleUser, r)
+}
+
+func TestRoleJSON_RejectsNonString(t *testing.T) {
+	var r model.Role
+	err := json.Unmarshal([]byte(`{"role":"owner"}`), &r)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode role")
+}
+
+func TestRoleJSON_OtherRolesRoundTrip(t *testing.T) {
+	for _, role := range []model.Role{model.RoleOwner, model.RoleAdmin, model.RoleUser} {
+		b, err := json.Marshal(role)
+		require.NoError(t, err)
+		var got model.Role
+		require.NoError(t, json.Unmarshal(b, &got))
+		assert.Equal(t, role, got)
+	}
+}
+
+func TestSubscriptionJSON_LegacyRolesSerializeAsUser(t *testing.T) {
+	sub := model.Subscription{
+		ID:     "s1",
+		RoomID: "r1",
+		Roles:  []model.Role{model.RoleMember, model.RoleOwner},
+	}
+	b, err := json.Marshal(sub)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	assert.Equal(t, []any{"user", "owner"}, got["roles"])
+}
+
+func TestSubscriptionBSON_LegacyRolesStoredVerbatim(t *testing.T) {
+	sub := model.Subscription{ID: "s1", RoomID: "r1", Roles: []model.Role{model.RoleMember}}
+	b, err := bson.Marshal(sub)
+	require.NoError(t, err)
+	var got struct {
+		Roles []string `bson:"roles"`
+	}
+	require.NoError(t, bson.Unmarshal(b, &got))
+	assert.Equal(t, []string{"member"}, got.Roles, "storage must not be rewritten by the JSON normalizer")
 }

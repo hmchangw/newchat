@@ -111,7 +111,10 @@ type subEntry struct {
 	subscribed  bool
 }
 
-// SubscriptionCache caches positive subscription access checks.
+// SubscriptionCache caches positive subscription access checks (L1) in front of
+// a SubscriptionSource. The shared Valkey L2 and its circuit breaker live inside
+// that source, not here — history-service's base source already resolves through
+// subauthcache.ReadThrough — so this type stays a plain L1 with one loader path.
 type SubscriptionCache struct {
 	inner SubscriptionSource
 	cache *ttlCache[subEntry]

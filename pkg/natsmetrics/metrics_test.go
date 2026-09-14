@@ -184,13 +184,6 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 			require.Len(t, points, 1)
 			assert.Equal(t, int64(1), points[0].Value)
 			assert.Equal(t, string(tt.want), attrs(points[0])["outcome"])
-			redeliveries := metricPoints[int64](t, rm, "chat.nats.consumer.redeliveries")
-			if tt.redelivery == 0 {
-				assert.Empty(t, redeliveries)
-			} else {
-				require.Len(t, redeliveries, 1)
-				assert.Equal(t, tt.redelivery, redeliveries[0].Value)
-			}
 			durations := histogramPoints(t, rm, "chat.nats.consumer.processing.duration")
 			require.Len(t, durations, 1)
 			assert.Equal(t, uint64(1), durations[0].Count)
@@ -244,40 +237,37 @@ func TestTerminalFailureAndMaxDeliver(t *testing.T) {
 func TestPublishAndRequestMetrics(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	p := m.Publisher("s1")
-	p.Attempt(context.Background(), DestinationPush, OperationPushPublish, nil)
-	p.Attempt(context.Background(), DestinationPush, OperationPushPublish, nats.ErrNoResponders)
-	p.Retry(context.Background(), DestinationPush, OperationPushPublish)
+	// A successful publish records nothing; only the failure lands.
+	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nil)
+	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nats.ErrNoResponders)
 	p.Request(context.Background(), OperationPresenceLookup, 25*time.Millisecond, nats.ErrTimeout)
 
 	rm := collect(t, reader)
-	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.attempts"), 2)
-	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.retries"), 1)
-	requestPoints := metricPoints[int64](t, rm, "chat.nats.requests")
+	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.failures"), 1)
+	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, "timeout", attrs(requestPoints[0])["outcome"])
-	assert.Len(t, histogramPoints(t, rm, "chat.nats.request.duration"), 1)
+	assert.Equal(t, "timeout", attrsOf(requestPoints[0])["error.type"])
 }
 
 func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	p := m.Publisher("s1")
-	p.Attempt(context.Background(), DestinationKind("dynamic.destination"), Operation("dynamic.operation"), nil)
+	p.Failure(context.Background(), DestinationKind("dynamic.destination"), Operation("dynamic.operation"), nats.ErrTimeout)
 	p.Request(context.Background(), Operation("another.dynamic.operation"), time.Millisecond, nil)
 
 	rm := collect(t, reader)
-	publishPoints := metricPoints[int64](t, rm, "chat.nats.publish.attempts")
+	publishPoints := metricPoints[int64](t, rm, "chat.nats.publish.failures")
 	require.Len(t, publishPoints, 1)
 	assert.Equal(t, string(DestinationUnknown), attrs(publishPoints[0])["destination_kind"])
 	assert.Equal(t, string(OperationUnknown), attrs(publishPoints[0])["operation"])
-	requestPoints := metricPoints[int64](t, rm, "chat.nats.requests")
+	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, string(OperationUnknown), attrs(requestPoints[0])["operation"])
+	assert.Equal(t, string(OperationUnknown), attrsOf(requestPoints[0])["rpc.method"])
 }
 
 func TestZeroValuePublisherDoesNotAffectBusinessFlow(t *testing.T) {
 	var publisher Publisher
-	publisher.Attempt(context.Background(), DestinationPush, OperationPushPublish, errors.New("publish failed"))
-	publisher.Retry(context.Background(), DestinationPush, OperationPushPublish)
+	publisher.Failure(context.Background(), DestinationPush, OperationPushPublish, errors.New("publish failed"))
 	publisher.Request(context.Background(), OperationPresenceLookup, time.Millisecond, errors.New("request failed"))
 }
 
@@ -288,7 +278,9 @@ func TestClassifiersAreBounded(t *testing.T) {
 		err  error
 		want PublishOutcome
 	}{
-		{nil, PublishSuccess},
+		// Unreachable through Publisher.Failure, which returns before classifying
+		// a nil error. Pinned so the function stays total.
+		{nil, PublishOtherError},
 		{context.DeadlineExceeded, PublishTimeout},
 		{nats.ErrNoResponders, PublishNoResponders},
 		{nats.ErrDisconnected, PublishDisconnected},

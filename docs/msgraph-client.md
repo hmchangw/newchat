@@ -25,6 +25,8 @@ derive organizer/attendee addresses):
 | `TEAMS_CLIENT_SECRET` | App registration client secret |
 | `TEAMS_EMAIL_DOMAIN` | Domain appended to an `account` to form an email (`account@domain`); defaults to `dev.local` for local/dev. Used only by the deep-link call RPCs — meetings resolve real object IDs (below). |
 | `GRAPH_PROXY_URL` | Optional. Routes the meetings Graph client through this proxy (scheme+host, e.g. `http://proxy.corp:8080`), overriding `HTTPS_PROXY`/`HTTP_PROXY`. Empty falls back to the standard proxy env vars. |
+| `GRAPH_PROXY_USERNAME` | Optional. Proxy user for `GRAPH_PROXY_URL` (Basic for `http`/`https`, RFC 1929 for `socks5`). Overrides any userinfo embedded in the URL. |
+| `GRAPH_PROXY_PASSWORD` | Optional. Proxy password for `GRAPH_PROXY_URL`. **Secret** — store it in a k8s Secret, never a ConfigMap. |
 
 When the Teams credentials are unset, the deep-link call RPCs still work (they
 need only `TEAMS_EMAIL_DOMAIN`); the meetings RPC returns a not-configured
@@ -60,6 +62,88 @@ empty value.
 room-service constructs this client via `NewMeetingsClient(cfg)`, which honors
 `Config.ProxyURL` (from `GRAPH_PROXY_URL`) and fails fast on a malformed proxy
 value at startup.
+
+### Authenticating proxies
+
+Set `GRAPH_PROXY_USERNAME`/`GRAPH_PROXY_PASSWORD` alongside `GRAPH_PROXY_URL`
+to authenticate to the proxy. How they travel depends on the scheme:
+
+- **`http` / `https`** — `Proxy-Authorization: Basic` on every hop, the token
+  request and the Graph request alike, through the CONNECT tunnel.
+- **`socks5` / `socks5h`** — the RFC 1929 username/password sub-negotiation
+  during the SOCKS handshake. No HTTP proxy-auth header is sent.
+
+> **The credential hop is unencrypted unless the proxy scheme is `https`**
+> (CWE-319). Basic is only base64, and RFC 1929 sends the password in the clear;
+> both travel to the proxy *before* the TLS tunnel to Graph exists, so anyone on
+> the path to the proxy can read them. The TLS that protects the Graph traffic
+> itself starts inside that tunnel and does not cover this.
+>
+> The client warns once at startup rather than refusing, because corporate
+> proxies are overwhelmingly plain `http` and refusing would block the very
+> deployments this setting is for. Treat it as a decision for whoever runs the
+> proxy: an `https://` proxy URL closes it; a trusted network segment is the
+> usual reason to accept it. The warning names the scheme and proxy host only.
+>
+> It covers `GRAPH_PROXY_URL` only. Userinfo carried in an ambient
+> `HTTPS_PROXY`/`HTTP_PROXY` reaches the transport without passing through
+> this client, so it crosses the same unencrypted hop unwarned.
+
+Credentials embedded in the URL (`http://user:pass@proxy:8080`) still work and
+stay supported, but the separate vars are preferred:
+
+- A password containing `@ : / ? # %` needs no percent-encoding.
+- Only the password is a secret, so `GRAPH_PROXY_URL` can stay in a ConfigMap.
+  A `GRAPH_PROXY_URL` that *does* embed userinfo is itself a secret and belongs
+  in a Secret — that is the second reason to prefer the separate vars.
+- Rotating the password touches one value, not a connection string.
+
+The explicit vars win over embedded userinfo. These fail fast at construction
+rather than silently egressing unauthenticated or breaking on the first request:
+
+- credentials with no `GRAPH_PROXY_URL`;
+- a password with no username — from the settings *or* from URL userinfo
+  (`http://:secret@proxy:8080`), since Basic would send `:secret` and draw a 407;
+- userinfo with no username at all (`http://:@proxy:8080`, `http://@proxy:8080`).
+  `url.Parse` leaves it non-nil with both fields empty, and `net/http` sends
+  `Basic Og==` on the strength of that alone — another 407;
+- a malformed URL, or one missing a scheme or hostname (`http://:8080` has a
+  port but no host to dial);
+- a port outside 1-65535 (`url.Parse` only checks that a port is digits);
+- a scheme `net/http` cannot proxy through — only `http`, `https`, `socks5` and
+  `socks5h` work;
+- a `socks5`/`socks5h` username that is empty or over 255 bytes, or a password
+  over 255 bytes. RFC 1929 length-prefixes each field with a single byte, so
+  Go's SOCKS dialer cannot encode more — it would fail on the first request;
+- a `:` in the username of an `http`/`https` proxy. Basic sends `user:password`,
+  so the proxy would split at the wrong colon and answer 407 on the first
+  request; RFC 7617 forbids it. SOCKS5 fields are length-prefixed, so a colon is
+  accepted there.
+
+**No rejection quotes the value.** Every one of those errors is static (bar the
+scheme name), because there is no safe way to echo a bad proxy URL: a failed
+parse quotes the whole input, its underlying error quotes fragments (`invalid
+URL escape "%zz"`), and `Redacted()` masks userinfo only when `url.Parse`
+populated it — a scheme-less `user:pw@host` lands entirely in `Opaque` with
+`User` nil, so `Redacted()` would return the password verbatim.
+
+For `http`/`https` proxies, only **Basic** auth is supported — Go's transport
+has no NTLM/Kerberos/Digest proxy auth.
+
+Every error-returning constructor applies it: `NewMeetingsClient`,
+`NewMeetingsDirectoryClient`, `NewUserListerClient`, `NewChatsClient`,
+`NewChatMembersClient`, `NewPresenceClient`, `NewDirectoryClient` and
+`NewGroupReaderClient`. Only the bare `New` ignores proxy config and relies on
+`HTTPS_PROXY`/`HTTP_PROXY` — every service-facing constructor returns an error
+precisely so a bad proxy value stops the pod at startup instead of failing the
+first Graph call.
+
+The two settings are alternatives, not layers. When `GRAPH_PROXY_URL` is set it
+**overrides** `HTTPS_PROXY`/`HTTP_PROXY` for Graph traffic; when it is empty the
+client keeps the default transport, so those ambient vars stay the fallback
+(they also remain the fallback for a service's non-Graph egress either way).
+Set `GRAPH_PROXY_URL` on every Graph service and no Graph egress depends on the
+ambient vars.
 
 ## Resolving object IDs (app-only directory reader)
 

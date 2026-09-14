@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/atrest"
+	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	cassmodel "github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
@@ -46,7 +47,7 @@ func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 		ThreadParentID: "",
 	}
 	editedAt := createdAt.Add(time.Minute)
-	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", editedAt))
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", nil, editedAt))
 
 	// messages_by_id updated
 	var gotMsg string
@@ -102,7 +103,7 @@ func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 		ThreadRoomID:   threadRoomID,
 	}
 	editedAt := createdAt.Add(time.Minute)
-	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", editedAt))
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", nil, editedAt))
 
 	// messages_by_id updated
 	var gotMsg string
@@ -165,7 +166,7 @@ func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 		PinnedAt:       &pinnedAt,
 	}
 	editedAt := createdAt.Add(time.Minute)
-	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", editedAt))
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", nil, editedAt))
 
 	// All three affected tables updated
 	var gotMsg string
@@ -672,7 +673,7 @@ func TestRepository_UpdateMessageContent_MissingThreadRoomID_ReturnsError(t *tes
 		ThreadParentID: "m-parent",
 		ThreadRoomID:   "",
 	}
-	err := repo.UpdateMessageContent(ctx, msg, "edited", createdAt.Add(time.Minute))
+	err := repo.UpdateMessageContent(ctx, msg, "edited", nil, createdAt.Add(time.Minute))
 	require.Error(t, err, "expected error when ThreadRoomID is empty for a thread reply")
 
 	// Validation must fire before any DB write — messages_by_id must be unchanged.
@@ -844,16 +845,24 @@ func TestRepository_UpdateMessageContent_RoundTrip(t *testing.T) {
 		ThreadParentID: "",
 	}
 	editedAt := createdAt.Add(time.Minute)
-	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "updated content", editedAt))
+	// An edit that adds an @mention must persist the resolved mentions column so
+	// history reads return the post-edit mentions (the bug this test guards).
+	mentions := []pkgmodel.Participant{{UserID: "bob-id", Account: "bob", EngName: "Bob", ChineseName: "鮑勃"}}
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "updated content @bob", mentions, editedAt))
 
 	got, err := repo.GetMessageByID(ctx, msgID)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, "updated content", got.Msg)
+	assert.Equal(t, "updated content @bob", got.Msg)
 	require.NotNil(t, got.EditedAt)
 	assert.Equal(t, editedAt.UTC(), got.EditedAt.UTC())
 	require.NotNil(t, got.UpdatedAt)
 	assert.Equal(t, editedAt.UTC(), got.UpdatedAt.UTC())
+	require.Len(t, got.Mentions, 1)
+	assert.Equal(t, "bob", got.Mentions[0].Account)
+	assert.Equal(t, "bob-id", got.Mentions[0].ID)
+	assert.Equal(t, "Bob", got.Mentions[0].EngName)
+	assert.Equal(t, "鮑勃", got.Mentions[0].CompanyName)
 }
 
 // TestRepository_SoftDeleteMessage_RoundTrip verifies that after soft-deleting
@@ -1113,7 +1122,7 @@ func TestEditMessage_EncryptsBody(t *testing.T) {
 	editedAt := now.Add(time.Minute)
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m1", CreatedAt: now,
-	}, "new body", editedAt))
+	}, "new body", nil, editedAt))
 
 	// Direct CQL: msg column is null, enc_payload is non-nil and decrypts to "new body".
 	var (
@@ -1168,7 +1177,7 @@ func TestEditMessage_PreservesOtherEncryptedFields(t *testing.T) {
 	editedAt := now.Add(time.Minute)
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m1", CreatedAt: now,
-	}, "new body", editedAt))
+	}, "new body", nil, editedAt))
 
 	var (
 		encPayload []byte
@@ -1223,7 +1232,7 @@ func TestEditMessage_LegacyRow_PreservesPlaintextAttachments(t *testing.T) {
 	editedAt := now.Add(time.Minute)
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m-legacy", CreatedAt: now,
-	}, "edited body", editedAt))
+	}, "edited body", nil, editedAt))
 
 	// Decrypt directly to verify the re-encrypted bundle carries the
 	// legacy plaintext fields forward.
@@ -1315,7 +1324,7 @@ func TestUpdateMessageContent_NonExistent_CipherEnabled_ReturnsErrMessageNotFoun
 
 	err := repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: "r-ghost", MessageID: "m-ghost-enc", CreatedAt: now,
-	}, "should not land", now.Add(time.Minute))
+	}, "should not land", nil, now.Add(time.Minute))
 	require.ErrorIs(t, err, ErrMessageNotFound, "edit of non-existent message must surface ErrMessageNotFound on the cipher path")
 
 	// No ghost row was materialised.
@@ -1362,7 +1371,7 @@ func TestEditMessage_Encrypted_NullsLegacyPlaintextColumns(t *testing.T) {
 
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m-null", CreatedAt: now,
-	}, "edited", now.Add(time.Minute)))
+	}, "edited", nil, now.Add(time.Minute)))
 
 	for _, table := range []struct {
 		name string
@@ -1438,7 +1447,7 @@ func TestEditMessage_Encrypted_PreservesQuotedParentMetadata(t *testing.T) {
 
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m-child", CreatedAt: now,
-	}, "edited child body", now.Add(time.Minute)))
+	}, "edited child body", nil, now.Add(time.Minute)))
 
 	// Read back through the history read path (decrypt + struct scan).
 	got, err := repo.GetMessageByID(ctx, "m-child")
@@ -1491,7 +1500,7 @@ func TestEditMessage_Plaintext_NullsEncryptedColumns(t *testing.T) {
 	repo := NewRepository(session, sizer, 365, nil)
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m-rb", CreatedAt: now,
-	}, "v2", now.Add(time.Minute)))
+	}, "v2", nil, now.Add(time.Minute)))
 
 	for _, table := range []struct {
 		name string
@@ -1564,7 +1573,7 @@ func TestEditMessage_Encrypted_PreservesLegacyQuotedParentMetadata(t *testing.T)
 
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m-q", CreatedAt: now,
-	}, "edited body", now.Add(time.Minute)))
+	}, "edited body", nil, now.Add(time.Minute)))
 
 	for _, table := range []struct {
 		name string
@@ -1643,7 +1652,7 @@ func TestRepository_UpdateMessageContent_TShowThreadReply(t *testing.T) {
 		TShow:          true,
 	}
 	editedAt := createdAt.Add(time.Minute)
-	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", editedAt))
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", nil, editedAt))
 
 	var gotMsg string
 	var gotEditedAt time.Time

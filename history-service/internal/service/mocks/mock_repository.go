@@ -280,17 +280,17 @@ func (mr *MockMessageWriterMockRecorder) UnpinMessage(ctx, msg any) *gomock.Call
 }
 
 // UpdateMessageContent mocks base method.
-func (m *MockMessageWriter) UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error {
+func (m *MockMessageWriter) UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, mentions []model.Participant, editedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateMessageContent", ctx, msg, newMsg, editedAt)
+	ret := m.ctrl.Call(m, "UpdateMessageContent", ctx, msg, newMsg, mentions, editedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateMessageContent indicates an expected call of UpdateMessageContent.
-func (mr *MockMessageWriterMockRecorder) UpdateMessageContent(ctx, msg, newMsg, editedAt any) *gomock.Call {
+func (mr *MockMessageWriterMockRecorder) UpdateMessageContent(ctx, msg, newMsg, mentions, editedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateMessageContent", reflect.TypeOf((*MockMessageWriter)(nil).UpdateMessageContent), ctx, msg, newMsg, editedAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateMessageContent", reflect.TypeOf((*MockMessageWriter)(nil).UpdateMessageContent), ctx, msg, newMsg, mentions, editedAt)
 }
 
 // MockMessageRepository is a mock of MessageRepository interface.
@@ -527,17 +527,17 @@ func (mr *MockMessageRepositoryMockRecorder) UnpinMessage(ctx, msg any) *gomock.
 }
 
 // UpdateMessageContent mocks base method.
-func (m *MockMessageRepository) UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error {
+func (m *MockMessageRepository) UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, mentions []model.Participant, editedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateMessageContent", ctx, msg, newMsg, editedAt)
+	ret := m.ctrl.Call(m, "UpdateMessageContent", ctx, msg, newMsg, mentions, editedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateMessageContent indicates an expected call of UpdateMessageContent.
-func (mr *MockMessageRepositoryMockRecorder) UpdateMessageContent(ctx, msg, newMsg, editedAt any) *gomock.Call {
+func (mr *MockMessageRepositoryMockRecorder) UpdateMessageContent(ctx, msg, newMsg, mentions, editedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateMessageContent", reflect.TypeOf((*MockMessageRepository)(nil).UpdateMessageContent), ctx, msg, newMsg, editedAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateMessageContent", reflect.TypeOf((*MockMessageRepository)(nil).UpdateMessageContent), ctx, msg, newMsg, mentions, editedAt)
 }
 
 // MockSubscriptionRepository is a mock of SubscriptionRepository interface.
@@ -1005,4 +1005,19 @@ func (m *MockAppStore) AppNameByAccount(ctx context.Context, botAccount string) 
 func (mr *MockAppStoreMockRecorder) AppNameByAccount(ctx, botAccount any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppNameByAccount", reflect.TypeOf((*MockAppStore)(nil).AppNameByAccount), ctx, botAccount)
+}
+
+// AppNamesByAccounts mocks base method.
+func (m *MockAppStore) AppNamesByAccounts(ctx context.Context, botAccounts []string) (map[string]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AppNamesByAccounts", ctx, botAccounts)
+	ret0, _ := ret[0].(map[string]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AppNamesByAccounts indicates an expected call of AppNamesByAccounts.
+func (mr *MockAppStoreMockRecorder) AppNamesByAccounts(ctx, botAccounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppNamesByAccounts", reflect.TypeOf((*MockAppStore)(nil).AppNamesByAccounts), ctx, botAccounts)
 }

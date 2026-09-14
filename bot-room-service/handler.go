@@ -13,12 +13,16 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/timeutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // Rocket.Chat-legacy single-char rooms.t values.
@@ -63,6 +67,10 @@ type handler struct {
 	now        func() time.Time
 	newMsgID   func() string
 	newUUIDv7  func() string
+	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
+	// entries after a member removal. nil disables invalidation (best-effort).
+	// Set post-construction, mirroring room-worker/room-service/inbox-worker.
+	valkey valkeyutil.Client
 }
 
 func newHandler(store RoomStore, siteID string, allSiteIDs []string, pub outboxPublisher,
@@ -79,15 +87,15 @@ func newHandler(store RoomStore, siteID string, allSiteIDs []string, pub outboxP
 
 func (h *handler) Register(r *natsrouter.Router) {
 	natsrouter.Register[BotCreateRoomRequest, BotCreateRoomResponse](r,
-		subject.ServerBotRoomCreate(h.siteID), h.handleCreate)
+		subject.ServerBotRoomCreate(h.siteID), natsmetrics.MethodCreateBotRoom, h.handleCreate)
 	natsrouter.Register[BotMembersBatchRequest, BotAddResponse](r,
-		subject.ServerBotRoomMemberAddPattern(h.siteID), h.handleAdd)
+		subject.ServerBotRoomMemberAddPattern(h.siteID), natsmetrics.MethodAddBotRoomMembers, h.handleAdd)
 	natsrouter.Register[BotMembersBatchRequest, BotRemoveResponse](r,
-		subject.ServerBotRoomMemberRemovePattern(h.siteID), h.handleRemove)
+		subject.ServerBotRoomMemberRemovePattern(h.siteID), natsmetrics.MethodRemoveBotRoomMembers, h.handleRemove)
 	natsrouter.Register[BotRoomGetRequest, BotRoomGetResponse](r,
-		subject.ServerBotRoomGet(h.siteID), h.handleGet)
+		subject.ServerBotRoomGet(h.siteID), natsmetrics.MethodGetBotRoom, h.handleGet)
 	natsrouter.Register[BotDMEnsureRequest, BotDMEnsureResponse](r,
-		subject.ServerBotRoomDMEnsure(h.siteID), h.handleDMEnsure)
+		subject.ServerBotRoomDMEnsure(h.siteID), natsmetrics.MethodEnsureBotDMRoom, h.handleDMEnsure)
 }
 
 // handleDMEnsure materializes a DM room + subscriptions; this site becomes the DM's origin.
@@ -304,6 +312,16 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 	created := h.now()
 	added := []string{}
 	newAccounts := []string{}
+
+	// Resolve (and heal) the room key BEFORE committing any subscription: a key
+	// failure after a member is committed would strand them keyless, since a retry
+	// sees them as a dup (newlyAdded=false) and the fan-out below skips them.
+	// Mirrors room-worker's key-before-commit ordering. See keyPairOrHeal.
+	pair, err := h.keyPairOrHeal(c, roomID)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, userID := range req.UserIDs {
 		u, err := h.store.FindUser(c, userID)
 		if err != nil {
@@ -337,24 +355,14 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		}
 	}
 
-	// Fan out the room's current key only to newly-subscribed accounts — duplicate adds already
+	// Fan out the pre-resolved key only to newly-subscribed accounts — duplicate adds already
 	// have it from their original add; the key isn't re-rotated for adds (mirrors room-worker.buildAndFanOutRoomKey).
 	if len(newAccounts) > 0 {
-		pair, err := h.keyStore.Get(c, roomID)
-		if err != nil {
-			if errors.Is(err, roomkeystore.ErrNoCurrentKey) {
-				// Legacy/broken room with no key: nothing to fan out, not fatal.
-				slog.WarnContext(c, "no current key on add-member; skip fan-out", "roomID", roomID)
-			} else {
-				return nil, fmt.Errorf("get room key: %w", err)
-			}
-		} else {
-			h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
-				RoomID:     roomID,
-				Version:    pair.Version,
-				PrivateKey: pair.KeyPair.PrivateKey,
-			}, "fan out room key on add failed")
-		}
+		h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
+			RoomID:     roomID,
+			Version:    pair.Version,
+			PrivateKey: pair.KeyPair.PrivateKey,
+		}, "fan out room key on add failed")
 	}
 
 	// Skip sysmsg on all-dup batches (true no-op: no message, no OUTBOX event).
@@ -377,6 +385,18 @@ func roomTypeToModel(t string) model.RoomType {
 }
 
 // ----- remove-members ------------------------------------------------------
+
+// memberRemoval is one removal awaiting its cross-site publish, held between the
+// delete loop and the federation pass so the room-key rotation can run between them.
+type memberRemoval struct {
+	// subID is the deleted subscription's id, empty when this call deleted
+	// nothing (the repair path below). federateMemberRemoved keys the dedup id
+	// on it.
+	subID      string
+	userID     string
+	account    string
+	destSiteID string
+}
 
 func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest) (*BotRemoveResponse, error) { //nolint:gocritic // hugeParam: natsrouter contract
 	roomID := c.Params.Get("roomID")
@@ -404,38 +424,116 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	}
 
 	removed := []string{}
+	removedAccounts := []string{}
+	// Collected in the loop and published after the rotation below, so a failed
+	// publish cannot skip it. See the rotation comment for why that ordering is
+	// load-bearing rather than cosmetic.
+	// Every user in the batch can queue one now that federation no longer waits on
+	// the delete, so the exact bound is known here.
+	pendingFederations := make([]memberRemoval, 0, len(req.UserIDs))
+	// Deferred, not called at the end of the loop: every path out of here from
+	// this point on has already committed subscription deletes, so the cached
+	// positive subauthcache decisions must die on the error paths too. A
+	// federation failure that returned before the bust would leave every account
+	// in the batch still passing authorization for the rest of the L2 TTL. One
+	// round trip for the whole set — the {roomID} hash tag keeps the keys in one
+	// slot — and BustSubs no-ops on an empty set.
+	defer func() { subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts) }()
+	// Deferred for the same reason as the bust above, and it has to be: a
+	// mid-batch error on a LATER user returns before the explicit rotation
+	// below, with earlier deletes already committed. The retry cannot repair
+	// that — those deletes report wasThere=false next time, so `removed` can
+	// come back empty and the rotation is then skipped for good, leaving an
+	// already-removed member holding a key that opens every future message.
+	// Best effort and logged rather than returned: this only runs on a path
+	// that is already failing, and the caller's error must not be replaced.
+	rotated := false
+	defer func() {
+		if rotated || len(removed) == 0 {
+			return
+		}
+		if err := h.rotateAndFanOut(c, roomID); err != nil {
+			slog.ErrorContext(c, "room key rotation after a failed bot removal did not complete; removed members may still hold a working key",
+				"error", err, "roomID", roomID, "removed", len(removed))
+		}
+	}()
 	for _, userID := range req.UserIDs {
-		wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
+		// The account comes from the delete itself, so the bust below cannot be
+		// skipped by the enrichment lookup failing. It is the same value
+		// UpsertSubscription wrote into subscriptions.u.account at add-time,
+		// which is what subauthcache.SubKey is keyed on.
+		// The destination is resolved BEFORE the delete, because the user doc is
+		// the only place it lives: the subscription's own siteId is the ROOM's
+		// site, and its u sub-document carries just _id/account/isBot. Resolving
+		// first means a lookup failure aborts before anything is committed, so a
+		// retry re-runs the whole removal; resolving afterwards would delete the
+		// row and only then discover it cannot address the remote site.
+		u, err := h.store.FindUser(c, userID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			// The user doc is genuinely gone, not unreachable: there is no remote
+			// site to notify, so the local removal proceeds with no federation.
+			u = nil
+		case err != nil:
+			return nil, fmt.Errorf("resolve removal destination for user %s: %w", userID, err)
+		}
+
+		subID, account, wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
 		if err != nil {
 			return nil, fmt.Errorf("delete subscription: %w", err)
 		}
+
+		// Queued whether or not THIS call did the deleting. A first call that
+		// committed the delete and then failed on its publish leaves the member
+		// still subscribed on their home site, and every retry reports
+		// wasThere=false — so gating the federation here means nothing ever
+		// repairs it. subID is empty on those repair retries, because the row
+		// they would have named is already gone; federateMemberRemoved falls
+		// back to a user-keyed id there, and says what that costs.
+		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
+			pendingFederations = append(pendingFederations,
+				memberRemoval{subID: subID, userID: u.ID, account: u.Account, destSiteID: u.SiteID})
+		}
+
 		if !wasThere {
-			// Duplicate remove is a no-op.
+			// Duplicate remove: nothing was de-authorized here, so nothing local
+			// follows — no bust, no rotation, no second system message. Only the
+			// federation above, which is idempotent at the destination.
 			continue
 		}
 		removed = append(removed, userID)
-
-		u, err := h.store.FindUser(c, userID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				// User doc is gone (best-effort federation is fine).
-				continue
-			}
-			// Transient store error — local removal already committed but federation would be lost;
-			// log for an operator and don't fail the outer op (matches sysmsg best-effort semantics).
-			slog.WarnContext(c, "bot-room-service find user for federation failed",
-				"userID", userID, "roomID", roomID, "error", err)
-			continue
-		}
-		if u.SiteID != "" && u.SiteID != h.siteID {
-			if err := h.federateMemberRemoved(c, roomID, u.ID, u.Account, u.SiteID); err != nil {
-				return nil, err
-			}
+		if account != "" {
+			removedAccounts = append(removedAccounts, account)
 		}
 	}
 	// Only rotate when at least one subscription was actually deleted — a no-op remove must not rotate the room key (matches user pipeline).
+	//
+	// Rotation runs BEFORE the federation publishes, for the same reason the
+	// subauthcache bust above is deferred: by here the deletes are committed, and
+	// the retry cannot repair anything. It re-runs with wasThere=false on every
+	// user, so `removed` is empty, so it skips the rotation too — permanently.
+	// Federating first and returning on its failure therefore leaves the removed
+	// member holding a key that still opens every future message in the room,
+	// with nothing that ever rotates it. Rotating first downgrades that to the
+	// stranded-federation gap this handler already documents: the remote site
+	// still shows them subscribed, but they cannot read anything new.
 	if len(removed) > 0 {
+		// Set only AFTER the call succeeds. Returning the error here does not
+		// hand the problem to the caller's retry — that retry finds every
+		// committed delete reporting wasThere=false, so `removed` comes back
+		// empty and the rotation is skipped for good. This request is the last
+		// moment anything still knows a key must be rotated, so a failure must
+		// fall through to the deferred net for one more attempt rather than
+		// suppress it. A second rotation on an already-rotated key costs a spare
+		// version, which retired_room_keys expires; not rotating at all leaves a
+		// removed member reading every future message.
 		if err := h.rotateAndFanOut(c, roomID); err != nil {
+			return nil, err
+		}
+		rotated = true
+	}
+	for _, f := range pendingFederations {
+		if err := h.federateMemberRemoved(c, roomID, f); err != nil {
 			return nil, err
 		}
 	}
@@ -465,6 +563,31 @@ func (h *handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 			slog.WarnContext(ctx, warnMsg, "account", acct, "roomID", roomID, "error", err)
 		}
 	}
+}
+
+// keyPairOrHeal returns the room's current key, minting and persisting a fresh
+// key when the room has none (legacy / never-keyed). Going-forward-only: it
+// unblocks new members but does NOT recover history a lost key had encrypted.
+// RecordKeyAbsent fires on the mint so ops can spot a lost-key event. SetIfAbsent
+// converges concurrent minters on a single v0 key. Mirrors the create path's mint.
+func (h *handler) keyPairOrHeal(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error) {
+	pair, err := h.keyStore.Get(ctx, roomID)
+	if err != nil && !errors.Is(err, roomkeystore.ErrNoCurrentKey) {
+		return nil, fmt.Errorf("get room key: %w", err)
+	}
+	if pair != nil {
+		return pair, nil
+	}
+	roomkeymetrics.RecordKeyAbsent(ctx, "")
+	fresh, err := roomkeystore.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generate room key: %w", err)
+	}
+	committed, err := h.keyStore.SetIfAbsent(ctx, roomID, *fresh)
+	if err != nil {
+		return nil, fmt.Errorf("store room key: %w", err)
+	}
+	return committed, nil
 }
 
 // rotateAndFanOut commits before fan-out; a predicted current+1 mislabels keys when removals race.
@@ -560,17 +683,39 @@ func (h *handler) federateMemberAdded(ctx context.Context, roomID, userID, accou
 		model.InboxMemberAdded, payload, dedupID, at.UnixMilli())
 }
 
-func (h *handler) federateMemberRemoved(ctx context.Context, roomID, userID, account, destSiteID string) error {
+// federateMemberRemoved publishes one removal to the member's home site.
+//
+// The dedup id names the deleted subscription, not the (room, user, site) triple. JetStream drops
+// a publish whose Nats-Msg-Id it has already seen inside the stream's duplicate window, so a
+// triple-only id makes remove -> re-add -> remove inside that window send the first removal and
+// silently swallow the second, leaving the member subscribed on their home site with nothing to
+// repair it. A subscription id is fresh per add, so it separates those two removals while staying
+// stable for any retry of one of them.
+//
+// A repair retry has no subscription to name: the delete it is repairing already committed, so
+// this call reported wasThere=false and r.subID is empty. Those fall back to a user-keyed id,
+// distinguished by the "u:" prefix so it can never collide with a real subscription id. That keeps
+// repeated repairs of one removal deduped against each other, and keeps them distinct from the
+// original subscription-keyed publish so the repair actually lands. What it does not separate is
+// two DIFFERENT removals of the same member whose first publish both failed inside one duplicate
+// window — those share the user-keyed id and the second repair is dropped. That is the original
+// triple-collision, now confined to the repair path; closing it needs a durable per-operation id,
+// which is the same gap that leaves key rotation unrecoverable.
+func (h *handler) federateMemberRemoved(ctx context.Context, roomID string, r memberRemoval) error {
 	atMs := h.now().UnixMilli()
 	payload, err := json.Marshal(model.MemberRemoveEvent{
 		Type: "member_removed", RoomID: roomID, SiteID: h.siteID,
-		Accounts: []string{account}, Timestamp: atMs,
+		Accounts: []string{r.account}, Timestamp: atMs,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal member_removed payload: %w", err)
 	}
-	dedupID := fmt.Sprintf("bot-remove:%s:%s:%s", roomID, userID, destSiteID)
-	return outbox.Publish(ctx, h.publishFn, h.siteID, roomID, destSiteID,
+	key := r.subID
+	if key == "" {
+		key = "u:" + r.userID
+	}
+	dedupID := fmt.Sprintf("bot-remove:%s:%s:%s", roomID, key, r.destSiteID)
+	return outbox.Publish(ctx, h.publishFn, h.siteID, roomID, r.destSiteID,
 		model.InboxMemberRemoved, payload, dedupID, atMs)
 }
 

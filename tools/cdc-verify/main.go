@@ -118,6 +118,8 @@ func main() {
 		slog.Error("load mapping", "error", err)
 		os.Exit(1)
 	}
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	rawMapping, err := os.ReadFile(cfg.MappingFile) // loadMapping just validated it
 	if err != nil {
 		slog.Error("re-read mapping file for the UI", "error", err)

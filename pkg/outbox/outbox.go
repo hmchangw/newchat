@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -100,7 +101,7 @@ func Publish(ctx context.Context, publish func(ctx context.Context, subj string,
 		Timestamp:  ts,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal inbox event envelope: %w", err)
+		return errcode.MarshalFailed("inbox event envelope", err)
 	}
 	data, err := json.Marshal(model.OutboxEvent{
 		RoomID:    roomID,
@@ -109,7 +110,7 @@ func Publish(ctx context.Context, publish func(ctx context.Context, subj string,
 		Timestamp: time.Now().UTC().UnixMilli(),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal outbox event: %w", err)
+		return errcode.MarshalFailed("outbox event", err)
 	}
 	if err := publish(ctx, subject.Outbox(originSiteID, destSiteID, eventType), data, dedupID); err != nil {
 		return fmt.Errorf("publish outbox event for %s: %w", destSiteID, err)

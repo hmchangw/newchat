@@ -72,9 +72,9 @@ func TestHandleLogin_Success(t *testing.T) {
 			assert.Contains(t, s.Roles, string(model.UserRoleAdmin))
 			return nil
 		},
-		DeleteBeyondCapFn: func(_ context.Context, account string, _ int) (int64, error) {
+		DeleteBeyondCapFn: func(_ context.Context, account string, _ int) ([]string, error) {
 			assert.Equal(t, "p_alice", account)
-			return 0, nil
+			return nil, nil
 		},
 	}
 
@@ -263,9 +263,9 @@ func TestHandleLogin_DeleteBeyondCapError_StillReturns200(t *testing.T) {
 			inserted = true
 			return nil
 		},
-		DeleteBeyondCapFn: func(_ context.Context, userID string, _ int) (int64, error) {
+		DeleteBeyondCapFn: func(_ context.Context, userID string, _ int) ([]string, error) {
 			// DeleteBeyondCap fails but the handler should still return 200 and log the error
-			return 0, errors.New("mongo dead during eviction")
+			return nil, errors.New("mongo dead during eviction")
 		},
 	}
 

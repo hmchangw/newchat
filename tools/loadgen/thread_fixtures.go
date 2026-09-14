@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sync"
 	"time"
 

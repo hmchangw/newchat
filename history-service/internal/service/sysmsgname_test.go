@@ -131,6 +131,12 @@ func TestExtractRemovedAccount(t *testing.T) {
 // newSysMsgNameService wires a service whose only live dependency is the user store.
 func newSysMsgNameService(t *testing.T, users UserStore) *HistoryService {
 	t.Helper()
+	return newSysMsgNameServiceWith(t, users, mocks.NewMockAppStore(gomock.NewController(t)))
+}
+
+// newSysMsgNameServiceWith is the two-store form, for the bot cases.
+func newSysMsgNameServiceWith(t *testing.T, users UserStore, apps AppStore) *HistoryService {
+	t.Helper()
 	ctrl := gomock.NewController(t)
 	return closeOnCleanupIn(t, New(
 		mocks.NewMockMessageRepository(ctrl),
@@ -140,7 +146,7 @@ func newSysMsgNameService(t *testing.T, users UserStore) *HistoryService {
 		mocks.NewMockThreadRoomRepository(ctrl),
 		mocks.NewMockThreadSubscriptionRepository(ctrl),
 		users,
-		mocks.NewMockAppStore(ctrl),
+		apps,
 		&config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10},
 	))
 }
@@ -257,7 +263,7 @@ func TestResolveRemovedMemberNames_UserWithNoNamesFallsBackToAccount(t *testing.
 }
 
 // The single-message wrapper serves GetMessageByID and the spliced central row.
-func TestResolveRemovedMemberName_SingleMessage(t *testing.T) {
+func TestNormalizeLegacySysMsg_SingleUserMessage(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	users := mocks.NewMockUserStore(ctrl)
 	users.EXPECT().
@@ -267,21 +273,10 @@ func TestResolveRemovedMemberName_SingleMessage(t *testing.T) {
 	s := newSysMsgNameService(t, users)
 
 	m := legacyRemoved("bob")
-	s.resolveRemovedMemberName(context.Background(), &m)
+	s.normalizeLegacySysMsg(context.Background(), &m)
 
 	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, m.Msg)
-}
-
-func TestResolveRemovedMemberName_NilAndNonQualifyingAreNoOps(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	users := mocks.NewMockUserStore(ctrl)
-	s := newSysMsgNameService(t, users)
-
-	s.resolveRemovedMemberName(context.Background(), nil)
-
-	m := models.Message{Msg: "hello"}
-	s.resolveRemovedMemberName(context.Background(), &m)
-	assert.Equal(t, "hello", m.Msg)
+	assert.Equal(t, model.MessageTypeMemberRemoved, m.Type)
 }
 
 // A nil user store must degrade, not panic — New accepts one.
@@ -291,4 +286,364 @@ func TestResolveRemovedMemberNames_NilStoreDegrades(t *testing.T) {
 	msgs := []models.Message{legacyRemoved("bob")}
 	require.NotPanics(t, func() { s.resolveRemovedMemberNames(context.Background(), msgs) })
 	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[0].Msg)
+}
+
+// Migrated rows carry plural types no client knows; the wire must show the modern
+// ones. The rewrite is unconditional — it does not care whether the row's text
+// matched the name-resolution suffix.
+func TestNormalizeLegacySysMsgTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		msgType  string
+		msg      string
+		wantType string
+	}{
+		{
+			name:     "legacy members_removed becomes member_removed",
+			msgType:  "members_removed",
+			msg:      `"bob" has been removed from the channel.`,
+			wantType: model.MessageTypeMemberRemoved,
+		},
+		{
+			name:     "legacy members_removed is normalized even when its text never matched",
+			msgType:  "members_removed",
+			msg:      "something else entirely",
+			wantType: model.MessageTypeMemberRemoved,
+		},
+		{
+			name:     "legacy members_left becomes member_left",
+			msgType:  "members_left",
+			msg:      `"bob" has left the channel.`,
+			wantType: model.MessageTypeMemberLeft,
+		},
+		{
+			name:     "modern member_removed is already correct",
+			msgType:  model.MessageTypeMemberRemoved,
+			msg:      `"bob" has been removed from the channel.`,
+			wantType: model.MessageTypeMemberRemoved,
+		},
+		{
+			name:     "modern member_left is already correct",
+			msgType:  model.MessageTypeMemberLeft,
+			msg:      "anything",
+			wantType: model.MessageTypeMemberLeft,
+		},
+		{
+			name:     "an unrelated system type is left alone",
+			msgType:  model.MessageTypeMembersAdded,
+			msg:      "anything",
+			wantType: model.MessageTypeMembersAdded,
+		},
+		{
+			name:     "an ordinary user message keeps its empty type",
+			msgType:  "",
+			msg:      "hello",
+			wantType: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msgs := []models.Message{{Type: tc.msgType, Msg: tc.msg}}
+			normalizeLegacySysMsgTypes(msgs)
+			assert.Equal(t, tc.wantType, msgs[0].Type)
+			assert.Equal(t, tc.msg, msgs[0].Msg, "the type rewrite must never touch the body")
+		})
+	}
+}
+
+func TestNormalizeLegacySysMsgTypes_EmptyAndNilAreNoOps(t *testing.T) {
+	require.NotPanics(t, func() {
+		normalizeLegacySysMsgTypes(nil)
+		normalizeLegacySysMsgTypes([]models.Message{})
+	})
+}
+
+// A bot account usually has no user document at all, so the users batch alone
+// leaves the row raw. The app name is what makes it readable.
+func TestResolveRemovedMemberNames_BotResolvesAppName(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
+}
+
+// When a bot does have a user document, the registered app name still wins — the
+// same precedence room-worker applies on the live path.
+func TestResolveRemovedMemberNames_BotWithUserDocPrefersAppName(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return([]model.User{{Account: "helper.bot", EngName: "Helper"}}, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
+}
+
+// No app row: fall back to whatever the user document composes to, exactly as a
+// non-bot account would.
+func TestResolveRemovedMemberNames_BotWithNoAppRowFallsBackToUserDoc(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return([]model.User{{Account: "helper.bot", EngName: "Helper"}}, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+
+	assert.Equal(t, `"Helper" has been removed from the channel.`, msgs[0].Msg)
+}
+
+// Neither an app row nor a user document: the sentence must read as it does today.
+func TestResolveRemovedMemberNames_BotWithNothingToResolveKeepsRawAccount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+
+	assert.Equal(t, `"helper.bot" has been removed from the channel.`, msgs[0].Msg)
+}
+
+// An apps read failure is logged and swallowed, never surfaced.
+func TestResolveRemovedMemberNames_BotAppLookupErrorKeepsRawAccount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(nil, errors.New("mongo unavailable")).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+
+	assert.Equal(t, `"helper.bot" has been removed from the channel.`, msgs[0].Msg)
+}
+
+// A users failure must not abandon the bot half of the page: the two collections
+// are read independently, so one being down does not blind the other.
+func TestResolveRemovedMemberNames_UserStoreErrorStillResolvesBots(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).
+		Return(nil, errors.New("mongo unavailable")).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	msgs := []models.Message{legacyRemoved("helper.bot"), legacyRemoved("bob")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
+	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[1].Msg)
+}
+
+// The point of the whole pass: exactly two reads for the page — one users batch and
+// one apps batch — however many rows and however many repeats they hold.
+func TestResolveRemovedMemberNames_MixedPageIsTwoBatchedReads(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().
+		FindUsersByAccounts(gomock.Any(), gomock.Len(2)).
+		DoAndReturn(func(_ context.Context, accounts []string) ([]model.User, error) {
+			assert.ElementsMatch(t, []string{"bob", "helper.bot"}, accounts)
+			return []model.User{{Account: "bob", EngName: "Bob", ChineseName: "鮑勃"}}, nil
+		}).
+		Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	msgs := []models.Message{
+		legacyRemoved("bob"),
+		legacyRemoved("helper.bot"),
+		{Msg: "an ordinary message"},
+		legacyRemoved("bob"),
+		legacyRemoved("helper.bot"),
+	}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, msgs[0].Msg)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[1].Msg)
+	assert.Equal(t, "an ordinary message", msgs[2].Msg)
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, msgs[3].Msg)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[4].Msg)
+}
+
+// A nil user store degrades to the bot half rather than skipping the pass wholesale.
+func TestResolveRemovedMemberNames_NilUserStoreStillResolvesBots(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, nil, apps)
+
+	msgs := []models.Message{legacyRemoved("helper.bot"), legacyRemoved("bob")}
+	require.NotPanics(t, func() { s.resolveRemovedMemberNames(context.Background(), msgs) })
+
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
+	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[1].Msg)
+}
+
+// The two passes are ordered, and this test is what pins the order: the text
+// rewrite gates on the LEGACY plural type, so normalizing the type first would
+// leave every legacy sentence stuck with its raw account.
+func TestNormalizeLegacySysMsgs_ResolvesNamesThenNormalizesTypes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().
+		FindUsersByAccounts(gomock.Any(), gomock.Len(2)).
+		Return([]model.User{{Account: "bob", EngName: "Bob", ChineseName: "鮑勃"}}, nil).
+		Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	left := models.Message{Type: "members_left", Msg: `"bob" has left the channel.`}
+	msgs := []models.Message{legacyRemoved("bob"), legacyRemoved("helper.bot"), left}
+	s.normalizeLegacySysMsgs(context.Background(), msgs)
+
+	assert.Equal(t, model.MessageTypeMemberRemoved, msgs[0].Type)
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, msgs[0].Msg)
+
+	assert.Equal(t, model.MessageTypeMemberRemoved, msgs[1].Type)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[1].Msg)
+
+	// members_left is type-only: its stored sentence is returned verbatim.
+	assert.Equal(t, model.MessageTypeMemberLeft, msgs[2].Type)
+	assert.Equal(t, `"bob" has left the channel.`, msgs[2].Msg)
+}
+
+// The one-message form resolves a bot through `apps` just as the page form does.
+func TestNormalizeLegacySysMsg_SingleBotMessage(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Len(1)).Return(nil, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	m := legacyRemoved("helper.bot")
+	s.normalizeLegacySysMsg(context.Background(), &m)
+
+	assert.Equal(t, model.MessageTypeMemberRemoved, m.Type)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, m.Msg)
+}
+
+func TestNormalizeLegacySysMsg_NilAndNonQualifyingAreNoOps(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	s := newSysMsgNameService(t, users)
+
+	require.NotPanics(t, func() { s.normalizeLegacySysMsg(context.Background(), nil) })
+
+	m := models.Message{Msg: "hello"}
+	s.normalizeLegacySysMsg(context.Background(), &m)
+	assert.Equal(t, "hello", m.Msg)
+	assert.Equal(t, "", m.Type)
+}
+
+// A nil app store must degrade, not panic — New accepts one, and a bot then falls
+// back to whatever the user document composes to.
+func TestResolveRemovedMemberNames_NilAppStoreDegrades(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return([]model.User{{Account: "helper.bot", EngName: "Helper"}}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, nil)
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	require.NotPanics(t, func() { s.resolveRemovedMemberNames(context.Background(), msgs) })
+
+	assert.Equal(t, `"Helper" has been removed from the channel.`, msgs[0].Msg)
+}
+
+// Scroll-back: a second page carrying the same bot must not re-read `apps`. The
+// cache is shared and built once in New, so the read happens on the first page only.
+func TestResolveRemovedMemberNames_SecondPageServesBotFromCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(nil, nil).Times(2)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	for range 2 {
+		msgs := []models.Message{legacyRemoved("helper.bot")}
+		s.resolveRemovedMemberNames(context.Background(), msgs)
+		assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
+	}
+}
+
+// A page mixing a warm bot with a cold one reads only the cold one.
+func TestResolveRemovedMemberNames_SecondPageQueriesOnlyTheNewBot(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil).Times(2)
+	apps := mocks.NewMockAppStore(ctrl)
+	gomock.InOrder(
+		apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+			Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1),
+		apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"weather.bot"}).
+			Return(map[string]string{"weather.bot": "Weather Bot"}, nil).Times(1),
+	)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	first := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), first)
+
+	second := []models.Message{legacyRemoved("helper.bot"), legacyRemoved("weather.bot")}
+	s.resolveRemovedMemberNames(context.Background(), second)
+
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, second[0].Msg)
+	assert.Equal(t, `"Weather Bot" has been removed from the channel.`, second[1].Msg)
+}
+
+// A reaction actor and a legacy sys-msg row share one cache: the single-account
+// lookup warms the bot, so the page's batch has nothing left to read.
+func TestResolveRemovedMemberNames_ReusesNameWarmedByTheReactionPath(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), gomock.Any()).Times(0)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	// The reaction path resolves the actor first.
+	assert.Equal(t, "Helper Bot", s.botAwareDisplayName(context.Background(), "", "", "helper.bot"))
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
 }

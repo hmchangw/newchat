@@ -32,6 +32,13 @@ func (p *PermanentError) Is(target error) bool { return target == ErrPermanent }
 
 // IsPermanent reports whether err's chain carries a *PermanentError, returning
 // the wrapped *Error. Returns (nil, false) for any non-permanent error.
+//
+// "Chain" includes every branch of an errors.Join: errors.As walks multi-error
+// trees, so a join holding one permanent error and one transient error reports
+// permanent. A caller that joins errors from several operations and settles a
+// JetStream message on the result must therefore guarantee it never builds such
+// a mixture, or the transient failures are Ack-dropped along with the permanent
+// one — silently, since an Ack looks exactly like success.
 func IsPermanent(err error) (*Error, bool) {
 	var p *PermanentError
 	if errors.As(err, &p) {
@@ -73,4 +80,15 @@ func Terminal(err error) (*Error, bool) {
 	default:
 		return ee, true
 	}
+}
+
+// MarshalFailed marks a serialization failure non-retryable. Marshaling a fixed
+// struct is deterministic — a value the encoder rejects (a NaN float, an erroring
+// custom marshaler) is rejected identically on every redelivery — so a JetStream
+// worker Ack-drops it instead of spending its MaxDeliver budget on a doomed retry.
+//
+// what names the value being marshaled; the encoder error rides as the cause, so
+// Classify logs it once server-side and it never reaches the client.
+func MarshalFailed(what string, cause error) error {
+	return Permanent(Internal("marshal "+what, WithCause(cause)))
 }
