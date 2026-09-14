@@ -62,13 +62,27 @@ it fetches cleanly. `git bundle verify` passes.
   carries a comment saying it must be re-applied after any vendoring or gocql
   bump.
 
+- **`c34d6c6`** — Patch the runtime image's OpenSSL.
+
+  `alpine:3.24.1` ships openssl 3.5.7-r0, which CVE-2026-63073 (CMP response
+  format string, 9.8) and CVE-2026-75803 (ChaCha20-Poly1305 / AES-OCB
+  empty-ciphertext auth-tag bypass, 9.1) both apply to. Alpine fixed both in
+  3.5.8-r0, so the final stage upgrades and pins that floor — the floor as well
+  as the upgrade, because `apk upgrade` alone would quietly produce an
+  unpatched image against a stale mirror.
+
+  Real exposure was minimal: the service is `CGO_ENABLED=0` and never links
+  OpenSSL, which is only present because apk-tools and busybox's `ssl_client`
+  pull it in. A pinned base tag freezes these packages, so the image wants
+  periodic rebuilds regardless.
+
 ## Verification already done
 
 Against Cassandra 5.0.9 with real UDT-keyed reaction rows: the published
 `ipushc/cassandra-web:v1.1.6` panics at `main.go:541` and drops the connection;
 this build returns the rows with reactions decoded, on all four tables, with no
-panics. Built and pushed as `josephsylvan/cassandra-web:0.1.0-rc2`
-(`git-f0cb73b`) and re-verified from a clean registry pull.
+panics. Built and pushed as `josephsylvan/cassandra-web:0.1.0-rc3`
+(`git-c34d6c6`) and re-verified from a clean registry pull.
 
 Not verified: the Vue UI does not mount in a headless browser here, identically
 with the upstream image, so it says nothing about these commits.
