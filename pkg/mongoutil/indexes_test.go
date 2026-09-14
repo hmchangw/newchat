@@ -130,3 +130,76 @@ func TestExistingIndex_Model_OmitsUnsetOptions(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// warnIndexDependencies reports an absent index under either variant, and a present-but-non-unique
+// one only when uniqueness is required: the name-only variant must not judge (or compute) uniqueness.
+func TestWarnIndexDependencies(t *testing.T) {
+	tests := []struct {
+		name          string
+		have          map[string]bool // index name -> unique
+		requireUnique bool
+		names         []string
+		wantMissing   []string
+		wantNonUnique []string
+	}{
+		{
+			name:          "all present and unique",
+			have:          map[string]bool{"a_1": true, "b_1": true},
+			requireUnique: true,
+			names:         []string{"a_1", "b_1"},
+		},
+		{
+			name:        "absent index reported as missing by the name-only variant",
+			have:        map[string]bool{"a_1": true},
+			names:       []string{"a_1", "b_1"},
+			wantMissing: []string{"b_1"},
+		},
+		{
+			name:          "absent index reported as missing by the unique variant",
+			have:          map[string]bool{"a_1": true},
+			requireUnique: true,
+			names:         []string{"a_1", "b_1"},
+			wantMissing:   []string{"b_1"},
+		},
+		{
+			name:  "non-unique index passes the name-only variant",
+			have:  map[string]bool{"a_1": false},
+			names: []string{"a_1"},
+		},
+		{
+			name:          "non-unique index reported by the unique variant, not as missing",
+			have:          map[string]bool{"a_1": false},
+			requireUnique: true,
+			names:         []string{"a_1"},
+			wantNonUnique: []string{"a_1"},
+		},
+		{
+			name:          "mixed",
+			have:          map[string]bool{"a_1": true, "b_1": false},
+			requireUnique: true,
+			names:         []string{"a_1", "b_1", "c_1"},
+			wantMissing:   []string{"c_1"},
+			wantNonUnique: []string{"b_1"},
+		},
+		{
+			name:          "no names wanted",
+			have:          map[string]bool{"a_1": false},
+			requireUnique: true,
+		},
+		{
+			name:        "empty listing",
+			have:        map[string]bool{},
+			names:       []string{"a_1"},
+			wantMissing: []string{"a_1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := captureLogs(t)
+			warnIndexDependencies(context.Background(), "things", tt.have, tt.requireUnique, tt.names...)
+			got := h.indexesWarned()
+			assert.Equal(t, tt.wantMissing, got["missing"])
+			assert.Equal(t, tt.wantNonUnique, got["not unique"])
+		})
+	}
+}
