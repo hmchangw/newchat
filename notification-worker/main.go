@@ -116,7 +116,8 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		mongoutil.WithDegradedStart())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -439,8 +440,10 @@ func main() {
 
 // buildConsumerConfig returns the durable consumer config, centralized so it's unit-testable
 // without NATS; durable/filterSubject are env-driven so the binary can bind to user or bot pipelines.
+// The outage retry budget matters now that the pod starts with MongoDB down: a cold-cache
+// GetMembers failure NAKs, and at the package default the push would be dropped after ~2.6 min.
 func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff))
 	cc.Durable = durable
 	cc.FilterSubjects = []string{filterSubject}
 	return cc

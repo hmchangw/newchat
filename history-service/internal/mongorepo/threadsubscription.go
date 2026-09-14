@@ -47,8 +47,9 @@ func NewThreadSubscriptionRepo(db *mongo.Database) *ThreadSubscriptionRepo {
 // needs. The (threadRoomId, userAccount) unique index is owned by room-service —
 // verified, not created here. Idempotent.
 func (r *ThreadSubscriptionRepo) EnsureIndexes(ctx context.Context) error {
-	// thread_subscriptions.{threadRoomId,userAccount} (unique) is owned by room-service; verify + warn only, never create.
-	mongoutil.WarnMissingIndexes(ctx, r.subs.Raw(), "threadRoomId_1_userAccount_1")
+	// thread_subscriptions.{threadRoomId,userAccount} (unique) is owned by room-service; verify + warn only,
+	// never create. The unique-aware check: a same-name index that lost its constraint must not pass silently.
+	mongoutil.WarnMissingUniqueIndexes(ctx, r.subs.Raw(), "threadRoomId_1_userAccount_1")
 	// Fronts ListUserThreadSubscriptions' userAccount $match.
 	if _, err := r.subs.Raw().Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "userAccount", Value: 1}},

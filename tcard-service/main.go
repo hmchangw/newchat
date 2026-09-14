@@ -79,16 +79,20 @@ func run() error {
 		return fmt.Errorf("parse mongo read preference: %w", err)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		// Degraded start means NotReady, not cache-served: RefreshLoop retries the card load and /readyz flips on success.
+		mongoutil.WithDegradedStart())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	store := newMongoCardStore(mongoClient.Database(cfg.MongoDB))
-	if err := store.EnsureIndexes(ctx); err != nil {
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
+	if err := store.EnsureIndexes(ensureCtx); err != nil {
 		slog.Warn("ensure cards indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
+	ensureCancel()
 
 	// Populate the card cache in the background; /readyz stays unavailable
 	// until the first successful load.
