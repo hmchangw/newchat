@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -20,7 +21,7 @@ func newValkeyCache(client valkeyutil.Client) *valkeyCache {
 }
 
 func restrictedKey(account string) string {
-	return fmt.Sprintf("searchservice:restrictedrooms:%s", account)
+	return cachekeys.SearchRestrictedRooms(account)
 }
 
 // GetRestricted returns the cached restricted-rooms map for `account`.

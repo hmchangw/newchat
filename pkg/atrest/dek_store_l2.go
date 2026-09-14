@@ -8,6 +8,8 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // L2Recorder records L2 (Valkey) hit/miss/error outcomes. An alias of
@@ -18,15 +20,8 @@ type L2Recorder = valkeyutil.CacheRecorder
 // DEKKey is the L2 key for a room's wrapped DEK. The {roomID} hash-tag
 // colocates it in the room's cluster slot, matching house convention.
 func DEKKey(roomID string) string {
-	return "dek:{" + roomID + "}:" + cacheKeySchemaVersion
+	return cachekeys.RoomDEK(roomID)
 }
-
-// cacheKeySchemaVersion namespaces keys by stored shape, so a future change to
-// the stored value misses these entries instead of decoding them as the wrong
-// shape. No earlier generation exists to clear: this cache is new, and the
-// shapes numbered below it never ran outside this branch. The version trails
-// the key so the {roomID} hash tag keeps its cluster slot.
-const cacheKeySchemaVersion = "v2"
 
 // usableDEK rejects an entry with no wrapped key: serving it would fail Unwrap
 // for the entry's whole TTL.

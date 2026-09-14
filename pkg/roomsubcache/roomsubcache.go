@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -139,33 +140,17 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 	return c
 }
 
-// cacheKeySchemaVersion namespaces cache keys by the Member wire shape.
-// Bump whenever a Member field is added/changed such that an old cached
-// entry would silently decode with a zero-valued new field forever (Valkey
-// has no schema check) — the version segment makes such entries miss so
-// they get repopulated from Mongo with the current shape. Bumped to v2 when
-// SiteID was added; bumped to v3 when SiteID (the room's home site — a bug)
-// was replaced by HomeSiteID (the member's home site, see Member.HomeSiteID)
-// so pre-fix entries miss instead of decoding with the wrong semantics.
-//
-// Bumped to v4 when the stored value stopped being a bare []Member and became
-// the Entry{Members, CachedAt} envelope. That is a change of JSON kind, array
-// to object, so reusing v3 would have each binary in a rolling deploy handed
-// the other's shape — an unmarshal error, not a silent zero value.
-const cacheKeySchemaVersion = "v4"
-
-// legacyCacheKeySchemaVersion is the pre-envelope generation. Only invalidation
-// touches it: while a rolling deploy can still have a v3 binary live, a bust
-// must clear both or that binary keeps serving a member list for a room whose
-// membership just changed. Drop this once no v3 binary can be running.
-const legacyCacheKeySchemaVersion = "v3"
-
+// cacheKey and legacyCacheKey both delegate to the registry. The Member
+// wire-shape schema versions that namespace these keys live with the builders
+// in pkg/cachekeys, because the version segment is part of the literal pattern
+// the keyspace scanner classifies on — see cachekeys.RoomSubs for the bump
+// rule and cachekeys.RoomSubsLegacy for why the previous generation survives.
 func cacheKey(roomID string) string {
-	return "room:" + cacheKeySchemaVersion + ":" + roomID + ":subs"
+	return cachekeys.RoomSubs(roomID)
 }
 
 func legacyCacheKey(roomID string) string {
-	return "room:" + legacyCacheKeySchemaVersion + ":" + roomID + ":subs"
+	return cachekeys.RoomSubsLegacy(roomID)
 }
 
 // Get returns the cached member list for roomID. On absence it returns

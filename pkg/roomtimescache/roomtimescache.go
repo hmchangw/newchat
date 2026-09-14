@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/valkeyutil"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // Times is the L2 wire form. Epoch milliseconds; zero means "not recorded" and
@@ -47,7 +49,7 @@ type Recorder = valkeyutil.CacheRecorder
 
 // Key is the L2 key for a room's times. The {roomID} hash-tag colocates it in
 // the room's cluster slot, matching house convention.
-func Key(roomID string) string { return "roomtimes:{" + roomID + "}" }
+func Key(roomID string) string { return cachekeys.RoomTimes(roomID) }
 
 // Tier reads and writes the room-times entry. A nil client or non-positive TTL
 // disables it: every method becomes a no-op and Fallback reports no entry.

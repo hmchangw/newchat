@@ -34,7 +34,7 @@ func withFetcherForTest(f func(context.Context, *mongo.Collection, string) (Meta
 // cluster slot as the room's encryption key (pkg/roomkeystore).
 func TestMetaKey(t *testing.T) {
 	got := MetaKey("r123")
-	assert.Equal(t, "room:{r123}:meta:"+cacheKeySchemaVersion, got)
+	assert.Equal(t, "room:{r123}:meta:v3", got)
 	assert.Contains(t, got, "{r123}", "hash tag must be preserved for slot colocation")
 	assert.NotEqual(t, "room:{r123}:meta", got, "must not reuse the pre-envelope key")
 }

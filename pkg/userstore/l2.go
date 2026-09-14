@@ -14,14 +14,16 @@ import (
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // idKey and accountKey are the two key spaces a user is reachable through.
 // Both hold the whole record rather than one aliasing the other: an alias would
 // cost a second round-trip per lookup, and in cluster mode the two keys hash to
 // different slots anyway, so the "cheap" indirection buys nothing.
-func idKey(id string) string           { return "user:id:" + id }
-func accountKey(account string) string { return "user:acct:" + account }
+func idKey(id string) string           { return cachekeys.UserByID(id) }
+func accountKey(account string) string { return cachekeys.UserByAccount(account) }
 
 // cachedUser is the L2 envelope. CachedAt drives refresh-on-read: it records
 // when the source of truth last confirmed the record, which is what decides
