@@ -7,14 +7,17 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
 func TestBuildConsumerConfig(t *testing.T) {
 	t.Run("propagates settings", func(t *testing.T) {
 		cc := buildConsumerConfig(stream.ConsumerSettings{
-			AckWait:       30 * time.Second,
-			MaxDeliver:    5,
+			AckWait: 30 * time.Second,
+			// The symbol, not a literal: a consumer left at the package default
+			// gets the outage retry budget, so the default must be recognised.
+			MaxDeliver:    stream.DefaultMaxDeliver,
 			MaxWaiting:    512,
 			MaxAckPending: 1000,
 		})
@@ -23,7 +26,8 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 1000, cc.MaxAckPending)
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 		assert.Equal(t, 30*time.Second, cc.AckWait)
-		assert.Equal(t, 5, cc.MaxDeliver)
+		assert.Equal(t, jsretry.DeliveriesFor(jsretry.DefaultBackoff, stream.OutageRetryWindow), cc.MaxDeliver,
+			"a degraded pod must park a message through a MongoDB outage, not exhaust the package default and drop it")
 		assert.Equal(t, 512, cc.MaxWaiting)
 		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
 	})
