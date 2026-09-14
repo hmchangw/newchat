@@ -133,6 +133,12 @@ func (s ConsumerSettings) EffectiveAckWait() time.Duration {
 // survive a dependency outage.
 const DefaultMaxDeliver = 6
 
+// DefaultMaxAckPending mirrors the MaxAckPending struct tag, so a service can tell
+// "the operator chose 1000" apart from "nobody chose" the same way the delivery
+// budget does. A parked message holds one of these slots for its whole retry
+// window, so a consumer that lengthens that window may need to widen this too.
+const DefaultMaxAckPending = 1000
+
 // OutageRetryWindow is how long a consumer opted into the outage budget must
 // keep retrying before it gives up on a message. Sized to ride out the
 // one-hour MongoDB outage the outage-survival work targets.
