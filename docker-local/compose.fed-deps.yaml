@@ -114,6 +114,13 @@ services:
     container_name: chat-fed-cassandra
     networks: [chat-site-remote]
 
+  # One viewer for both sites: it browses whole keyspaces, and fed-deps homes
+  # `chat` and `chat_remote` in the single shared Cassandra above.
+  cassandra-web:
+    extends: { file: ./compose.deps.yaml, service: cassandra-web }
+    container_name: chat-fed-cassandra-web
+    networks: [chat-site-remote]
+
   elasticsearch:
     extends: { file: ./compose.deps.yaml, service: elasticsearch }
     container_name: chat-fed-elasticsearch
