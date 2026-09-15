@@ -41,10 +41,19 @@ type VerifyInputs struct {
 	// with no tolerance. See evaluateVerify.
 	OracleErrs      int
 	OracleErrSample error
-	HarnessErr      error
-	Cancelled       bool
-	GCPauseP99      float64
-	GCPauseMax      float64
+	// ChangesUnobserved counts membership changes that were issued but still
+	// inside their settle window when driveChurn left its loop, so neither
+	// oracle ever ran for them. They share OracleErrs' tolerance budget: both
+	// mean "this change's outcome is unknown". See evaluateVerify.
+	ChangesUnobserved int
+	// ChurnRequested reports whether --member-churn asked for any churn at all.
+	// The evaluator cannot infer it from Changes: zero changes is the expected
+	// result of --member-churn=0 and a failed run otherwise.
+	ChurnRequested bool
+	HarnessErr     error
+	Cancelled      bool
+	GCPauseP99     float64
+	GCPauseMax     float64
 }
 
 // oracleErrToleranceDivisor sets the share of issued membership changes whose
@@ -53,17 +62,34 @@ type VerifyInputs struct {
 // tuning away the signal it guards.
 const oracleErrToleranceDivisor = 10
 
-// maxToleratedOracleErrs returns how many failed membership-oracle queries a run
-// may absorb: always at least one, then 10% of the changes issued.
+// maxToleratedOracleErrs returns how many membership changes a run may leave
+// unresolved: always at least one, then 10% of the changes issued.
 //
-// A change whose oracle query failed is already excluded from Applied and
-// Effective, so a tolerated failure costs detection sensitivity on that one
-// change — not the correctness of the verdict. The original all-or-nothing rule
+// A change that could not be resolved is already excluded from Applied and
+// Effective, so a tolerated one costs detection sensitivity on that one change —
+// not the correctness of the verdict. The original all-or-nothing rule
 // conflated "we could not check this change" with "we cannot trust this run",
 // and threw away a whole run's clean delivery, leakage, exactly-once and
 // persistence results over a single transient subscription.list timeout.
+//
+// Two distinct failures spend this one budget, because they say the same thing
+// about the verdict: an oracle query that errored (VerifyInputs.OracleErrs) and
+// a change dropped still inside its settle window when the steady window closed
+// (VerifyInputs.ChangesUnobserved). Splitting the budget would let a run hide
+// nine of each behind two separate sub-tolerances.
 func maxToleratedOracleErrs(totalChanges int) int {
 	return max(1, totalChanges/oracleErrToleranceDivisor)
+}
+
+// membershipNotExercisedReason explains a run that asked for churn and issued
+// nothing. Built from the tailroom constants so the operator-facing advice
+// cannot drift from churnTailroom's actual arithmetic.
+func membershipNotExercisedReason() string {
+	return fmt.Sprintf(
+		"membership churn was requested but no change was issued — the membership dimension was not exercised: "+
+			"--steady must exceed the churn tailroom (max(%s, --settle + %s observation budget)), "+
+			"or every add/remove was rejected by the server",
+		verifyChurnTailroom, verifyChurnObservation)
 }
 
 // VerifyResult is the evaluated outcome plus human-readable reasons.
@@ -81,14 +107,15 @@ type VerifyResult struct {
 // itself dropped data or lost a connection, or enough supporting queries failed,
 // the run cannot prove the system did anything wrong (or right).
 //
-// Membership-oracle failures are the one signal here with a budget rather than a
-// latch (maxToleratedOracleErrs): each failed query only blinds one change,
+// Unresolved membership changes are the one signal here with a budget rather
+// than a latch (maxToleratedOracleErrs): each one only blinds a single change,
 // which is already excluded from Applied/Effective, so a few cost sensitivity
-// rather than trust. The count is reported either way (VerifyReport.OracleErrs).
+// rather than trust. The counts are reported either way (VerifyReport).
 //
-// Membership churn (Changes) is deliberately NOT considered here: churn
-// legitimately changes the expected recipient set and is not, on its own,
-// evidence that measurement was untrustworthy.
+// A membership *epoch* change (Changes.Adds/Removes) is deliberately NOT
+// considered here: churn legitimately changes the expected recipient set and is
+// not, on its own, evidence that measurement was untrustworthy. Changes.Total
+// at zero is, when churn was requested — that is the floor, not the churn.
 //
 // Multiplex drops (MultiplexDrops) are deliberately NOT considered here either,
 // though they were originally. The multiplex pool's per-user inbox channels are
@@ -120,10 +147,25 @@ func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugePar
 	if in.HarnessErr != nil {
 		reasons = append(reasons, fmt.Sprintf("harness failed during membership setup: %v", in.HarnessErr))
 	}
-	if tol := maxToleratedOracleErrs(in.Changes.Total); in.OracleErrs > tol {
-		reasons = append(reasons, fmt.Sprintf(
-			"%d of %d membership oracle queries failed (tolerance %d): %v",
-			in.OracleErrs, in.Changes.Total, tol, in.OracleErrSample))
+	// One budget, two spenders: a failed oracle query and a change dropped
+	// before its settle window elapsed both leave that change's outcome unknown.
+	// The reason breaks them back down because the remedies differ — retry the
+	// run versus widen --steady.
+	unresolved := in.OracleErrs + in.ChangesUnobserved
+	if tol := maxToleratedOracleErrs(in.Changes.Total); unresolved > tol {
+		reason := fmt.Sprintf(
+			"%d of %d membership changes unresolved (tolerance %d): %d oracle queries failed, %d never observed",
+			unresolved, in.Changes.Total, tol, in.OracleErrs, in.ChangesUnobserved)
+		if in.OracleErrSample != nil {
+			reason = fmt.Sprintf("%s: %v", reason, in.OracleErrSample)
+		}
+		reasons = append(reasons, reason)
+	}
+	// The membership analogue of the --min-probes floor. Zero changes with churn
+	// requested means the dimension never ran, which is the one outcome a
+	// correctness tool must never render as a clean PASS.
+	if in.ChurnRequested && in.Changes.Total == 0 {
+		reasons = append(reasons, membershipNotExercisedReason())
 	}
 	if in.Counts.Tracked < in.MinProbes {
 		reasons = append(reasons, fmt.Sprintf(

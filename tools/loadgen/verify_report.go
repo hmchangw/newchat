@@ -23,8 +23,13 @@ type VerifyReport struct {
 	// their oracle query failed. Reported even when under tolerance and so not
 	// affecting the verdict — otherwise a run's Applied count silently reads
 	// short of Total and looks like a membership bug that escaped its violation.
-	OracleErrs int          `json:"oracleErrs"`
-	Result     VerifyResult `json:"result"`
+	OracleErrs int `json:"oracleErrs"`
+	// ChangesUnobserved is how many changes were issued but still inside their
+	// settle window when the steady window ended, so neither oracle ran. Kept
+	// separate from OracleErrs in the artifact even though the console shows the
+	// sum: a flaky oracle and a truncated run need different fixes.
+	ChangesUnobserved int          `json:"changesUnobserved"`
+	Result            VerifyResult `json:"result"`
 }
 
 // renderVerifyConsole formats the operator-facing summary. Never includes
@@ -47,11 +52,12 @@ func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugePar
 	fmt.Fprintf(&b, "membership:  %d changes (%d add, %d remove) / %d applied / %d effective",
 		rep.Changes.Total, rep.Changes.Adds, rep.Changes.Removes,
 		rep.Changes.Applied, rep.Changes.Effective)
-	// Only rendered when non-zero: a tolerated oracle failure never reaches
-	// REASONS, so this clause is the only place the shortfall between Total and
-	// Applied is explained.
-	if rep.OracleErrs > 0 {
-		fmt.Fprintf(&b, " / %d unobserved", rep.OracleErrs)
+	// The same sum evaluateVerify measures against the tolerance, so the console
+	// can never disagree with the verdict it prints below. Only rendered when
+	// non-zero: a tolerated failure never reaches REASONS, so this clause is the
+	// only place the shortfall between Total and Applied is explained.
+	if unresolved := rep.OracleErrs + rep.ChangesUnobserved; unresolved > 0 {
+		fmt.Fprintf(&b, " / %d unobserved", unresolved)
 	}
 	b.WriteString("\n")
 

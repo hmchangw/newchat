@@ -530,6 +530,75 @@ func TestVerifyRun_Harvest(t *testing.T) {
 	assert.NoError(t, sample)
 }
 
+// TestVerifyRun_DriveChurn_CancelledWithPendingChanges_CountsUnobserved pins
+// the truncated-run accounting. driveChurn leaves its loop on ctx.Done and
+// drops whatever is still inside its settle window; ApplyAdd/ApplyRemove have
+// already counted those changes in Changes.Total, so without this they read as
+// a silent shortfall in Applied/Effective — the report saying
+// "1 change / 0 applied / 0 effective" with verdict PASS, which is what a real
+// membership_not_applied looks like.
+func TestVerifyRun_DriveChurn_CancelledWithPendingChanges_CountsUnobserved(t *testing.T) {
+	const roomID = "room-small-000001"
+	prs := probeRoomSetForTest(map[string][]string{roomID: {"u-1", "u-2"}}, roomID)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	r := &verifyRun{
+		// Seed 1 makes applyChange's first coin flip pick the remove branch, which
+		// needs no directPool subscription and so no live NATS connection.
+		vc: &verifyConfig{
+			Seed: 1, MemberChurn: 600, Settle: time.Hour, MinProbes: 1,
+		},
+		prs:     prs,
+		mm:      NewMembershipModel(prs),
+		siteID:  "site-a",
+		byID:    map[string]*userState{"u-2": {ID: "u-2", Account: "user-2"}},
+		reserve: []string{"u-2"},
+	}
+	r.env = &stepEnv{
+		request: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+			// One accepted change, then end the steady window with it still
+			// inside its (one hour) settle window.
+			cancel()
+			return []byte(`{}`), nil
+		},
+	}
+
+	// issueUntil far ahead: the cancel above, not the tailroom, ends this run.
+	r.driveChurn(ctx, time.Now().Add(time.Hour))
+
+	assert.Equal(t, 1, r.mm.Counts().Total, "the change was issued and counted")
+	assert.Equal(t, 0, r.mm.Counts().Applied, "and never observed either way")
+	assert.Equal(t, 1, r.takeChangesUnobserved(),
+		"a change dropped still-pending is a change whose outcome is unknown")
+	n, _ := r.takeOracleErrs()
+	assert.Zero(t, n, "an unharvested change is not an oracle query failure")
+}
+
+func TestVerifyRun_DriveChurn_NoChurnRate_RecordsNothing(t *testing.T) {
+	prs := probeRoomSetForTest(map[string][]string{"room-small-000001": {"u-1"}}, "room-small-000001")
+	r := &verifyRun{
+		vc:  &verifyConfig{Seed: 1, MemberChurn: 0},
+		prs: prs,
+		mm:  NewMembershipModel(prs),
+	}
+
+	r.driveChurn(t.Context(), time.Now().Add(time.Hour))
+
+	assert.Zero(t, r.takeChangesUnobserved())
+}
+
+func TestVerifyRun_RecordUnobservedChanges_Accumulates(t *testing.T) {
+	r := &verifyRun{}
+
+	r.recordUnobservedChanges(0)
+	assert.Zero(t, r.takeChangesUnobserved(), "a clean exit records nothing")
+
+	r.recordUnobservedChanges(3)
+	r.recordUnobservedChanges(2)
+	assert.Equal(t, 5, r.takeChangesUnobserved())
+}
+
 // TestVerifyRun_Observe_FailedOracleQueryIsCounted pins that a failed oracle
 // query is counted rather than recorded as an observation: a change nobody could
 // check must not land in Applied, and it must not silently vanish either.
