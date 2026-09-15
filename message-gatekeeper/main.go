@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -227,10 +228,10 @@ func main() {
 
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		func(msgCtx context.Context, msg *natsmetrics.Message) {
+		guardedProcessor(func(msgCtx context.Context, msg *natsmetrics.Message) {
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			handler.HandleJetStreamMsg(handlerCtx, msg)
-		})
+		}))
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -272,4 +273,19 @@ func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "message-gatekeeper"
 	return cc
+}
+
+// guardedProcessor wraps the per-message handler in jobguard's panic recovery.
+//
+// natsmetrics.Consume spawns a goroutine per message with no recover(), so an
+// unrecovered panic in HandleJetStreamMsg takes the process down with the
+// message un-acked — and MESSAGES has exactly one consumer, so JetStream
+// redelivers it into a crash loop that stops the site accepting any message at
+// all for the length of the backoff schedule. On panic jobguard Acks, dropping
+// the poison message instead. Every other MESSAGES-CANONICAL consumer already
+// composes this way; this one did not.
+func guardedProcessor(process natsmetrics.ProcessMessage) natsmetrics.ProcessMessage {
+	return func(msgCtx context.Context, msg *natsmetrics.Message) {
+		jobguard.Run(msg, func() { process(msgCtx, msg) })
+	}
 }

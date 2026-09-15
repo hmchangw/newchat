@@ -2320,6 +2320,12 @@ error table. Key errors:
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
 - `"thread parent message not found"` (`not_found`, `thread_parent_not_found`)
+- `"message could not be accepted, please retry"` (`unavailable`) — sent once, on the
+  final JetStream delivery, when an infrastructure failure has exhausted the retry
+  budget. Earlier deliveries retry silently, so no reply means the send may still
+  succeed; this reply means it will not. Retry with the same `id` — stored history is
+  keyed on it — but that is not a duplicate-delivery guarantee; see
+  [../client-api.md §4](../client-api.md#4-message-send).
 
 **Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 
