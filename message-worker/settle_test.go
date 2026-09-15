@@ -91,7 +91,7 @@ func newDegradeStateHandler(t *testing.T, store Store, publish PublishFunc, degr
 	now := time.Unix(1700000000, 0).UTC()
 	tr := newDegradeTracker(&fakeDegradeStore{}, "site-a",
 		func(context.Context) (uint64, uint64, error) { return 1, 0, nil }, m,
-		func() time.Time { return now })
+		func() time.Time { return now }, 0)
 	if degraded {
 		tr.OnWriteFailure(context.Background())
 	}
@@ -112,7 +112,7 @@ func testDropPolicy() dropPolicy {
 // tracker, so it must never be nil.
 func testDegradeTracker() *degradeTracker {
 	return newDegradeTracker(&fakeDegradeStore{}, "site-a",
-		func(context.Context) (uint64, uint64, error) { return 0, 0, nil }, nil, nil)
+		func(context.Context) (uint64, uint64, error) { return 0, 0, nil }, nil, nil, 0)
 }
 
 // historyErr wraps a CQL failure the way handler.go's persist path does: tagged as

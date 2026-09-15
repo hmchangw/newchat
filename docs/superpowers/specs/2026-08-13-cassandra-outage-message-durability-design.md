@@ -179,6 +179,22 @@ per incident, and a history read is not worth a Mongo round-trip per call.
   a literal silently falls under the interval it must outlast the next time that schedule is
   retuned — which is exactly what #344 did to the original hard-coded 5m.
 
+- **Debounced on the way in (`DEGRADE_MARK_DELAY`, default 30s).** Marking on the first
+  failed write made the asymmetry above bite in the other direction: setting is instant
+  and clearing costs a 20-minute grace, so a single timeout, node restart or GC pause —
+  each of which the very next retry resolves — raised a site-wide "history incomplete"
+  for every room for 20 minutes. On any real cluster that fires far more often than an
+  actual outage does. Writes must now keep failing for the delay before the site is
+  declared degraded; 30s clears the 1s/5s/30s backoff rungs, so a blip resolved on retry
+  never marks while a genuine outage still marks within about half a minute. Any success
+  retires the pending window, so an unrelated later blip measures its own.
+  **The debounce delays the notice, never the window it describes:** the marker is
+  stamped with the *first* failure of the run, not the moment it is written, so
+  `incompleteSince` still covers the already-failing seconds before it. The gate applies
+  only to the transition into degraded — a pod already holding the marker, including one
+  that adopted a sibling's via `Refresh`, acts immediately. `0` restores the old
+  mark-on-first-failure behaviour.
+
 A marker stuck set costs lag, not loss — §3.7's ack-floor-age alert is what catches it.
 Because the marker no longer gates retries, a stuck marker can no longer keep messages
 in the retry loop; it only prolongs `incompleteSince`, quote retries, and badge
