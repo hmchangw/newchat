@@ -191,7 +191,7 @@ func main() {
 	// not on edits/deletes/pins/reactions.
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
 
-	if err := bootstrapStreams(ctx, otelJS, wiring.CanonicalStream.Name, wiring.CanonicalCreated, wiring.PushStream.Name, wiring.PushInputWildcard, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, otelJS, wiring.CanonicalStream, wiring.PushStream, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
