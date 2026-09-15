@@ -112,6 +112,11 @@ type incrExClient interface {
 
 // botRateLimit enforces per-caller then global fixed-window counters (60s each); 0 disables.
 // Per-caller first so a rejected caller doesn't consume the global budget.
+//
+// Fails OPEN: an unreachable Valkey admits the request rather than rejecting it.
+// Bots are critical infrastructure, so a lost ceiling beats a dead bot — during
+// an outage nothing throttles a looping caller, which is the accepted cost of
+// staying up. bot_control_bypassed_total is the signal that this happened.
 func botRateLimit(client incrExClient, perCaller, perGlobal int) gin.HandlerFunc {
 	const window = time.Minute
 
@@ -133,8 +138,8 @@ func botRateLimit(client incrExClient, perCaller, perGlobal int) gin.HandlerFunc
 		if perCaller > 0 {
 			n, err := client.IncrEx(ctx, "botrl:caller:"+pr.UserID, window)
 			if err != nil {
-				errhttp.Write(ctx, c, errcode.Internal("bot rate limit caller", errcode.WithCause(err)))
-				c.Abort()
+				bypassControl(ctx, "rate limit", controlRateLimitCaller, err, "counter", "caller")
+				c.Next()
 				return
 			}
 			if n > int64(perCaller) {
@@ -148,8 +153,8 @@ func botRateLimit(client incrExClient, perCaller, perGlobal int) gin.HandlerFunc
 		if perGlobal > 0 {
 			n, err := client.IncrEx(ctx, "botrl:global", window)
 			if err != nil {
-				errhttp.Write(ctx, c, errcode.Internal("bot rate limit global", errcode.WithCause(err)))
-				c.Abort()
+				bypassControl(ctx, "rate limit", controlRateLimitGlobal, err, "counter", "global")
+				c.Next()
 				return
 			}
 			if n > int64(perGlobal) {
