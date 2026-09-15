@@ -73,6 +73,65 @@ func TestRenderVerifyConsole_OmitsUnobservedWhenZero(t *testing.T) {
 	assert.NotContains(t, out, "unobserved")
 }
 
+// TestRenderVerifyConsole_UnobservedCombinesBothCounts pins that the console
+// clause reflects the same sum the verdict is computed from. If it showed only
+// the oracle failures, a truncated run could print "0 unobserved" beside an
+// INCONCLUSIVE whose reason blamed unresolved changes — the report contradicting
+// the verdict on its own page.
+func TestRenderVerifyConsole_UnobservedCombinesBothCounts(t *testing.T) {
+	rep := reportForTest()
+	rep.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 15, Effective: 15}
+	rep.OracleErrs = 3
+	rep.ChangesUnobserved = 4
+
+	out := renderVerifyConsole(rep)
+	assert.Contains(t, out,
+		"membership:  22 changes (12 add, 10 remove) / 15 applied / 15 effective / 7 unobserved")
+}
+
+func TestRenderVerifyConsole_UnobservedFromChangesAlone(t *testing.T) {
+	rep := reportForTest()
+	rep.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 20, Effective: 20}
+	rep.OracleErrs = 0
+	rep.ChangesUnobserved = 2
+
+	out := renderVerifyConsole(rep)
+	assert.Contains(t, out, "/ 2 unobserved")
+}
+
+func TestRenderVerifyConsole_OmitsUnobservedWhenBothCountsZero(t *testing.T) {
+	rep := reportForTest()
+	rep.OracleErrs = 0
+	rep.ChangesUnobserved = 0
+
+	out := renderVerifyConsole(rep)
+	assert.NotContains(t, out, "unobserved")
+}
+
+// TestRenderVerifyJSON_CarriesBothUnresolvedCounts pins that the artifact keeps
+// the two numbers apart: an operator diffing runs needs to tell a flaky oracle
+// from a run that ended before its changes settled, and the console's combined
+// clause cannot express that.
+func TestRenderVerifyJSON_CarriesBothUnresolvedCounts(t *testing.T) {
+	rep := reportForTest()
+	rep.OracleErrs = 3
+	rep.ChangesUnobserved = 4
+
+	raw, err := renderVerifyJSON(rep)
+	require.NoError(t, err)
+
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	assert.Contains(t, doc, "oracleErrs")
+	assert.Contains(t, doc, "changesUnobserved")
+	assert.NotContains(t, doc, "ChangesUnobserved")
+
+	var back VerifyReport
+	require.NoError(t, json.Unmarshal(raw, &back))
+	assert.Equal(t, 3, back.OracleErrs)
+	assert.Equal(t, 4, back.ChangesUnobserved)
+}
+
 func TestRenderVerifyJSON_CarriesOracleErrs(t *testing.T) {
 	rep := reportForTest()
 	rep.OracleErrs = 3

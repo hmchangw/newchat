@@ -280,6 +280,11 @@ type verifyRun struct {
 	// what distinguishes one blip from a service that was down all run.
 	oracleErrs      int
 	oracleErrSample error
+	// changesUnobserved counts changes driveChurn issued but left still inside
+	// their settle window when its loop ended. They are already in
+	// ChangeCounts.Total but can never reach Applied/Effective, so counting them
+	// is what keeps that shortfall from reading as a silent membership bug.
+	changesUnobserved int
 	// harnessErr is a fatal loadgen-side failure that aborted churn — a
 	// different class from an oracle query failure, and never tolerated.
 	harnessErr error
@@ -422,24 +427,29 @@ func executeVerify(
 		ReadbackErr:       readbackErr,
 		OracleErrs:        oracleErrs,
 		OracleErrSample:   oracleErrSample,
-		HarnessErr:        run.takeHarnessErr(),
-		Cancelled:         ctx.Err() != nil,
-		GCPauseP99:        snapshotSelfMetrics().GCPauseP99Ms,
-		GCPauseMax:        verifyGCPauseMaxMs,
+		ChangesUnobserved: run.takeChangesUnobserved(),
+		// Whether churn was *asked for*, not whether it happened — the floor in
+		// evaluateVerify exists precisely to catch the case where it did not.
+		ChurnRequested: vc.MemberChurn > 0,
+		HarnessErr:     run.takeHarnessErr(),
+		Cancelled:      ctx.Err() != nil,
+		GCPauseP99:     snapshotSelfMetrics().GCPauseP99Ms,
+		GCPauseMax:     verifyGCPauseMaxMs,
 	}
 
 	directSize := env.direct.Size()
 	return VerifyReport{
-		ProbeRooms:     len(prs.Rooms),
-		ProbeMembers:   len(prs.Members),
-		DirectPoolSize: directSize,
-		ReserveSize:    len(run.reserve),
-		BackgroundSize: int(env.activatedCount.Load()) - directSize,
-		MultiplexDrops: in.MultiplexDrops,
-		Counts:         in.Counts,
-		Changes:        in.Changes,
-		OracleErrs:     in.OracleErrs,
-		Result:         evaluateVerify(in),
+		ProbeRooms:        len(prs.Rooms),
+		ProbeMembers:      len(prs.Members),
+		DirectPoolSize:    directSize,
+		ReserveSize:       len(run.reserve),
+		BackgroundSize:    int(env.activatedCount.Load()) - directSize,
+		MultiplexDrops:    in.MultiplexDrops,
+		Counts:            in.Counts,
+		Changes:           in.Changes,
+		OracleErrs:        in.OracleErrs,
+		ChangesUnobserved: in.ChangesUnobserved,
+		Result:            evaluateVerify(in),
 	}, nil
 }
 
@@ -572,6 +582,30 @@ func (r *verifyRun) takeOracleErrs() (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.oracleErrs, r.oracleErrSample
+}
+
+// recordUnobservedChanges counts membership changes whose settle window had not
+// elapsed when churn stopped. Deliberately NOT harvested at that point: the
+// window genuinely has not passed, so observing them would judge a change the
+// system was still allowed to be applying. The point is to record that we could
+// not judge them, not to guess.
+func (r *verifyRun) recordUnobservedChanges(n int) {
+	if n <= 0 {
+		return
+	}
+	r.mu.Lock()
+	r.changesUnobserved += n
+	total := r.changesUnobserved
+	r.mu.Unlock()
+	slog.Warn("membership changes left unobserved when churn stopped",
+		"dropped", n, "unobserved", total)
+}
+
+// takeChangesUnobserved returns how many issued changes were never harvested.
+func (r *verifyRun) takeChangesUnobserved() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.changesUnobserved
 }
 
 // recordHarnessErr keeps the first fatal loadgen-side failure. Unlike an oracle
@@ -781,6 +815,14 @@ func (r *verifyRun) driveChurn(ctx context.Context, issueUntil time.Time) {
 	defer tick.Stop()
 
 	var pending []pendingChange
+	// Whatever path leaves the loop — cancellation, a harness abort, or the
+	// steady window simply ending — a change still in pending is a change whose
+	// outcome this run never learned. ApplyAdd/ApplyRemove already counted it in
+	// ChangeCounts.Total, so dropping it silently makes Applied and Effective
+	// read short with no violation to explain it: indistinguishable from a real
+	// membership_not_applied, and verdict PASS.
+	defer func() { r.recordUnobservedChanges(len(pending)) }()
+
 	nextIssue := time.Now().Add(interval)
 	roomIdx := 0
 	for {

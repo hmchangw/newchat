@@ -570,23 +570,48 @@ from §3 surviving retries, **or** any membership change shows a
   carries **no** tolerance: the pool and the system have diverged, so every
   later observation in the run is suspect. Reported as a harness failure,
   never under an "oracle" prefix
-- **More than `max(1, changes/10)`** of the `subscription.list` queries
-  backing the membership oracle errored or timed out. Unlike every other
-  entry on this list this one has a budget rather than a latch: a change
-  whose oracle query failed is already excluded from `Applied`/`Effective`,
-  so a tolerated failure costs detection sensitivity on that one change,
-  not the correctness of the verdict. The original rule was all-or-nothing
-  and conflated "we could not check this change" with "we cannot trust this
-  run" — one transient timeout out of 22 changes discarded the run's
-  delivery, leakage, exactly-once and persistence results, all of which may
-  have been perfectly clean. Above the budget the reason names the count,
-  the total and the tolerance (`5 of 22 membership oracle queries failed
-  (tolerance 2): …`) so an operator can tell one blip from a service that
-  was down the whole run. The tolerance is a documented constant, not a
-  flag. Failures at or below it produce no reason and no verdict impact,
-  but are still counted on the report's `membership:` line as
-  `N unobserved` — otherwise `Applied` reads short of `Total` with nothing
-  to explain it
+- **More than `max(1, changes/10)` membership changes left unresolved.** A
+  change is unresolved when its backing `subscription.list` oracle query
+  errored or timed out, **or** when it was issued but still inside its
+  settle window as `driveChurn`'s loop ended, so neither oracle ever ran
+  for it. The two are summed against one budget because they say the same
+  thing about the verdict — "this change's outcome is unknown" — and
+  splitting the budget would let a run hide nine of each behind two
+  sub-tolerances. Unlike every other entry on this list this one has a
+  budget rather than a latch: an unresolved change is already excluded
+  from `Applied`/`Effective`, so a tolerated one costs detection
+  sensitivity on that one change, not the correctness of the verdict. The
+  original rule was all-or-nothing and conflated "we could not check this
+  change" with "we cannot trust this run" — one transient timeout out of
+  22 changes discarded the run's delivery, leakage, exactly-once and
+  persistence results, all of which may have been perfectly clean. Above
+  the budget the reason names the sum, the total, the tolerance and the
+  breakdown (`7 of 22 membership changes unresolved (tolerance 2): 3
+  oracle queries failed, 4 never observed: …`) so an operator can tell one
+  blip from a service that was down the whole run, and a flaky oracle
+  (retry) from a truncated run (widen `--steady`). The tolerance is a
+  documented constant, not a flag. Failures at or below it produce no
+  reason and no verdict impact, but the sum is still shown on the report's
+  `membership:` line as `N unobserved` — otherwise `Applied` reads short
+  of `Total` with nothing to explain it. The two counts stay separate in
+  the JSON artifact (`oracleErrs`, `changesUnobserved`).
+  Unresolved changes are deliberately **not** harvested at the end of the
+  window instead of being counted: the settle window genuinely has not
+  elapsed, so observing them would judge a change the system is still
+  allowed to be applying. The point is to record that we could not judge
+  them, not to guess
+- **Churn was requested (`--member-churn > 0`) and `Changes.Total` is
+  zero** — the membership dimension was never exercised, so the run has
+  nothing to say about it and must not report a clean PASS. This is the
+  membership analogue of the `--min-probes` floor and fires regardless of
+  violations, like every other trust signal. Two causes reach it: the
+  churn tailroom (`max(10s, --settle + 10s observation budget)`) equalled
+  or exceeded `--steady`, so `issueUntil` was already in the past and
+  `driveChurn` never issued anything (at `--steady=30s --settle=20s` it
+  is); or every add/remove was rejected server-side, which `applyChange`
+  logs at Warn and reports as "not applied". The reason names both. With
+  `--member-churn=0` a zero count is the expected result and stays
+  PASS-able
 - Fewer than `--min-probes` (default `50`) probes were tracked — probes
   suppressed inside a settle window (§9.2) do not count toward this floor,
   so aggressive `--member-churn` with a long `--settle` can starve the run

@@ -1436,10 +1436,10 @@ Three things worth repeating because they will bite an operator immediately:
 | `--users` | `0` | Total activation count (`0` = preset default) |
 | `--probe-rooms` | `50` | Number of probe rooms selected deterministically from `--seed` |
 | `--reserve-users` | `200` | Direct-connected floaters used as membership-change targets |
-| `--member-churn` | `0.2` | Membership changes per probe room per minute (`0` disables churn) |
-| `--settle` | `5s` | Post-change quiet window per room before probes resume counting toward that room |
+| `--member-churn` | `0.2` | Membership changes per probe room per minute (`0` disables churn). Above `0`, a run that issues **no** change is INCONCLUSIVE — see the membership floor below |
+| `--settle` | `5s` | Post-change quiet window per room before probes resume counting toward that room. Also sets the churn tailroom, `max(10s, --settle + 10s)`, which `--steady` must exceed |
 | `--warmup` | `30s` | Pre-measurement settle before probes start being tracked |
-| `--steady` | `120s` | Probe-generating window |
+| `--steady` | `120s` | Probe-generating window. Must exceed the churn tailroom or no membership change is ever issued (INCONCLUSIVE) |
 | `--drain` | `30s` | Post-quiesce wait for in-flight probes to resolve |
 | `--probe-rate` | `0.01` | Fraction of probe-room sends tracked for full per-recipient accounting |
 | `--min-probes` | `50` | Below this tracked-probe count, the verdict is INCONCLUSIVE instead of PASS/FAIL |
@@ -1502,36 +1502,78 @@ observed at all:
 membership:  22 changes (12 add, 10 remove) / 21 applied / 21 effective / 1 unobserved
 ```
 
-`unobserved` counts changes whose backing `subscription.list` oracle query
-errored or timed out, so the change was never checked either way. Those
-changes are excluded from `applied` and `effective`, which is why those two
-read short of `changes` — without this clause the same line is
+`unobserved` counts changes whose outcome the run never learned, from
+either of two causes:
+
+- the backing `subscription.list` oracle query errored or timed out, so the
+  change was never checked either way (JSON: `oracleErrs`);
+- the change was issued but still inside its settle window when the steady
+  window ended, so it was dropped before either oracle ran (JSON:
+  `changesUnobserved`).
+
+The console clause shows their **sum**, which is what the verdict is
+computed from, so the line can never disagree with the `VERDICT:` below it.
+The JSON report keeps the two apart, because the fixes differ — a flaky
+oracle means retry the run, a truncated one means widen `--steady`. Either
+way those changes are excluded from `applied` and `effective`, which is why
+those two read short of `changes`; without this clause the same line is
 indistinguishable from a real `membership_not_applied` that escaped its
-violation. The clause is omitted entirely when the count is zero. The same
-number is in the JSON report as `oracleErrs`.
+violation. The clause is omitted entirely when both counts are zero.
+
+Changes still pending when the window closes are counted, never harvested
+late: their settle window genuinely has not elapsed, so observing them would
+judge a change the system is still allowed to be applying. The tool records
+that it could not judge them rather than guessing.
 
 An INCONCLUSIVE run prints a `REASONS` block instead of (or in addition to)
 `VIOLATIONS`, naming which signal made the run untrustworthy (dropped
 recipient connection, readback error, membership-setup harness failure, too
-many oracle errors, probe floor not met, GC pressure, or cancellation — see
-`evaluateVerify` in `tools/loadgen/verify_verdict.go`). The console
-violation list is capped at 10; pass `--json=<path>` for the full, uncapped
-report.
+many unresolved membership changes, membership never exercised, probe floor
+not met, GC pressure, or cancellation — see `evaluateVerify` in
+`tools/loadgen/verify_verdict.go`). The console violation list is capped at
+10; pass `--json=<path>` for the full, uncapped report.
 
-Two of those deserve a note:
+Three of those deserve a note:
 
-- **Membership oracle errors are tolerated up to `max(1, changes/10)`** —
-  one is always forgiven, then 10% of the changes issued. A failed oracle
-  query only blinds the one change it was checking, and that change is
-  already excluded from `applied`/`effective`; discarding a whole run's
-  clean delivery, leakage, exactly-once and persistence results over one
-  transient timeout confused "we could not check this change" with "we
-  cannot trust this run". Past the budget the reason names all three
-  numbers — `5 of 22 membership oracle queries failed (tolerance 2): …` —
-  so a single blip is distinguishable from a service that was down for the
-  whole run. Every individual failure is also logged (`membership oracle
-  query failed`, with room and user). The tolerance is a constant, not a
-  flag.
+- **Unresolved membership changes are tolerated up to `max(1, changes/10)`**
+  — one is always forgiven, then 10% of the changes issued. Failed oracle
+  queries and never-observed changes spend the *same* budget: both mean
+  "this change's outcome is unknown", and splitting the budget would let a
+  run hide nine of each behind two sub-tolerances. An unresolved change only
+  blinds the one change it was checking, and that change is already excluded
+  from `applied`/`effective`; discarding a whole run's clean delivery,
+  leakage, exactly-once and persistence results over one transient timeout
+  confused "we could not check this change" with "we cannot trust this run".
+  Past the budget the reason names the sum, the total, the tolerance and the
+  breakdown — `7 of 22 membership changes unresolved (tolerance 2): 3 oracle
+  queries failed, 4 never observed: …` — so a single blip is distinguishable
+  from a service that was down for the whole run, and a flaky oracle from a
+  truncated run. Every individual oracle failure is also logged (`membership
+  oracle query failed`, with room and user), and a truncated window logs
+  `membership changes left unobserved when churn stopped`. The tolerance is
+  a constant, not a flag.
+- **`--member-churn > 0` with zero changes issued is INCONCLUSIVE.** This is
+  the membership analogue of the `--min-probes` floor: if the run never
+  added or removed a single member, it has nothing to say about membership
+  and must not report that dimension as clean. It fires regardless of
+  violations, like every other trust signal. Two causes reach it, and the
+  reason names both:
+  - `--steady` did not exceed the **churn tailroom**, `max(10s, --settle +
+    10s observation budget)`. The tailroom is reserved so the last change
+    issued still gets its full settle window plus its two observations
+    inside the run; when it equals or exceeds `--steady`, the issue window
+    is empty and nothing is ever issued. `--steady=30s --settle=20s` is
+    exactly this case (tailroom 30s). A `steady window too short for
+    membership churn` warning is logged at startup, but a warning nobody
+    reads is not a verdict — hence the floor. Fix by raising `--steady`
+    (the `120s` default clears a `5s` default `--settle` comfortably) or
+    lowering `--settle`.
+  - every add/remove was rejected server-side. `applyChange` logs each at
+    Warn (`member add rejected` / `member remove rejected`) and counts
+    nothing.
+
+  With `--member-churn=0` a zero change count is the expected result and
+  stays PASS-able.
 - **A membership-setup harness failure has no tolerance.** If the
   `SubscribeRoom` of a just-added churn target fails, churn aborts: loadgen's
   model and the system have diverged, and every later observation is

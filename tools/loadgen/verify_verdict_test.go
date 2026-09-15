@@ -225,6 +225,159 @@ func TestEvaluateVerify_HarnessErrWithToleratedOracleErrs_IsInconclusive(t *test
 	require.Len(t, r.Reasons, 1)
 }
 
+// TestEvaluateVerify_ChurnRequestedButNothingIssued_IsInconclusive pins the
+// membership floor — the analogue of --min-probes for the churn dimension.
+// churnTailroom(settle) can exceed --steady (at --steady=30s --settle=20s it
+// does), which makes issueUntil already past when driveChurn starts and leaves
+// Changes.Total at zero. Without this branch the run reports PASS having never
+// added or removed a single member: a check silently not performed, reported as
+// clean, which is exactly the failure class this tool exists to catch.
+func TestEvaluateVerify_ChurnRequestedButNothingIssued_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{}
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	require.Len(t, r.Reasons, 1)
+	assert.Contains(t, r.Reasons[0], "membership dimension was not exercised")
+	assert.Contains(t, r.Reasons[0], "--steady",
+		"the reason must name the likely cause so the operator can fix the flags")
+	assert.Contains(t, r.Reasons[0], "tailroom")
+	assert.Contains(t, r.Reasons[0], "--settle")
+	assert.Contains(t, r.Reasons[0], "rejected",
+		"server-side rejection is the other way Total stays at zero")
+}
+
+// TestEvaluateVerify_MembershipFloor_FiresDespiteViolations pins that the floor
+// is a trust signal like --min-probes, not a tiebreak: a run that never
+// exercised membership cannot be reported as FAIL-on-delivery-only either,
+// because one of its dimensions was never measured.
+func TestEvaluateVerify_MembershipFloor_FiresDespiteViolations(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Violations = []Violation{{Kind: KindMissingRecipient, MsgID: "m1"}}
+
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict)
+}
+
+// TestEvaluateVerify_ChurnNotRequestedNoChanges_IsPass pins the other side:
+// with --member-churn=0 a zero change count is the expected outcome and must
+// stay PASS-able.
+func TestEvaluateVerify_ChurnNotRequestedNoChanges_IsPass(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = false
+	in.Changes = ChangeCounts{}
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictPass, r.Verdict,
+		"--member-churn=0 legitimately issues no changes")
+	assert.Empty(t, r.Reasons)
+}
+
+func TestEvaluateVerify_ChurnRequestedAndIssued_NoFloorReason(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 1, Adds: 1, Applied: 1, Effective: 1}
+
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict,
+		"a single issued change clears the floor — the floor asks whether the dimension ran at all")
+}
+
+// TestEvaluateVerify_UnobservedChangesBelowTolerance_IsPass pins that an
+// unharvested change is folded into the same budget as a failed oracle query:
+// both mean "this change's outcome is unknown", and a couple of unknowns cost
+// sensitivity rather than trust.
+func TestEvaluateVerify_UnobservedChangesBelowTolerance_IsPass(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 21, Effective: 21}
+	in.ChangesUnobserved = 1
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictPass, r.Verdict)
+	assert.Empty(t, r.Reasons)
+}
+
+// TestEvaluateVerify_UnobservedChangesAtTolerance_IsPass pins the boundary from
+// both sides with no oracle failures in play.
+func TestEvaluateVerify_UnobservedChangesAtTolerance_IsPass(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10}
+
+	in.ChangesUnobserved = 2
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict,
+		"22/10 = 2 unresolved changes tolerated, so 2 is still inside the budget")
+
+	in.ChangesUnobserved = 3
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict,
+		"one past the budget must trip")
+}
+
+// TestEvaluateVerify_UnobservedChangesAboveTolerance_IsInconclusive pins the
+// truncated-run case: driveChurn dropped still-pending changes on ctx.Done, so
+// Applied and Effective read short of Total with no violation — visually
+// identical to a real membership_not_applied. A silent PASS there is the tool
+// lying about a check it never performed.
+func TestEvaluateVerify_UnobservedChangesAboveTolerance_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 18, Effective: 18}
+	in.ChangesUnobserved = 4
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	require.Len(t, r.Reasons, 1)
+	assert.Contains(t, r.Reasons[0], "4 of 22")
+	assert.Contains(t, r.Reasons[0], "tolerance 2")
+	assert.Contains(t, r.Reasons[0], "4 never observed")
+	assert.NotContains(t, r.Reasons[0], ": <nil>",
+		"the sample clause must be dropped when no oracle query ever failed")
+}
+
+// TestEvaluateVerify_OracleErrsPlusUnobserved_ExceedTolerance is the point of
+// folding the two counts: neither 3 oracle failures nor 4 unharvested changes
+// trips the budget alone at Total=100, but together they mean 7 of 100 changes
+// have no known outcome, and the run is no more trustworthy for the split.
+func TestEvaluateVerify_OracleErrsPlusUnobserved_ExceedTolerance(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 15, Effective: 15}
+	in.OracleErrs = 1
+	in.OracleErrSample = errors.New("subscription.list timeout")
+	in.ChangesUnobserved = 1
+
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict,
+		"1 + 1 is exactly the 22/10 budget")
+
+	in.ChangesUnobserved = 2
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict,
+		"neither count alone exceeds the budget; their sum does, and the sum is what is unknown")
+	require.Len(t, r.Reasons, 1)
+	assert.Contains(t, r.Reasons[0], "3 of 22")
+}
+
+// TestEvaluateVerify_UnresolvedReason_BreaksDownBothCounts pins that the
+// operator can tell a flaky oracle apart from a truncated run without opening
+// the JSON artifact — the remedies are different (retry vs widen --steady).
+func TestEvaluateVerify_UnresolvedReason_BreaksDownBothCounts(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 15, Effective: 15}
+	in.OracleErrs = 3
+	in.OracleErrSample = errors.New("subscription.list timeout")
+	in.ChangesUnobserved = 4
+
+	r := evaluateVerify(in)
+	require.Len(t, r.Reasons, 1)
+	assert.Equal(t,
+		"7 of 22 membership changes unresolved (tolerance 2): "+
+			"3 oracle queries failed, 4 never observed: subscription.list timeout",
+		r.Reasons[0])
+}
+
 func TestMaxToleratedOracleErrs(t *testing.T) {
 	tests := []struct {
 		name    string
