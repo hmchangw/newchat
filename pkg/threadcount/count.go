@@ -14,7 +14,10 @@
 // when the read reached the end of the partition. Soft-deleted replies keep
 // their rows, so a read can fill its cap on tombstones alone while live replies
 // survive past it; such a read cannot recount and falls back to adjusting, with
-// the same redelivery guard the approximate path uses.
+// the same redelivery guard the approximate path uses — unless the adjustment
+// would land on zero, which a truncated read can never justify, and which
+// readers act on by not querying the partition at all. That one case pays for a
+// full exact scan rather than report a live thread as empty.
 package threadcount
 
 import (

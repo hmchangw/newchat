@@ -92,6 +92,26 @@ func Maintain(ctx context.Context, session *gocql.Session, threadRoomID string, 
 			prior = adjusted(stamped, delta)
 		}
 		n = max(n, prior)
+		if n == 0 {
+			// Nothing has proved this thread empty. The scan filled its cap on
+			// tombstones alone, and the floor is 0 only because the parent
+			// carried no count to raise it — an unstamped parent on the delete
+			// path, which brings no reply time of its own either. Stamping 0
+			// would be read as "every reply is gone" (history-service skips
+			// Cassandra entirely on a zero tcount) over a thread whose replies
+			// are merely past the cap, and the state sustains itself: 0 is under
+			// ScanLimit, so every later reply re-enters this branch and
+			// re-derives it. Only an exact scan tells an empty thread from a
+			// hidden one, so this is the one truncated case that pays for one.
+			res, reconcileErr := Reconcile(ctx, session, threadRoomID, p, pol)
+			if reconcileErr != nil {
+				// Unaffordable too. Leave the count unwritten: null is the one
+				// value that makes a reader go and look at the partition, so it
+				// is strictly better than a zero we cannot stand behind.
+				return Result{}, fmt.Errorf("maintain thread %s count: refusing to stamp an unproven zero: %w", threadRoomID, reconcileErr)
+			}
+			return res, nil
+		}
 		tlm := stampedTLM
 		if latest != nil {
 			t := LaterOf(stampedTLM, *latest)
@@ -138,6 +158,10 @@ func Maintain(ctx context.Context, session *gocql.Session, threadRoomID string, 
 		// never worse than not having tried, so it must not fail the reply.
 		slog.WarnContext(ctx, "thread tcount re-anchor failed — keeping the approximate count",
 			"error", reconcileErr, "thread_room_id", threadRoomID, "parent_message_id", p.MessageID)
+		// The abandoned scan may have run for seconds, and every reply that
+		// landed meanwhile adjusted the parent. Adjust what the column holds
+		// now, not what it held before the scan.
+		stamped, stampedTLM = refreshStamped(ctx, session, p.MessageID, stamped, stampedTLM)
 	}
 
 	// tlm moves forward only on the add path. A delete leaves the column alone:
@@ -262,6 +286,29 @@ func readParent(ctx context.Context, session *gocql.Session, parentMessageID str
 		return nil, nil, fmt.Errorf("read parent %s tcount: %w", parentMessageID, err)
 	}
 	return cur, tlm, nil
+}
+
+// refreshStamped re-reads the parent after a scan that may have run for
+// seconds, so a delta lands on what the column holds now rather than on the
+// value read before it.
+//
+// It is best-effort by construction: a read failure, a vanished row and an
+// unstamped one all keep the caller's pair. A re-anchor that already failed
+// must not also fail the reply, and neither a missing row nor a null count is
+// evidence that the value it would replace is wrong. The count and the
+// timestamp move together or not at all, so an adjustment is never applied to
+// one half of a pair that was read at two different times.
+func refreshStamped(ctx context.Context, session *gocql.Session, parentMessageID string, stamped *int, stampedTLM *time.Time) (*int, *time.Time) {
+	cur, curTLM, err := readParent(ctx, session, parentMessageID)
+	if err != nil {
+		slog.WarnContext(ctx, "re-reading a thread parent's tcount after a failed re-anchor — adjusting the value read before it",
+			"error", err, "parent_message_id", parentMessageID)
+		return stamped, stampedTLM
+	}
+	if cur == nil {
+		return stamped, stampedTLM
+	}
+	return cur, curTLM
 }
 
 // stampParent writes tcount, and tlm when writeTLM, to both the authority row

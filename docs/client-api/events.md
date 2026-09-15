@@ -803,7 +803,7 @@ independently.
 | `eventTimestamp` | number | Optional. Epoch ms (UTC). When message-worker published the canonical event. Prefer over `timestamp` for ordering. |
 | `parentMessageId` | string | The thread parent message's ID. Use to locate the message in your cache and update its badge. |
 | `replyMessageId` | string | The reply that was added or deleted. |
-| `newTcount` | number | Reply count for the parent message. Apply directly — do not delta. Exact for threads under the server-side scan limit; beyond it the server adjusts it per reply without recounting, so it is approximate and periodically re-derived from an exact count. |
+| `newTcount` | number | Reply count for the parent message. Apply directly — do not delta. Exact when the server can recount the thread within its scan limit; when it cannot (the thread is longer than the limit, or its deleted replies alone fill it) the count is adjusted per reply without recounting, so it is approximate and periodically re-derived from an exact count. |
 | `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent only when no reply survives. On `reply_deleted` past the scan limit the server does not re-derive it, so it repeats the timestamp already stamped and may still name the deleted reply until the next re-anchor. |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 

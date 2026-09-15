@@ -4,6 +4,7 @@ package threadcount
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -107,6 +108,22 @@ func readMirror(t testing.TB, sess *gocql.Session, p Parent) *int {
 		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
 		p.RoomID, p.Bucket, p.CreatedAt, p.MessageID,
 	).Scan(&tcount))
+	return tcount
+}
+
+// readStampedTcount returns the authority row's tcount, nil when the row or the
+// column is absent — the state a refusal to stamp must leave behind, and the
+// state history-service reads as "unknown, go look at the partition".
+func readStampedTcount(t testing.TB, sess *gocql.Session, parentID string) *int {
+	t.Helper()
+	var tcount *int
+	err := sess.Query(
+		`SELECT tcount FROM messages_by_id WHERE message_id = ?`, parentID,
+	).Scan(&tcount)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil
+	}
+	require.NoError(t, err)
 	return tcount
 }
 
@@ -545,6 +562,44 @@ func TestMaintain_TruncatedScan_NeverStampsAnExactCount(t *testing.T) {
 		assert.Equal(t, 1, res.Count, "the reply itself is the floor, not the truncated scan's 0")
 		require.NotNil(t, res.TLM)
 	})
+
+	// A delete has no reply of its own to floor the count with, so an unstamped
+	// parent leaves the truncated scan's 0 standing. Stamping it would be read as
+	// "every reply is gone" — history-service skips Cassandra entirely on a zero
+	// tcount — over a thread whose replies are merely past the cap. Nothing would
+	// repair it either: 0 is under the scan limit, so every later reply re-enters
+	// this branch and re-derives the same 0. An exact scan is the only thing that
+	// can tell an empty thread from a hidden one, so this is the one truncated
+	// case that pays for one.
+	t.Run("delete on an unstamped parent falls back to an exact count", func(t *testing.T) {
+		require.NoError(t, sess.Query(
+			`DELETE FROM messages_by_id WHERE message_id = ?`, "parent-1").Exec())
+
+		res, err := Maintain(ctx, sess, "thread-1", testParent,
+			Policy{ScanLimit: 5, ReanchorBudget: 0, ReconcileRowLimit: 100}, -1, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, 3, res.Count, "the survivors past the cap must not be counted as none")
+		require.NotNil(t, res.TLM, "the exact scan resolved the newest survivor")
+
+		gotN := readStampedTcount(t, sess, "parent-1")
+		require.NotNil(t, gotN)
+		assert.Equal(t, 3, *gotN)
+	})
+
+	// And when even the exact scan is unaffordable, the count stays unwritten.
+	// A null tcount is the one value that makes a reader go and look, so leaving
+	// it is strictly better than inventing a zero.
+	t.Run("delete on an unstamped parent refuses a zero it cannot prove", func(t *testing.T) {
+		require.NoError(t, sess.Query(
+			`DELETE FROM messages_by_id WHERE message_id = ?`, "parent-1").Exec())
+
+		_, err := Maintain(ctx, sess, "thread-1", testParent,
+			Policy{ScanLimit: 5, ReanchorBudget: 0, ReconcileRowLimit: 2}, -1, nil, false)
+		require.Error(t, err)
+
+		assert.Nil(t, readStampedTcount(t, sess, "parent-1"),
+			"an unproven count must stay unwritten so readers keep falling through to the partition")
+	})
 }
 
 // A re-anchor prices itself on the live count but reads physical rows, so a
@@ -617,4 +672,55 @@ func TestMaintain_ConcurrentAdjustmentsMayLoseUpdates_ReanchorRepairs(t *testing
 	res, err := Reconcile(ctx, sess, "thread-1", testParent, Policy{})
 	require.NoError(t, err)
 	assert.Equal(t, 40, res.Count)
+}
+
+// A re-anchor walks the partition and can run for seconds before it fails, and
+// every reply that lands in that window adjusts the parent. The delta has to be
+// applied to what the column holds afterwards: reusing the value read before the
+// scan would write that whole window of adjustments away, which is a different
+// and far larger error than the single lost adjustment the approximate path
+// accepts. The re-read is best-effort — a re-anchor that already failed must not
+// also fail the reply — so nothing it cannot establish replaces what the caller
+// already had.
+func TestRefreshStamped(t *testing.T) {
+	ctx := context.Background()
+	sess := setupThreadTable(t)
+	stale := 7
+	staleTLM := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+
+	t.Run("adopts the value the column holds now", func(t *testing.T) {
+		fresh := staleTLM.Add(time.Hour)
+		seedStamp(t, sess, "parent-refresh", 42, &fresh)
+
+		got, gotTLM := refreshStamped(ctx, sess, "parent-refresh", &stale, &staleTLM)
+		require.NotNil(t, got)
+		assert.Equal(t, 42, *got)
+		require.NotNil(t, gotTLM)
+		assert.Equal(t, fresh.UnixMilli(), gotTLM.UnixMilli())
+	})
+
+	t.Run("keeps the caller's value when the row is gone", func(t *testing.T) {
+		require.NoError(t, sess.Query(
+			`DELETE FROM messages_by_id WHERE message_id = ?`, "parent-refresh-missing").Exec())
+
+		got, gotTLM := refreshStamped(ctx, sess, "parent-refresh-missing", &stale, &staleTLM)
+		require.NotNil(t, got)
+		assert.Equal(t, 7, *got, "a vanished row is not evidence that the count it would replace is wrong")
+		require.NotNil(t, gotTLM)
+		assert.Equal(t, staleTLM.UnixMilli(), gotTLM.UnixMilli())
+	})
+
+	t.Run("keeps the caller's value when the count is null", func(t *testing.T) {
+		later := staleTLM.Add(2 * time.Hour)
+		require.NoError(t, sess.Query(
+			`UPDATE messages_by_id SET thread_last_msg_at = ? WHERE message_id = ?`,
+			later, "parent-refresh-null").Exec())
+
+		got, gotTLM := refreshStamped(ctx, sess, "parent-refresh-null", &stale, &staleTLM)
+		require.NotNil(t, got)
+		assert.Equal(t, 7, *got, "an unstamped parent cannot be the floor for a delta")
+		require.NotNil(t, gotTLM)
+		assert.Equal(t, staleTLM.UnixMilli(), gotTLM.UnixMilli(),
+			"the pair moves together or not at all")
+	})
 }
