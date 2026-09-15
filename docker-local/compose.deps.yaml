@@ -145,7 +145,7 @@ services:
   # lock: Cassandra refuses the write and the Query page keeps working. See the
   # README's "Connecting to a Cassandra that needs auth".
   cassandra-web:
-    image: josephsylvan/cassandra-web:0.1.0-rc3
+    image: josephsylvan/cassandra-web:0.1.0-rc4
     container_name: chat-local-cassandra-web
     # Bounded retries, not unless-stopped. This is the one service here that
     # exits at startup rather than waiting, so a transient DNS or endpoint blip
