@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -435,13 +436,17 @@ func main() {
 	}
 	consumerMetrics.LoopStarted(ctx)
 
+	sig := shutdown.Signals()
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	var wg sync.WaitGroup
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		guardedProcessor(broadcastProcessor(handler)))
+		guardedProcessor(broadcastProcessor(handler)),
+		loop.Stopped)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -451,6 +456,7 @@ func main() {
 	slog.Info("broadcast-worker started", "site", cfg.SiteID, "encryption", cfg.Encryption.Enabled)
 
 	hooks := []func(context.Context) error{
+		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(_ context.Context) error {
 			return broadcastSub.Unsubscribe()
 		},
@@ -497,7 +503,7 @@ func main() {
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 
-	shutdown.Wait(ctx, 25*time.Second, hooks...)
+	shutdown.WaitOn(ctx, sig, 25*time.Second, hooks...)
 }
 
 // natsPublisher adapts *o11ynats.Conn to the Publisher interface.

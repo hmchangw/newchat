@@ -5,10 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -21,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -157,20 +155,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Armed BEFORE the consume loop starts, because the loop can raise this
-	// signal itself the moment it fails. Until signal.Notify runs, SIGTERM keeps
-	// its default disposition and would kill the process outright rather than
-	// run the graceful path — and a signal raised before the handler exists is
-	// lost to it. The buffered channel latches an early one for shutdown.WaitOn.
-	// No signal.Stop: the registration must outlive every path that could raise
-	// it, and main returning is the process ending anyway.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	// Armed BEFORE the consume loop starts, because the loop can raise SIGTERM
+	// on this process the moment it fails (pkg/loopguard).
+	sig := shutdown.Signals()
 
 	var wg sync.WaitGroup
-	consume := consumeState{onUnexpectedStop: requestSelfShutdown}
+	consume := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	wg.Add(1)
-	go consumeLoop(iter, f, &wg, &consume)
+	go consumeLoop(iter, f, &wg, consume)
 
 	// The consume-loop check sits alongside the NATS one deliberately: NATS stays
 	// healthy in precisely the failure where the loop has died, so probing the
@@ -190,7 +182,7 @@ func main() {
 		// Mark the stop as intended BEFORE iter.Stop(), so the consume loop's
 		// exit is not mistaken for a failure and does not re-signal a process
 		// that is already on its way down.
-		func(_ context.Context) error { consume.beginShutdown(); return nil },
+		func(_ context.Context) error { consume.BeginShutdown(); return nil },
 		func(_ context.Context) error { iter.Stop(); return nil },
 		func(ctx context.Context) error {
 			done := make(chan struct{})
@@ -225,52 +217,6 @@ func main() {
 // drives — an interface so the loop is testable without a live consumer.
 type messageIterator interface {
 	Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error)
-}
-
-// consumeState tracks whether the consume loop is still running, so /readyz can
-// answer the question that actually matters for this worker: is it consuming?
-//
-// It exists because the loop returns on any iterator error and nothing else
-// observes that — the only wg.Wait() is the shutdown drain. Without this the pod
-// keeps reporting ready on a healthy NATS connection while writing nothing at
-// all, which is the failure mode hardest to notice and slowest to diagnose.
-// Readiness alone cannot recover this: nothing routes traffic to a queue
-// worker, and liveness always answers 200 by design, so a 503 on /readyz makes
-// a dead consumer visible without ever replacing it. onUnexpectedStop is what
-// closes that gap — it asks the process to terminate so the supervisor starts a
-// fresh one, which is the only actor able to rebuild the iterator.
-type consumeState struct {
-	reason   atomic.Pointer[error]
-	stopping atomic.Bool
-	// onUnexpectedStop runs when the loop stops for any reason other than a
-	// shutdown already under way. Tests substitute a recorder.
-	onUnexpectedStop func()
-}
-
-// beginShutdown marks the stop that follows as intended, so tearing the worker
-// down does not look like a failure and re-signal a process already exiting.
-func (s *consumeState) beginShutdown() { s.stopping.Store(true) }
-
-func (s *consumeState) stopped(err error) {
-	s.reason.Store(&err)
-	if s.stopping.Load() || s.onUnexpectedStop == nil {
-		return
-	}
-	s.onUnexpectedStop()
-}
-
-// requestSelfShutdown raises SIGTERM on this process so shutdown.Wait runs the
-// ordinary graceful teardown — draining the final flush rather than abandoning
-// the batch, which os.Exit here would do.
-func requestSelfShutdown() {
-	p, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		slog.Error("cannot signal self after consume loop stopped; the pod will stay up and idle", "error", err)
-		return
-	}
-	if err := p.Signal(syscall.SIGTERM); err != nil {
-		slog.Error("cannot signal self after consume loop stopped; the pod will stay up and idle", "error", err)
-	}
 }
 
 // validateFlushBudget rejects a configuration in which a held message can
@@ -312,26 +258,14 @@ func validateFlushBudget(interval, timeout, ackWait time.Duration) error {
 	return nil
 }
 
-// Check reports not-ready once the loop has stopped. The readiness contract is
-// "can this pod do its job", and a worker whose only goroutine has exited
-// cannot, whatever the reason.
-func (s *consumeState) Check() health.Check {
-	return health.Check{Name: "consume-loop", Probe: func(context.Context) error {
-		if err := s.reason.Load(); err != nil {
-			return fmt.Errorf("consume loop stopped: %w", *err)
-		}
-		return nil
-	}}
-}
-
 // consumeLoop drains iter into the flusher. It is a single goroutine with no
 // worker pool: the per-message work is a sonic unmarshal plus a regex parse and
 // a map merge with no I/O, so concurrency would only add contention on the
 // batch mutex. Messages are NOT settled here — the flusher settles them once
 // their batch reaches MongoDB.
-// state records why the loop stopped so readiness can reflect it; see
-// consumeState.
-func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *consumeState) {
+// state records why the loop stopped so readiness can reflect it and, on an
+// unexpected stop, asks the process to restart; see pkg/loopguard.
+func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *loopguard.Guard) {
 	defer wg.Done()
 	for {
 		msgCtx, msg, err := iter.Next()
@@ -340,18 +274,7 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 			// shutdown: a worker that has stopped consuming is not ready either
 			// way, and during shutdown failing readiness is what drains it from
 			// the load balancer.
-			state.stopped(err)
-			// Reported either way, but not at the same level. A graceful stop is
-			// the normal end of every pod's life — iter.Stop() during shutdown is
-			// what makes Next return — and logging that at ERROR trips error-rate
-			// alerting on every deploy. stopped() reads the same flag one line
-			// above to decide not to re-signal a process already on its way down.
-			if state.stopping.Load() {
-				slog.Info("roomlist-worker consume loop stopped (shutdown)", "error", err)
-				return
-			}
-			slog.Error("roomlist-worker consume loop stopped; no further room-list state will be written",
-				"error", err)
+			state.Stopped(err)
 			return
 		}
 		// jobguard recovers a panic from the derive/add path so a single
