@@ -108,6 +108,15 @@ type EventPublisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
+// memberCache is the consumer-defined interface for the shared roomsubcache
+// tier (pkg/roomsubcache.Cache satisfies it). Only invalidation is consumed
+// here: user-service writes isSubscribed, which broadcast-worker gates botDM
+// fan-out on, and at the 90m ROOMSUBCACHE_TTL a re-subscribed user would
+// otherwise go that long without live events. Nil when Valkey is unconfigured.
+type memberCache interface {
+	Invalidate(ctx context.Context, roomID string)
+}
+
 // SSOTokenRepository is the consumer-defined interface for the SSO token vault (sso_tokens collection; legacy field names kept).
 type SSOTokenRepository interface {
 	GetByUsername(ctx context.Context, username string) (*model.SSOToken, error)
@@ -138,6 +147,7 @@ type UserService struct {
 	// core NATS — same delivery pattern as room-worker's subscription.update.
 	clientPub        EventPublisher
 	badge            badgeCache
+	members          memberCache
 	ssoTokens        SSOTokenRepository
 	tokenValidator   TokenValidator
 	tokenRefresher   TokenRefresher
@@ -171,6 +181,13 @@ type UserService struct {
 
 // Option customises a UserService after construction.
 type Option func(*UserService)
+
+// WithMemberCache wires the shared roomsubcache tier so an app subscribe or
+// unsubscribe busts the room's cached member list. Omitted when Valkey is not
+// configured, leaving staleness bounded by the TTL alone.
+func WithMemberCache(m memberCache) Option {
+	return func(s *UserService) { s.members = m }
+}
 
 // WithPageBudget caps paginated replies at b.
 func WithPageBudget(b pagefit.Budget) Option {

@@ -17,7 +17,19 @@ import (
 )
 
 // newSvc builds a UserService with every collaborator mocked.
+// newSvcWith is newSvc with construction options applied — for tests that need
+// an optional dependency (e.g. the member cache) the default fixture omits.
+func newSvcWith(t *testing.T, opts ...Option) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockUserRepository, *mocks.MockAppRepository, *mocks.MockRoomClient, *mocks.MockHistoryClient, *mocks.MockEventPublisher) {
+	t.Helper()
+	return newSvcOpts(t, opts...)
+}
+
 func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockUserRepository, *mocks.MockAppRepository, *mocks.MockRoomClient, *mocks.MockHistoryClient, *mocks.MockEventPublisher) {
+	t.Helper()
+	return newSvcOpts(t)
+}
+
+func newSvcOpts(t *testing.T, opts ...Option) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockUserRepository, *mocks.MockAppRepository, *mocks.MockRoomClient, *mocks.MockHistoryClient, *mocks.MockEventPublisher) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -37,7 +49,7 @@ func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *moc
 	history.EXPECT().RoomsGet(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	// The same mock backs both publishers (federation + client fanout) —
 	// expectations are subject-scoped, so tests stay unambiguous.
-	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, ssoTokens, validator, refresher, cfg), subs, users, apps, rooms, history, pub
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, ssoTokens, validator, refresher, cfg, opts...), subs, users, apps, rooms, history, pub
 }
 
 // ctx builds a handler context. siteID is retained for readability but unused

@@ -40,8 +40,8 @@ func TestValkeyCache_Set_UsesExpectedKey(t *testing.T) {
 
 	require.NoError(t, cache.Set(ctx, "roomABC", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 
-	ok := client.Has("room:v4:roomABC:subs")
-	assert.True(t, ok, "expected cache key room:v4:roomABC:subs to be set; got keys: %v", client.Keys())
+	ok := client.Has("room:v5:roomABC:subs")
+	assert.True(t, ok, "expected cache key room:v5:roomABC:subs to be set; got keys: %v", client.Keys())
 }
 
 func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
@@ -50,7 +50,7 @@ func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NoError(t, cache.Set(ctx, "r1", nil, 90*time.Second))
-	assert.Equal(t, 90*time.Second, mustTTL(t, client, "room:v4:r1:subs"))
+	assert.Equal(t, 90*time.Second, mustTTL(t, client, "room:v5:r1:subs"))
 }
 
 // A pre-upgrade cache entry (written under the unversioned key by an older
@@ -72,10 +72,15 @@ func TestValkeyCache_Get_PreUpgradeKey_IsMiss(t *testing.T) {
 	// old binaries unmarshalling an object into a slice and new binaries
 	// unmarshalling an array into a struct.
 	client.Seed("room:v3:roomABC:subs", `[{"id":"u1","account":"a","homeSiteId":"site-a"}]`, time.Minute)
+	// v4 entry: the envelope shape, but written before IsSubscribed existed. It
+	// would decode cleanly with IsSubscribed silently false for the full TTL,
+	// which is exactly what the v5 bump exists to prevent.
+	client.Seed("room:v4:roomABC:subs",
+		`{"v":[{"id":"u1","account":"a","homeSiteId":"site-a"}],"cachedAt":1700000000000}`, time.Minute)
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, ok := cache.Get(ctx, "roomABC")
-	assert.False(t, ok, "every pre-envelope key generation must miss, not decode")
+	assert.False(t, ok, "every superseded key generation must miss, not decode")
 }
 
 func TestValkeyCache_Get_Miss_IsNotServed(t *testing.T) {
@@ -105,7 +110,7 @@ func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
 func TestValkeyCache_Get_MalformedJSON_IsNotServed(t *testing.T) {
 	ctx := context.Background()
 	client := valkeyfake.New()
-	client.Seed("room:v4:bad:subs", "{not json", time.Minute)
+	client.Seed("room:v5:bad:subs", "{not json", time.Minute)
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, ok := cache.Get(ctx, "bad")
@@ -143,13 +148,17 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	require.NoError(t, cache.Set(ctx, "r1", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 	cache.Invalidate(ctx, "r1")
 
-	// Both generations are dropped in one call. These keys carry no hash tag, so
-	// "room:v4:r1:subs" and "room:v3:r1:subs" hash to different cluster slots
-	// and a single multi-key DEL would be a CROSSSLOT error against a real
-	// cluster — the client pipelines one DEL per key so it never is. That is the
-	// client's business now, not this package's.
+	// Every live generation is dropped in one call. v4 is included because a
+	// rolling v4->v5 deploy still has v4 binaries serving from their own key: if
+	// a bust skipped it, those binaries would keep serving a member list for a
+	// room whose membership just changed, for a full TTL. These keys carry no
+	// hash tag, so they hash to different cluster slots and a single multi-key
+	// DEL would be a CROSSSLOT error against a real cluster — the client
+	// pipelines one DEL per key so it never is.
 	require.Len(t, client.DelBatches(), 1)
-	assert.Equal(t, []string{"room:v4:r1:subs", "room:v3:r1:subs"}, client.DelBatches()[0])
+	assert.Equal(t,
+		[]string{"room:v5:r1:subs", "room:v4:r1:subs", "room:v3:r1:subs"},
+		client.DelBatches()[0])
 
 	_, ok := cache.Get(ctx, "r1")
 	assert.False(t, ok)
@@ -157,8 +166,8 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 
 // Invalidation is best-effort: the authoritative write has already committed
 // and the TTL reconciles a missed bust, so a transport failure is swallowed
-// rather than surfaced. Both generations are still attempted — one failing
-// slot must not skip the other.
+// rather than surfaced. Every generation is still attempted — one failing slot
+// must not skip the others.
 func TestValkeyCache_Invalidate_TransportError_IsSwallowed(t *testing.T) {
 	ctx := context.Background()
 	client := valkeyfake.New()
@@ -167,7 +176,7 @@ func TestValkeyCache_Invalidate_TransportError_IsSwallowed(t *testing.T) {
 
 	require.NotPanics(t, func() { cache.Invalidate(ctx, "r1") })
 	require.Len(t, client.DelBatches(), 1)
-	assert.Len(t, client.DelBatches()[0], 2, "a failure must not drop either generation from the attempt")
+	assert.Len(t, client.DelBatches()[0], 3, "a failure must not drop any generation from the attempt")
 }
 
 // The reason this package routes through valkeyutil.BustKeys rather than
@@ -184,7 +193,7 @@ func TestValkeyCache_Invalidate_RunsAfterCallerCancellation(t *testing.T) {
 	cache.Invalidate(ctx, "r1")
 
 	require.Len(t, client.DelBatches(), 1, "a cancelled caller must not skip the invalidation")
-	assert.Len(t, client.DelBatches()[0], 2, "both generations are still cleared")
+	assert.Len(t, client.DelBatches()[0], 3, "every generation is still cleared")
 }
 
 func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
@@ -217,7 +226,7 @@ func TestValkeyCache_Get_OversizedBlob_IsNotServed(t *testing.T) {
 
 	// Stash a value larger than the cap directly through the fake — simulates
 	// a compromised or misbehaving Valkey writer.
-	client.Seed("room:v4:big:subs", strings.Repeat("x", 101), time.Minute)
+	client.Seed("room:v5:big:subs", strings.Repeat("x", 101), time.Minute)
 
 	_, ok := cache.Get(ctx, "big")
 	assert.False(t, ok, "a blob past the cap must never be decoded, let alone served")
@@ -246,6 +255,7 @@ func TestMember_JSONRoundTrip_NewFields(t *testing.T) {
 		Muted:              true,
 		HistorySharedSince: &hss,
 		HomeSiteID:         "site-a",
+		IsSubscribed:       true,
 	}
 	data, err := json.Marshal(in)
 	require.NoError(t, err)
@@ -273,6 +283,27 @@ func TestMember_HomeSiteID_RoundTrip(t *testing.T) {
 	var fromV2 roomsubcache.Member
 	require.NoError(t, json.Unmarshal([]byte(`{"id":"u1","account":"alice","siteId":"room-site"}`), &fromV2))
 	assert.Empty(t, fromV2.HomeSiteID, "legacy siteId must not decode into HomeSiteID")
+}
+
+// IsSubscribed is the per-user sidebar/subscription flag denormalised onto the
+// subscription. It is stable — flipped by an explicit subscribe/unsubscribe,
+// never rewritten per message — so it is safe to serve from a TTL'd entry.
+func TestMember_IsSubscribed_RoundTrip(t *testing.T) {
+	in := roomsubcache.Member{ID: "u1", Account: "alice", IsSubscribed: true}
+	data, err := json.Marshal(in)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"isSubscribed":true`)
+
+	var out roomsubcache.Member
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.True(t, out.IsSubscribed)
+
+	// A v4-shaped blob predates the field; it must decode to the zero value
+	// rather than anything invented. The v5 key bump is what stops such a blob
+	// reaching this decoder in the first place.
+	var fromV4 roomsubcache.Member
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"u1","account":"alice"}`), &fromV4))
+	assert.False(t, fromV4.IsSubscribed)
 }
 
 func TestMember_RoomType_RoundTrip(t *testing.T) {
@@ -307,13 +338,13 @@ func TestValkeyCache_Slide_ReArmsTTLWithoutRewriting(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 	members := []roomsubcache.Member{{ID: "u1", Account: "alice"}}
 	require.NoError(t, cache.Set(ctx, "r1", members, time.Minute))
-	before := client.Value("room:v4:r1:subs")
+	before := client.Value("room:v5:r1:subs")
 
 	cache.Slide(ctx, "r1", time.Hour)
 
-	assert.Equal(t, []string{"room:v4:r1:subs"}, client.ExpiredKeys())
-	assert.Equal(t, time.Hour, mustTTL(t, client, "room:v4:r1:subs"), "the deadline must move")
-	after := client.Value("room:v4:r1:subs")
+	assert.Equal(t, []string{"room:v5:r1:subs"}, client.ExpiredKeys())
+	assert.Equal(t, time.Hour, mustTTL(t, client, "room:v5:r1:subs"), "the deadline must move")
+	after := client.Value("room:v5:r1:subs")
 	assert.Equal(t, before, after, "the value must not be rewritten")
 }
 

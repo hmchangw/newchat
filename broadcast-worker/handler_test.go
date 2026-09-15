@@ -4218,3 +4218,94 @@ func TestHandler_PublishRoomEvent_OversizedPayloadIsPermanent(t *testing.T) {
 	require.True(t, perm, "an oversized publish can never succeed on redelivery")
 	assert.Equal(t, errcode.CodeInternal, ec.Code)
 }
+
+// A botDM the user unsubscribed from is hidden by user-service's subscription
+// list (`roomType == "botDM"` requires `isSubscribed`, see
+// user-service/mongorepo/subscriptions.go activeSubscriptionFilter). Delivering
+// a live room event to that member would resurrect a room they removed, so
+// DM fan-out must skip them — while leaving plain DM rows untouched, whose
+// isSubscribed is always false (the field is bson `omitempty` and only app
+// subscriptions ever set it).
+func TestHandler_HandleMessage_BotDM_SkipsUnsubscribedMember(t *testing.T) {
+	msgTime := time.Date(2026, 3, 26, 13, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name         string
+		roomType     model.RoomType
+		memberType   model.RoomType
+		isSubscribed bool
+		wantDeliver  bool
+	}{
+		{
+			name:         "subscribed botDM member receives the event",
+			roomType:     model.RoomTypeBotDM,
+			memberType:   model.RoomTypeBotDM,
+			isSubscribed: true,
+			wantDeliver:  true,
+		},
+		{
+			name:         "unsubscribed botDM member is skipped",
+			roomType:     model.RoomTypeBotDM,
+			memberType:   model.RoomTypeBotDM,
+			isSubscribed: false,
+			wantDeliver:  false,
+		},
+		{
+			// Regression guard: plain DM rows never set isSubscribed, so a gate
+			// that ignored roomType would silence every human DM.
+			name:         "plain DM member delivers despite isSubscribed false",
+			roomType:     model.RoomTypeDM,
+			memberType:   model.RoomTypeDM,
+			isSubscribed: false,
+			wantDeliver:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+
+			room := &model.Room{ID: "room-1", Type: tc.roomType, SiteID: "site-a", UserCount: 2}
+			// The bot row stores the type its human counterpart implies (dm) and
+			// is skipped as a bot regardless; only alice's row reaches the gate.
+			members := []roomsubcache.Member{
+				{ID: "alice-id", Account: "alice", RoomType: tc.memberType, IsSubscribed: tc.isSubscribed},
+				{ID: "bot-id", Account: "helper.bot", RoomType: model.RoomTypeDM, IsBot: true},
+			}
+
+			evt := model.MessageEvent{
+				Event:     model.EventCreated,
+				SiteID:    "site-a",
+				Timestamp: msgTime.UnixMilli(),
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "bot-id", UserAccount: "helper.bot",
+					Content: "build finished", CreatedAt: msgTime,
+				},
+			}
+			data, _ := json.Marshal(evt)
+
+			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(room), nil)
+			store.EXPECT().ListRoomMembers(gomock.Any(), "room-1").Return(members, nil)
+			us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+				Return([]model.User{{ID: "bot-id", Account: "helper.bot", EngName: "Helper"}}, nil)
+
+			keyStore := NewMockRoomKeyProvider(ctrl)
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+
+			var delivered bool
+			for _, rec := range pub.records {
+				if rec.subject == subject.UserRoomEvent("alice") {
+					delivered = true
+				}
+				assert.NotEqual(t, subject.UserRoomEvent("helper.bot"), rec.subject,
+					"bots never receive UI events")
+			}
+			assert.Equal(t, tc.wantDeliver, delivered,
+				"delivery to alice must follow the botDM subscription gate")
+		})
+	}
+}

@@ -19,8 +19,9 @@ import (
 // reader of the shared cache key depends on: the loader maps the nested
 // subscription shape into the flat Member, carries Muted through, and converts
 // historySharedSince (a Date) to epoch-ms — leaving it nil for full-access
-// members. A loader that dropped either field would silently unmute users and
-// widen their history windows for whichever service reads the entry next.
+// members, and carries IsSubscribed. A loader that dropped any of these would
+// silently unmute users, widen their history windows, or mark every member
+// unsubscribed for whichever service reads the entry next.
 func TestMongoLoader_HistorySharedSince(t *testing.T) {
 	db := testutil.MongoDB(t, "roomsubcache_loader")
 	ctx := context.Background()
@@ -33,6 +34,7 @@ func TestMongoLoader_HistorySharedSince(t *testing.T) {
 			ID: "s1", RoomID: "rX", RoomType: model.RoomTypeChannel,
 			User:               model.SubscriptionUser{ID: "alice", Account: "alice"},
 			Muted:              true,
+			IsSubscribed:       true,
 			HistorySharedSince: &shared,
 		},
 		// full-access member: no history-shared window (nil), a bot
@@ -63,6 +65,7 @@ func TestMongoLoader_HistorySharedSince(t *testing.T) {
 	assert.Equal(t, model.RoomTypeChannel, alice.RoomType)
 	assert.False(t, alice.IsBot)
 	assert.True(t, alice.Muted)
+	assert.True(t, alice.IsSubscribed, "isSubscribed must be projected and carried through")
 	require.NotNil(t, alice.HistorySharedSince, "restricted member must carry the window")
 	assert.Equal(t, shared.UnixMilli(), *alice.HistorySharedSince, "Date converted to epoch-ms")
 
@@ -70,6 +73,7 @@ func TestMongoLoader_HistorySharedSince(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "botty", botty.ID)
 	assert.True(t, botty.IsBot, "nested u.isBot maps to flat IsBot")
+	assert.False(t, botty.IsSubscribed, "an absent isSubscribed must decode false, not be invented")
 	assert.Nil(t, botty.HistorySharedSince, "full-access member must have nil HistorySharedSince")
 }
 
