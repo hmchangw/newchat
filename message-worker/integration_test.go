@@ -2501,9 +2501,11 @@ func TestHandler_Integration_CassandraOutageDoesNotLoseMessages(t *testing.T) {
 			return 0, 0, nil
 		}
 		return 12, 0, nil
+		// 0 mark delay: this test drives the outage → marker → drain → clear arc, which
+		// the debounce only delays. Its own behaviour is unit-tested in degrade_test.go.
 	}, mtr, func() time.Time {
 		return time.Now().UTC().Add(time.Duration(clockOffset.Load()) * time.Second)
-	})
+	}, 0)
 
 	publish := func(context.Context, string, []byte, string) error { return nil }
 	// The real production window: an infra-class outage must never reach a drop no
@@ -2553,7 +2555,7 @@ func TestHandler_Integration_CassandraOutageDoesNotLoseMessages(t *testing.T) {
 
 	// A sibling pod that saw no failures of its own must adopt the marker.
 	sibling := newDegradeTracker(degradeStore, "site-a",
-		func(context.Context) (uint64, uint64, error) { return 12, 0, nil }, mtr, nil)
+		func(context.Context) (uint64, uint64, error) { return 12, 0, nil }, mtr, nil, 0)
 	sibling.Refresh(ctx)
 	assert.True(t, sibling.Degraded())
 
