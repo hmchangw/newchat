@@ -48,6 +48,13 @@ type MongoConfig struct {
 	// primaryPreferred rather than primary: without it, encrypted history cannot be
 	// read at all when there is no primary.
 	KeyReadPreference string `env:"KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// SubscriptionReadPreference covers the subscriptions collection, which backs
+	// the access-control reads (GetSubscription / GetHistorySharedSince). It pins to
+	// strict primary — not primaryPreferred — so the read is read-your-writes and
+	// fails closed on a primary outage: primaryPreferred would fall back to a lagging
+	// secondary that could re-cache a stale pre-revocation grant until TTL, silently
+	// defeating the eviction. Env-overridable for operators who accept that trade-off.
+	SubscriptionReadPreference string `env:"SUBSCRIPTION_READ_PREFERENCE" envDefault:"primary"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
@@ -94,6 +101,10 @@ type Config struct {
 	// ttl to 0 to disable.
 	SubCacheSize int           `env:"HISTORY_SUB_CACHE_SIZE" envDefault:"100000"`
 	SubCacheTTL  time.Duration `env:"HISTORY_SUB_CACHE_TTL"  envDefault:"2m"`
+	// SubCacheMaxInflight caps concurrent source loads the sub-cache can have in
+	// flight, so a burst of distinct-key misses under slow Mongo can't spawn
+	// unbounded goroutines. 0 takes the package default.
+	SubCacheMaxInflight int `env:"HISTORY_SUB_CACHE_MAX_INFLIGHT" envDefault:"256"`
 
 	// Room metadata cache (room times + minUserLastSeenAt). lastMsgAt advances
 	// on every message, so the TTL is short by default; client room hints cover
@@ -195,6 +206,9 @@ func validate(cfg *Config) error {
 	if cfg.SubCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_SUB_CACHE_TTL must be >= 0, got %s", cfg.SubCacheTTL)
 	}
+	if cfg.SubCacheMaxInflight < 0 {
+		return fmt.Errorf("HISTORY_SUB_CACHE_MAX_INFLIGHT must be >= 0, got %d", cfg.SubCacheMaxInflight)
+	}
 	if cfg.RoomCacheSize < 0 {
 		return fmt.Errorf("HISTORY_ROOM_CACHE_SIZE must be >= 0, got %d", cfg.RoomCacheSize)
 	}
@@ -231,6 +245,9 @@ func validate(cfg *Config) error {
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.KeyReadPreference); err != nil {
 		return fmt.Errorf("MONGO_KEY_READ_PREFERENCE: %w", err)
+	}
+	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.SubscriptionReadPreference); err != nil {
+		return fmt.Errorf("MONGO_SUBSCRIPTION_READ_PREFERENCE: %w", err)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
 		return err
