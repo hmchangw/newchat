@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/nats-io/nats.go/jetstream"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 // bootstrapConfig gates stream creation to dev/integration; leave Enabled false in production.
@@ -20,8 +24,9 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams creates the input+output streams when enabled (dev/integration), otherwise
-// verifies the input stream exists so a misconfigured deploy fails at startup; identities are env-driven.
+// bootstrapStreams creates the input+output streams when enabled (dev/integration), otherwise verifies the
+// input stream exists and the output stream's duplicate window covers the consumer's outage retry budget,
+// so a misconfigured deploy fails at startup; identities are env-driven.
 func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubject string, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
@@ -35,14 +40,37 @@ func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputS
 			Subjects: []string{outputSubject},
 			// S2 storage compression — transparent to publisher/consumer; ~2× ratio on JSON at near-zero CPU. Shrinks inter-replica wire bytes and on-disk bytes.
 			Compression: jetstream.S2Compression,
+			// The consumer's outage retry budget can redeliver a source message for about an hour; each
+			// batch's Nats-Msg-Id only protects it while this window covers that span. Ops must match it.
+			Duplicates: stream.OutageRetryWindow,
 		}); err != nil {
 			return fmt.Errorf("create stream %s: %w", outputStream, err)
 		}
 		return nil
 	}
-	// Output stream absence is non-fatal: async publish surfaces errors per-publish.
 	if _, err := js.Stream(ctx, inputStream); err != nil {
 		return fmt.Errorf("verify stream %s: %w", inputStream, err)
+	}
+	// A present output stream must carry the window above, or a redelivery after it republishes batches
+	// the stream already accepted. Only ABSENCE is non-fatal (async publish surfaces that per-publish,
+	// and nothing can be duplicated in a stream that does not exist); any other lookup error leaves the
+	// window unverified, which is the failure this check exists to catch, so it must not pass for it.
+	out, err := js.Stream(ctx, outputStream)
+	switch {
+	case errors.Is(err, jetstream.ErrStreamNotFound):
+		slog.WarnContext(ctx, "output stream absent at startup; its duplicate window is unverified",
+			"stream", outputStream)
+		return nil
+	case err != nil:
+		return fmt.Errorf("verify stream %s duplicate window: %w", outputStream, err)
+	}
+	info := out.CachedInfo()
+	if info == nil {
+		return fmt.Errorf("verify stream %s: no stream info", outputStream)
+	}
+	if d := info.Config.Duplicates; d < stream.OutageRetryWindow {
+		return fmt.Errorf("stream %s duplicate window %s is shorter than the consumer's outage retry window %s; raise it before deploying",
+			outputStream, d, stream.OutageRetryWindow)
 	}
 	return nil
 }
