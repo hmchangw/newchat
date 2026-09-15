@@ -15,7 +15,6 @@ import (
 func TestConfig_ReadPreferenceDefault(t *testing.T) {
 	t.Setenv("SITE_ID", "site-a")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
-	t.Setenv("BOTPLATFORM_URL", "https://bp.example.com")
 	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
 	t.Setenv("MINIO_ACCESS_KEY", "k")
 	t.Setenv("MINIO_SECRET_KEY", "s")

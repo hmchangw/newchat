@@ -54,8 +54,6 @@ services:
       - PREVIEW_CONTENT_CHARS=${PREVIEW_CONTENT_CHARS:-50}
       - MAX_SITE_FANOUT=${MAX_SITE_FANOUT:-8}
       - HEALTH_ADDR=${HEALTH_ADDR:-:8081}
-      # Unset leaves HTTP auth on ssoToken only.
-      - BOTPLATFORM_URL=${BOTPLATFORM_URL:-}
       - GOMEMLIMIT_FRACTION=${GOMEMLIMIT_FRACTION:-0.8}
     ports:
       # 8080 in-container; host 8090 because 8080 (auth), 8082 (admin), 8085

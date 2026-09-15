@@ -101,10 +101,6 @@ type config struct {
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 
-	// BotplatformURL is the LOCAL site's botplatform-service. Required and non-empty:
-	// the service must not start in a configuration that serves the writes anonymously.
-	BotplatformURL string `env:"BOTPLATFORM_URL,required,notEmpty"`
-
 	// Guard bounds in-flight NATS request handlers (MAX_CONCURRENCY) and
 	// per-request duration (REQUEST_TIMEOUT) on the NATS request/reply side.
 	Guard natsrouter.GuardConfig

@@ -27,7 +27,9 @@ type ssoValidator interface {
 	Validate(ctx context.Context, rawToken string) (pkgoidc.Claims, error)
 }
 
-// authDeps holds the credential validators; either may be nil when unconfigured.
+// authDeps holds the credential validators. sso is nil when SSO is not
+// configured on this site; bot is always set by main, so its nil guard is
+// unreachable in production but keeps the failure explicit.
 type authDeps struct {
 	sso ssoValidator
 	bot botauth.TokenValidator
@@ -80,7 +82,8 @@ func (d authDeps) resolve(ctx context.Context, ssoToken, botUserID, botToken str
 	return d.ssoAccount(ctx, ssoToken)
 }
 
-// ssoAccount verifies locally, unlike sessionAccount's upstream call.
+// ssoAccount verifies the token's signature locally; sessionAccount reads the
+// sessions store instead.
 func (d authDeps) ssoAccount(ctx context.Context, token string) (string, error) {
 	if d.sso == nil {
 		return "", errcode.Unavailable("sso auth not configured",
@@ -106,7 +109,7 @@ func (d authDeps) ssoAccount(ctx context.Context, token string) (string, error) 
 	return account, nil
 }
 
-// sessionAccount validates a botplatform session pair upstream.
+// sessionAccount resolves a botplatform session pair against the sessions store.
 func (d authDeps) sessionAccount(ctx context.Context, userID, token string) (string, error) {
 	if d.bot == nil {
 		return "", errcode.Unavailable("session-token auth not configured",

@@ -20,6 +20,9 @@ services:
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
       - TLS_SKIP_VERIFY=${TLS_SKIP_VERIFY:-false}
+      # Session-token branch of POST /auth reads the shared sessions collection.
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
     networks:
       - chat-local
 
