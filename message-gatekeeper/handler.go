@@ -73,7 +73,10 @@ type Handler struct {
 	// snapshot, from trusted inputs (the send room + the validated quoted message
 	// ID) so the link is correct even on the outage path.
 	chatBaseURL string
-	metrics     *gatekeeperMetrics
+	// lane is the NATS lane this handler serves; it selects the canonical root a
+	// validated send is published to. Zero is LaneHome.
+	lane    subject.Lane
+	metrics *gatekeeperMetrics
 	// threadParentRecheckDelay spaces the single re-check of a thread parent that
 	// history reports missing. Zero disables the re-check.
 	threadParentRecheckDelay time.Duration
@@ -84,6 +87,14 @@ type gatekeeperHandlerOption func(*gatekeeperHandlerOptions)
 type gatekeeperHandlerOptions struct {
 	metrics                  *gatekeeperMetrics
 	threadParentRecheckDelay *time.Duration
+	lane                     subject.Lane
+}
+
+// withLane binds the handler to the lane its consumer delivers from. A
+// failover-lane send must be published to the standby canonical stream: the
+// live one is on the cluster whose outage put the client on that lane.
+func withLane(lane subject.Lane) gatekeeperHandlerOption {
+	return func(opts *gatekeeperHandlerOptions) { opts.lane = lane }
 }
 
 func withGatekeeperMetrics(metrics *gatekeeperMetrics) gatekeeperHandlerOption {
@@ -127,6 +138,7 @@ func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyF
 		maxAttachments:           maxAttachments,
 		maxAttachmentBytes:       maxAttachmentBytes,
 		chatBaseURL:              chatBaseURL,
+		lane:                     opts.lane,
 		metrics:                  opts.metrics,
 		threadParentRecheckDelay: recheckDelay,
 	}
@@ -193,6 +205,9 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	// encoded token. processMessage needs the requester's real account for
 	// data-key lookups (subscription, history), keyed on the original dotted
 	// account — so decode here. No-op for every non-bot account.
+	// The lane is fixed by the consumer that delivered this message, so a
+	// failover send cannot be misattributed to the live canonical stream (which
+	// is on the cluster that is down).
 	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
 	if err != nil {
 		// Permanent → server-side fault that cannot succeed on redelivery: reply + Ack, counted failed.
@@ -520,7 +535,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.MarshalFailed("message event", err)
 	}
 
-	canonicalSubj := subject.MsgCanonicalCreated(siteID)
+	canonicalSubj := h.lane.MsgCanonical(siteID, subject.CanonicalCreated)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
 		if errors.Is(err, nats.ErrMaxPayload) {

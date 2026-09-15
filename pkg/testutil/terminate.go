@@ -12,6 +12,7 @@ func TerminateAll() {
 	TerminateElasticsearch()
 	TerminateNATS()
 	TerminateNATSWebSocket()
+	TerminateNATSBuddy()
 	TerminateVault()
 	TerminateValkey()
 }

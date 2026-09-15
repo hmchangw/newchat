@@ -111,3 +111,43 @@ func TestHandleEvent_OversizedPayloadIsPermanent(t *testing.T) {
 	_, permanent := errcode.IsPermanent(err)
 	assert.True(t, permanent, "an oversized forward can never succeed — Ack-drop it, don't wedge the lane")
 }
+
+func TestHandleEvent_RedirectsToFailoverOnNoResponders(t *testing.T) {
+	var got []string
+	h := NewHandler(func(_ context.Context, subj string, _ []byte, _ string) error {
+		got = append(got, subj)
+		if len(got) == 1 {
+			return nats.ErrNoResponders
+		}
+		return nil
+	})
+
+	subj := subject.Outbox("site-a", "site-b", model.InboxMemberAdded)
+	data, _ := outboxEvent(t, "site-b", model.InboxMemberAdded, "d1")
+
+	require.NoError(t, h.HandleEvent(context.Background(), subj, data))
+	assert.Equal(t, []string{
+		"chat.inbox.site-b.external.member_added",
+		"chat.failover.inbox.site-b.external.member_added",
+	}, got)
+}
+
+// A timeout may already have landed, and the two INBOX streams have independent
+// dedup windows — so an ambiguous failure must park, never double-publish.
+func TestHandleEvent_TimeoutDoesNotRedirect(t *testing.T) {
+	var got []string
+	h := NewHandler(func(_ context.Context, subj string, _ []byte, _ string) error {
+		got = append(got, subj)
+		return nats.ErrTimeout
+	})
+
+	subj := subject.Outbox("site-a", "site-b", model.InboxMemberAdded)
+	data, _ := outboxEvent(t, "site-b", model.InboxMemberAdded, "d1")
+
+	err := h.HandleEvent(context.Background(), subj, data)
+	require.Error(t, err, "a timeout must stay transient so jsretry Naks and parks")
+	_, permanent := errcode.IsPermanent(err)
+	assert.False(t, permanent, "parking, not poisoning")
+	assert.Equal(t, []string{"chat.inbox.site-b.external.member_added"}, got,
+		"an ambiguous failure must not double-publish")
+}

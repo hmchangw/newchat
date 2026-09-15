@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type config struct {
@@ -24,6 +26,7 @@ type config struct {
 	SiteID        string                  `env:"SITE_ID,required"`
 	MaxWorkers    int                     `env:"MAX_WORKERS" envDefault:"100"`
 	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy         natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	Mode          stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
@@ -49,77 +52,70 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
+	// HasFailover gates the bot pipeline out of the buddy lane; it also keeps
+	// the home dial fail-fast there, since without a buddy a pod that cannot
+	// reach home has nothing to do. With a buddy the dial is lazy, so a pod
+	// that restarts while home is down still boots and serves the buddy lane.
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile, sdk)
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
-	}
-	js, err := nc.JetStream()
-	if err != nil {
-		return fmt.Errorf("init jetstream: %w", err)
 	}
 
 	h := newHandler(LogDispatcher{})
 
-	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode, wiring.PushInputWildcard))
+	// APNs and FCM are external and unaffected by a site's NATS outage, so the
+	// one handler serves both lanes: nothing in it speaks NATS.
+	lanes, err := failoverlane.BindLanes(ctx, nc, js, dialer, &failoverlane.LanesSpec{
+		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers,
+		Home: failoverlane.HomeSpec{
+			Stream: wiring.PushStream,
+			Consumer: buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("push-notification-service"),
+				wiring.PushInputWildcard),
+		},
+		Buddy: &failoverlane.LaneSpec{
+			Stream: wiring.PushFailoverStream,
+			// notification-worker owns the push stream and asserts its
+			// placement; binding here is this service's existence check.
+			Ownership: failoverlane.BorrowsStreams,
+			Consumer: buildConsumerConfig(cfg.Consumer,
+				cfg.Mode.FailoverConsumerName("push-notification-service"),
+				wiring.PushFailoverInputWildcard),
+		},
+	}, func(context.Context, *o11ynats.Conn, o11ynats.JetStream, subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		return h.HandleJetStreamMsg, nil
+	})
 	if err != nil {
-		return fmt.Errorf("create consumer: %w", err)
+		return fmt.Errorf("bind lanes: %w", err)
 	}
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		return fmt.Errorf("messages iter: %w", err)
-	}
-
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	var wg sync.WaitGroup
-	go func() {
-		for {
-			mCtx, msg, err := iter.Next()
-			if err != nil {
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func() {
-				defer func() { <-sem; wg.Done() }()
-				h.HandleJetStreamMsg(mCtx, msg)
-			}()
-		}
-	}()
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		lanes.Check(),
 	)
 	if err != nil {
 		return fmt.Errorf("health server: %w", err)
 	}
 
 	slog.Info("push-notification-service running", "site", cfg.SiteID)
-	shutdown.Wait(ctx, 25*time.Second,
-		func(_ context.Context) error { iter.Stop(); return nil },
-		func(dctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-dctx.Done():
-				return fmt.Errorf("worker drain: %w", dctx.Err())
-			}
-		},
-		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+	hooks := append(lanes.StopHooks(), lanes.DrainHooks()...)
+	hooks = append(hooks,
 		func(dctx context.Context) error { return healthStop(dctx) },
 		func(dctx context.Context) error { return obsShutdown(dctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 	return nil
 }
 
 // buildConsumerConfig adds the durable name and filter; everything else comes
-// from ConsumerSettings.
-func buildConsumerConfig(s stream.ConsumerSettings, mode stream.Pipeline, filterSubject string) jetstream.ConsumerConfig {
+// from ConsumerSettings. The durable is a parameter rather than derived from the
+// pipeline so the home and buddy lanes share one builder and differ only in the
+// durable and filter — a shared durable would have them clobber each other's
+// cursor on a single-server dev NATS.
+func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
-	cc.Durable = mode.ConsumerName("push-notification-service")
+	cc.Durable = durable
 	cc.FilterSubject = filterSubject
 	return cc
 }
