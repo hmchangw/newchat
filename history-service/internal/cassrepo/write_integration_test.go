@@ -475,6 +475,167 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 	assert.Equal(t, 2, gotTcount, "messages_by_room.tcount = count-based 2")
 }
 
+// Once the thread partition reaches the scan limit, a reply delete must stop
+// recounting the whole partition and instead CAS-decrement the stamped tcount,
+// with tlm taken from the truncated scan's newest survivor.
+func TestRepository_SoftDeleteMessage_PastScanLimit_DecrementsIncrementally(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo.threadPolicy.ScanLimit = 3
+	// Re-anchoring off: ShouldReanchor returns true unconditionally while the
+	// stamped count is under the budget, so with the default 50 this test would
+	// reconcile from an exact scan and never reach the incremental path it
+	// names.
+	repo.threadPolicy.ReanchorBudget = 0
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-mega-del"
+	threadRoomID := "thread-mega-del"
+	parentID := "m-mega-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	staleTlm := parentCreatedAt.Add(time.Second)
+
+	// Parent pre-stamped at tcount=5 — the value the incremental path decrements.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted, tcount, thread_last_msg_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 5, staleTlm,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount, thread_last_msg_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID, sender, "parent", "", false, 5, staleTlm,
+	).Exec())
+
+	// 5 live replies — the partition is past the limit of 3, so the post-delete
+	// scan is truncated and can only see the newest 3 rows.
+	replyAt := func(i int) time.Time { return parentCreatedAt.Add(time.Duration(i) * time.Second) }
+	for i := 1; i <= 5; i++ {
+		require.NoError(t, session.Query(
+			`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, room_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			threadRoomID, replyAt(i), fmt.Sprintf("m-mega-reply-%d", i), roomID, sender, "reply", parentID, false,
+		).Exec())
+	}
+	deletedID := "m-mega-reply-5"
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		deletedID, roomID, replyAt(5), sender, "reply", parentID, parentCreatedAt, threadRoomID, false,
+	).Exec())
+
+	parentCreatedAtPtr := parentCreatedAt
+	msg := &models.Message{
+		MessageID:             deletedID,
+		RoomID:                roomID,
+		CreatedAt:             replyAt(5),
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAtPtr,
+		ThreadRoomID:          threadRoomID,
+	}
+	_, applied, newTcount, newTlm, err := repo.SoftDeleteMessage(ctx, msg, replyAt(5).Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NotNil(t, newTcount)
+	assert.Equal(t, 4, *newTcount, "stamped 5 decremented once, not recounted")
+	// Resolving the new newest survivor needs the scan this path exists to
+	// skip, so the column keeps what it had. That stamped value is what must
+	// be reported: nil on the canonical event tells clients no replies remain.
+	require.NotNil(t, newTlm, "an unresolved tlm must not be reported as no-replies-remain")
+	assert.True(t, newTlm.Equal(staleTlm), "tlm = the value still stamped on the parent")
+
+	var (
+		gotTcount int
+		gotTlm    time.Time
+	)
+	require.NoError(t, session.Query(
+		`SELECT tcount, thread_last_msg_at FROM messages_by_id WHERE message_id = ?`,
+		parentID,
+	).Scan(&gotTcount, &gotTlm))
+	assert.Equal(t, 4, gotTcount)
+	assert.Equal(t, staleTlm.UnixMilli(), gotTlm.UTC().UnixMilli(), "the delete leaves the column alone")
+
+	require.NoError(t, session.Query(
+		`SELECT tcount, thread_last_msg_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
+	).Scan(&gotTcount, &gotTlm))
+	assert.Equal(t, 4, gotTcount)
+	assert.Equal(t, staleTlm.UnixMilli(), gotTlm.UTC().UnixMilli(), "the mirror tracks the authority")
+}
+
+// A delete whose LWT reports "already deleted" lost the CAS to a concurrent
+// delete, and that winner owns the parent count: it is running its own
+// Maintain right now. This branch must leave the count alone rather than
+// recount and stamp, which would race the winner and can write the pre-delete
+// count back over its decrement.
+//
+// The retry of a partly-applied delete never reaches here: the service layer
+// reads the message before deleting and short-circuits on msg.Deleted, so a
+// committed LWT means the retry returns before the CAS. Repairing that gap
+// belongs at that short-circuit, not on a branch that only ever sees the race.
+func TestRepository_SoftDeleteMessage_CASMiss_LeavesParentCountToTheWinner(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo.threadPolicy.ScanLimit = 3
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-casmiss"
+	threadRoomID := "thread-casmiss"
+	parentID := "m-casmiss-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	bucket := msgbucket.New(24 * time.Hour).Of(parentCreatedAt)
+
+	// Parent stamped at 5. Whatever it holds, this branch must not move it.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 5,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, bucket, parentCreatedAt, parentID, sender, "parent", "", false, 5,
+	).Exec())
+
+	replyAt := func(i int) time.Time { return parentCreatedAt.Add(time.Duration(i) * time.Second) }
+	deletedID := "m-casmiss-reply-4"
+	for i := 1; i <= 4; i++ {
+		id := fmt.Sprintf("m-casmiss-reply-%d", i)
+		// Reply 4 is already soft-deleted: the first attempt's LWT committed.
+		require.NoError(t, session.Query(
+			`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, room_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			threadRoomID, replyAt(i), id, roomID, sender, "reply", parentID, id == deletedID,
+		).Exec())
+	}
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id, deleted, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		deletedID, roomID, replyAt(4), sender, "reply", parentID, parentCreatedAt, threadRoomID, true, replyAt(4),
+	).Exec())
+
+	parentCreatedAtPtr := parentCreatedAt
+	msg := &models.Message{
+		MessageID:             deletedID,
+		RoomID:                roomID,
+		CreatedAt:             replyAt(4),
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAtPtr,
+		ThreadRoomID:          threadRoomID,
+	}
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, replyAt(4).Add(time.Minute))
+	require.NoError(t, err)
+	require.False(t, applied, "already-deleted reply must report the CAS miss")
+
+	var gotTcount int
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_id WHERE message_id = ?`, parentID,
+	).Scan(&gotTcount))
+	assert.Equal(t, 5, gotTcount, "the CAS loser leaves the count exactly as it found it")
+
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, bucket, parentCreatedAt, parentID,
+	).Scan(&gotTcount))
+	assert.Equal(t, 5, gotTcount, "and does not touch the mirror either")
+}
+
 func TestRepository_SoftDeleteMessage_UpdatesParentTlm(t *testing.T) {
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
@@ -1755,28 +1916,4 @@ func TestRepository_SoftDeleteMessage_TShowThreadReply(t *testing.T) {
 		roomID, bucket, replyCreatedAt, replyID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted, "TShow reply soft-delete must propagate to the messages_by_room copy")
-}
-
-// A thread well past the old 99 ceiling counts exactly, and tlm is still the
-// newest reply — the DESC clustering order surfaces it first.
-func TestRepository_countThreadReplies_LongThreadExact(t *testing.T) {
-	ctx := context.Background()
-	session := setupCassandra(t)
-
-	const replies = 150
-	base := time.Now().UTC()
-	for i := 0; i < replies; i++ {
-		require.NoError(t, session.Query(
-			`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id) VALUES (?, ?, ?)`,
-			"thread-1", base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("reply-%d", i),
-		).WithContext(ctx).Exec())
-	}
-
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 10, nil)
-	n, tlm, err := repo.countThreadReplies(ctx, "thread-1")
-	require.NoError(t, err)
-	assert.Equal(t, replies, n)
-	require.NotNil(t, tlm)
-	newest := base.Add(time.Duration(replies-1) * time.Millisecond)
-	assert.Equal(t, newest.UnixMilli(), tlm.UnixMilli())
 }

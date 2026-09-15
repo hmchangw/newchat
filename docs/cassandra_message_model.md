@@ -95,6 +95,78 @@ partition per thread. Reads slice the partition by `created_at`; no bucket
 walk is needed. This shape keeps the worst-case fetch latency bounded by
 partition size rather than by the thread's lifespan.
 
+### Thread reply count
+
+`tcount` on the parent row (mirrored in `messages_by_room` and `messages_by_id`)
+is maintained by `pkg/threadcount` on every reply add (`message-worker`,
+`bot-message-worker`) and reply delete (`history-service`). Each writer first
+point-reads the stamped count, because that is what decides how it is
+maintained:
+
+- **Stamped count under `threadcount.DefaultScanLimit`** — the count is
+  recomputed from a bounded scan of the thread partition and blind-SET. The
+  reply rows are the source of truth, so the result is exact, idempotent under
+  JetStream redelivery, and self-healing: whatever was stamped before is
+  replaced by what is actually there. The scan reads one row past its cap so it
+  knows whether it reached the end of the partition; soft-deleted replies still
+  occupy rows, so a read that filled its cap may have seen nothing but
+  tombstones while live replies survive just past it. Such a read may only
+  **raise** the count and **advance** `thread_last_msg_at` — never stamp an
+  exact value, never clear the timestamp — and it skips the adjustment on a
+  redelivery, exactly as the approximate path does. The "exact, idempotent,
+  self-healing" properties above therefore belong to the *complete* read: only
+  a read that reached the end of the partition replaces the stamped value
+  outright, which is what makes repeating it harmless.
+- **At or past the limit** — the scan is skipped entirely and the stamped count
+  is moved by one with a plain write. Per-reply cost stops depending on thread
+  length, which is what keeps a long thread out of the timeout → NAK →
+  redelivery storm a full partition walk caused. `messages_by_id` is the
+  authority; the `messages_by_room` mirror is written from the value committed
+  there, and only ever carries a `thread_last_msg_at` that was actually
+  resolved (an unresolved one leaves the mirror's column alone rather than
+  clearing it).
+
+**The count above the limit is approximate.** Adjusting by ±1 without
+coordinating means concurrent replies can lose an increment and a redelivery
+can add one twice, and neither leaves an error to react to. This is deliberate:
+a lightweight transaction would make every reply to the busiest threads
+serialize through Paxos on one row, to buy an exactness that no reader needs.
+
+**Re-anchoring bounds the error.** `threadcount.ShouldReanchor` re-derives the
+count from an exact scan with probability `budget/stamped`, so the expected
+rows scanned per reply stays flat at `DefaultReanchorBudget` however long the
+thread grows — a fixed "every Nth reply" rule would instead cost O(thread
+length) per reply amortized, reintroducing the quadratic behaviour. Sampling is
+stateless: no coordination between workers, no column recording when a thread
+was last anchored. Re-anchoring is best-effort — on failure the stamped count
+stands, which is never worse than not having tried.
+
+`DefaultReconcileRowLimit` caps what one re-anchor may read. The sample prices a
+re-anchor at the **live** count, but the partition holds every reply ever
+written, soft deletes included, so a thread with a thousand survivors and a
+million tombstones would be sampled as if a scan cost a thousand rows and
+charged a million. Past the cap the re-anchor errors instead of stamping a count
+it cannot verify, and the parent keeps its approximate value — which is the
+state this design already tolerates.
+
+A JetStream redelivery above the limit does not repeat the adjustment: the reply
+may already be counted, and counting it twice is worse than the at-most-one
+undercount the next re-anchor erases. It does re-stamp both rows from the
+authority, because the two are written in one **unlogged** batch across two
+partitions and the delivery that failed can have landed on only one of them;
+re-stamping is idempotent and is the one chance to repair that divergence before
+the retry is acked. It also advances `thread_last_msg_at` with the reply's own
+time (idempotent, unlike the count), and deliberately skips re-anchor sampling —
+a retry burst is the worst moment to add partition scans.
+
+Consequence for readers: `tcount` is exact for threads under the scan limit
+whose partition the scan can read to the end — every thread in practice — and
+otherwise, above the limit or behind a wall of tombstones, an approximation that
+stays close and is periodically corrected. Nothing server-side depends on the precise
+value: the only consumers test it against zero (`history-service` skips
+Cassandra for a thread with no surviving replies, and treats a positive count
+as "this message is a thread parent"). The exact figure is used for display.
+
 ### Compaction
 
 `messages_by_room` uses `TimeWindowCompactionStrategy` with
@@ -143,7 +215,7 @@ CREATE TABLE IF NOT EXISTS messages_by_room(
   sender FROZEN<"Participant">,
   site_id TEXT,
   sys_msg_data BLOB,
-  tcount INT, // exact non-deleted thread reply count (pkg/threadcount)
+  tcount INT, // non-deleted thread reply count (pkg/threadcount; see "Thread reply count")
   thread_last_msg_at TIMESTAMP, // timestamp of most recent thread reply; null until first reply
   thread_parent_created_at TIMESTAMP, // for FE to query thread parent message when also sent to channel (tshow=true)
   thread_parent_id TEXT,
@@ -258,7 +330,7 @@ CREATE TABLE IF NOT EXISTS messages_by_id(
   sender FROZEN<"Participant">,
   site_id TEXT,
   sys_msg_data BLOB,
-  tcount INT, // exact non-deleted thread reply count (pkg/threadcount)
+  tcount INT, // non-deleted thread reply count (pkg/threadcount; see "Thread reply count")
   thread_last_msg_at TIMESTAMP, // timestamp of most recent thread reply; null until first reply
   thread_parent_created_at TIMESTAMP,
   thread_parent_id TEXT,
