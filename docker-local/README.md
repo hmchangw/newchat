@@ -358,7 +358,8 @@ brings it up first should check, and correct this README where reality differs:
 
 `cassandra-web` ships with the deps stack at **http://localhost:8083** —
 keyspaces, tables, schema, a row browser and a CQL Query page. All four
-Cassandra tables browse normally, `reactions` included.
+Cassandra tables browse normally, `reactions` included, and a row can be
+edited or deleted whatever its column types.
 
 It is a community project, not an official Apache or DataStax tool — no such
 web UI exists. The image is our own build of
