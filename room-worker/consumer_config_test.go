@@ -7,6 +7,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -79,4 +80,24 @@ func TestConsumedSubjectsClassifyToBoundedEventTypes(t *testing.T) {
 			assert.NotEqual(t, natsmetrics.EventUnknown, got, "a dispatched subject must not fall back to unknown")
 		})
 	}
+}
+
+// The heartbeat derives from the consumer's own AckWait, so the two cannot
+// disagree; two ticks must fit inside the budget to survive a lost one.
+func TestHeartbeatIntervalLeavesHeadroomUnderAckWait(t *testing.T) {
+	for _, ackWait := range []time.Duration{30 * time.Second, time.Minute, 5 * time.Minute} {
+		cc := buildConsumerConfig(stream.ConsumerSettings{
+			AckWait: ackWait, MaxDeliver: 5, MaxWaiting: 512, MaxAckPending: 1000,
+		}, "default")
+
+		every := jsretry.HeartbeatInterval(cc.AckWait)
+		assert.Positive(t, every, "AckWait %s must produce a live heartbeat", ackWait)
+		assert.Less(t, 2*every, cc.AckWait, "two heartbeats must fit inside AckWait %s", ackWait)
+	}
+}
+
+// No local budget to pace against, so disable rather than invent an interval.
+func TestHeartbeatDisabledWhenAckWaitUnset(t *testing.T) {
+	cc := buildConsumerConfig(stream.ConsumerSettings{MaxDeliver: 5}, "default")
+	assert.Zero(t, jsretry.HeartbeatInterval(cc.AckWait))
 }
