@@ -55,7 +55,9 @@ func newTestTracker(t *testing.T, store DegradeStore, backlog backlogFunc, clock
 	if clock == nil {
 		clock = func() time.Time { return testClockStart }
 	}
-	return newDegradeTracker(store, "site-a", backlog, m, clock)
+	// 0: these tests exercise the marking and drain machinery, not the debounce,
+	// which has its own tests below.
+	return newDegradeTracker(store, "site-a", backlog, m, clock, 0)
 }
 
 // testClockStart is the instant the tracker tests' frozen clock reports.
@@ -455,4 +457,110 @@ func TestDegradeTracker_SetLosingToConcurrentClearDoesNotResurrect(t *testing.T)
 	tr.mu.RUnlock()
 	assert.True(t, tr.Degraded() || !synced,
 		"a Set that raced a Clear must not report itself synced while local state says healthy")
+}
+
+// --- Mark debounce -----------------------------------------------------------
+//
+// The marker is site-wide: setting it makes every room report incompleteSince and
+// suppresses every thread badge, and drainTailGrace holds it for 20 minutes past the
+// drain. Marking on the very first failed write therefore turned a one-second
+// Cassandra blip — a node restart, a timeout, a GC pause, all of which the retry
+// resolves — into a 20-minute site-wide "history incomplete" notice. The debounce is
+// what separates a blip from an outage.
+
+// newDebounceTracker builds a tracker with an explicit mark delay over a clock the
+// test advances, so the window can be stepped without sleeping.
+func newDebounceTracker(t *testing.T, store DegradeStore, delay time.Duration, elapsed *atomic.Int64) *degradeTracker {
+	t.Helper()
+	m, err := newMetrics()
+	require.NoError(t, err)
+	clock := func() time.Time { return testClockStart.Add(time.Duration(elapsed.Load()) * time.Second) }
+	backlog := func(context.Context) (uint64, uint64, error) { return 0, 0, nil }
+	return newDegradeTracker(store, "site-a", backlog, m, clock, delay)
+}
+
+// A single failure that the retry would have resolved must not condemn the site.
+func TestDegradeTracker_OnWriteFailure_HoldsTheMarkUntilTheDebounceElapses(t *testing.T) {
+	var elapsed atomic.Int64
+	store := &fakeDegradeStore{}
+	tr := newDebounceTracker(t, store, 30*time.Second, &elapsed)
+
+	tr.OnWriteFailure(context.Background())
+	assert.False(t, tr.Degraded(), "one failed write is a blip, not an outage")
+	assert.Zero(t, store.setCalls.Load(), "nothing may be written to the shared marker yet")
+
+	// Still inside the window.
+	elapsed.Store(29)
+	tr.OnWriteFailure(context.Background())
+	assert.False(t, tr.Degraded())
+	assert.Zero(t, store.setCalls.Load())
+
+	// Past it: writes have been failing for longer than a blip lasts.
+	elapsed.Store(31)
+	tr.OnWriteFailure(context.Background())
+	assert.True(t, tr.Degraded(), "sustained failure must still mark the site")
+	assert.Equal(t, int64(1), store.setCalls.Load())
+}
+
+// A successful write proves the cluster is serving, so the next blip starts its own
+// window rather than inheriting an ancient first-failure stamp.
+func TestDegradeTracker_OnWriteSuccess_RetiresAPendingDebounce(t *testing.T) {
+	var elapsed atomic.Int64
+	store := &fakeDegradeStore{}
+	tr := newDebounceTracker(t, store, 30*time.Second, &elapsed)
+
+	tr.OnWriteFailure(context.Background())
+	require.False(t, tr.Degraded())
+
+	tr.OnWriteSuccess(context.Background())
+
+	// Long after the original failure, but the clock was retired by the success.
+	elapsed.Store(31)
+	tr.OnWriteFailure(context.Background())
+	assert.False(t, tr.Degraded(),
+		"a failure after a success starts a fresh window, it does not inherit the old one")
+	assert.Zero(t, store.setCalls.Load())
+}
+
+// The debounce delays the NOTICE, never the window it describes. incompleteSince is
+// the client's "messages at or after this may be missing", so stamping it with the
+// mark time would declare the failing seconds before it complete history.
+func TestDegradeTracker_MarkerRecordsTheFirstFailureNotTheMarkTime(t *testing.T) {
+	var elapsed atomic.Int64
+	store := &fakeDegradeStore{}
+	tr := newDebounceTracker(t, store, 30*time.Second, &elapsed)
+
+	tr.OnWriteFailure(context.Background())
+	elapsed.Store(31)
+	tr.OnWriteFailure(context.Background())
+
+	require.NotNil(t, store.marker)
+	assert.Equal(t, testClockStart.UnixMilli(), store.marker.DegradedSince,
+		"the marker must cover the whole failing period, starting at the first failure")
+}
+
+// Zero is the off switch, and it restores the pre-debounce behaviour exactly.
+func TestDegradeTracker_ZeroDebounceMarksOnTheFirstFailure(t *testing.T) {
+	var elapsed atomic.Int64
+	store := &fakeDegradeStore{}
+	tr := newDebounceTracker(t, store, 0, &elapsed)
+
+	tr.OnWriteFailure(context.Background())
+	assert.True(t, tr.Degraded())
+	assert.Equal(t, int64(1), store.setCalls.Load())
+}
+
+// A pod that already considers the site degraded — its own earlier failures, or a
+// sibling's marker adopted via Refresh — must not re-enter the debounce. The window
+// gates the transition into degraded, nothing else.
+func TestDegradeTracker_DebounceDoesNotApplyOnceDegraded(t *testing.T) {
+	var elapsed atomic.Int64
+	store := &fakeDegradeStore{marker: &histdegrade.Marker{SiteID: "site-a", DegradedSince: 1}}
+	tr := newDebounceTracker(t, store, 30*time.Second, &elapsed)
+
+	tr.Refresh(context.Background())
+	require.True(t, tr.Degraded(), "the sibling's marker is adopted regardless of local failures")
+
+	tr.OnWriteFailure(context.Background())
+	assert.True(t, tr.Degraded(), "an adopted marker must survive a local failure, not be debounced away")
 }

@@ -33,6 +33,10 @@ services:
       # give-up decision lives in settle.go, which drops only a request-class
       # Cassandra failure (invalid / syntax) that outlived the window below.
       - CONSUMER_MAX_DELIVER=${CONSUMER_MAX_DELIVER:--1}
+      # How long writes must keep failing before the site is marked degraded. The
+      # marker is site-wide and held 20m past the drain, so marking on the first
+      # failure turned any blip the retry resolves into a site-wide notice.
+      - DEGRADE_MARK_DELAY=${DEGRADE_MARK_DELAY:-30s}
       # How long a request-class failure is retried (accumulated NAK backoff)
       # before the message is destroyed. HISTORY_DROP_ENABLED=false is the brake.
       - INVALID_RETRY_WINDOW=${INVALID_RETRY_WINDOW:-1h}

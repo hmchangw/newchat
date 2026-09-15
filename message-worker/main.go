@@ -73,6 +73,14 @@ type config struct {
 	Vault              atrest.VaultConfig
 	DebugLog           logctx.Config `envPrefix:"DEBUG_LOG_"`
 	DegradeRefresh     time.Duration `env:"DEGRADE_REFRESH_INTERVAL" envDefault:"5s"`
+	// DegradeMarkDelay is how long history writes must keep failing before the site
+	// is marked degraded. The marker is site-wide and is held for drainTailGrace (20
+	// minutes) past the drain, so marking on the first failed write turned any
+	// one-second blip the retry resolves into a 20-minute site-wide "history
+	// incomplete" notice for every room. 30s clears the first three backoff rungs
+	// (1s, 5s, 30s), so a blip that resolves on retry never marks while a real outage
+	// still marks within about half a minute. 0 marks immediately.
+	DegradeMarkDelay time.Duration `env:"DEGRADE_MARK_DELAY" envDefault:"30s"`
 	// InvalidRetryWindow is how long a request-class Cassandra failure (see
 	// cqlclass.go) is retried before the message is dropped, measured as
 	// accumulated NAK backoff. A duration rather than a delivery count because the
@@ -332,7 +340,7 @@ func main() {
 			// redelivery.
 			// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
 			return ci.NumPending, uint64(ci.NumAckPending), nil
-		}, mtr, nil)
+		}, mtr, nil, cfg.DegradeMarkDelay)
 	// tickAfterInterval, not tickOnStart: the marker is read at startup by the
 	// first message that needs it, and an immediate tick would race the consumer
 	// coming up.

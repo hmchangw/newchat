@@ -81,9 +81,21 @@ type degradeTracker struct {
 	metrics *metrics
 	now     func() time.Time
 
+	// markDelay is how long history writes must keep failing before the site is
+	// declared degraded. The marker is site-wide and drainTailGrace holds it for 20
+	// minutes past the drain, so marking on the first failed write turned a
+	// one-second blip — a node restart, a timeout, a GC pause, each of which the
+	// retry resolves — into a 20-minute site-wide "history incomplete" notice. Zero
+	// marks immediately, which is the pre-debounce behaviour.
+	markDelay time.Duration
+
 	mu sync.RWMutex
 	// degraded is the tracker's local view of the site's health.
 	degraded bool
+	// firstFailureSince stamps the first failure of the current run of failures, and
+	// is retired by any success. It serves two purposes: it is what the debounce
+	// measures, and it is what the marker records — see OnWriteFailure.
+	firstFailureSince time.Time
 	// markerSynced is true once the shared store is known to reflect the current
 	// degraded state — set by a successful Set/Clear, or by Refresh reading the
 	// marker back. While degraded is true and markerSynced is false, a write to
@@ -98,11 +110,11 @@ type degradeTracker struct {
 	drainTailSince time.Time
 }
 
-func newDegradeTracker(store DegradeStore, siteID string, backlog backlogFunc, m *metrics, clock func() time.Time) *degradeTracker {
+func newDegradeTracker(store DegradeStore, siteID string, backlog backlogFunc, m *metrics, clock func() time.Time, markDelay time.Duration) *degradeTracker {
 	if clock == nil {
 		clock = func() time.Time { return time.Now().UTC() }
 	}
-	return &degradeTracker{store: store, siteID: siteID, backlog: backlog, metrics: m, now: clock}
+	return &degradeTracker{store: store, siteID: siteID, backlog: backlog, metrics: m, now: clock, markDelay: markDelay}
 }
 
 func (t *degradeTracker) Degraded() bool {
@@ -140,7 +152,22 @@ func (t *degradeTracker) setSynced(degraded bool) {
 // The write-failure counter is emitted by settle, not here: its class label is only
 // knowable where the error is classified.
 func (t *degradeTracker) OnWriteFailure(ctx context.Context) {
+	now := t.now()
 	t.mu.Lock()
+	if t.firstFailureSince.IsZero() {
+		t.firstFailureSince = now
+	}
+	// The debounce gates ONLY the transition into degraded. A pod that already holds
+	// the marker — from its own earlier failures, or a sibling's adopted via Refresh —
+	// must restart the drain tail and retry an unsynced Set with no delay, or a
+	// resumed outage could clear the marker mid-failure.
+	if !t.degraded && now.Sub(t.firstFailureSince) < t.markDelay {
+		// The drain tail is retired regardless: a failed write is a regression whether
+		// or not it has yet earned the marker.
+		t.drainTailSince = time.Time{}
+		t.mu.Unlock()
+		return
+	}
 	skipWrite := t.degraded && t.markerSynced
 	t.markLocked(true)
 	// A write failing again is the one real regression signal, so it — and nothing
@@ -155,13 +182,17 @@ func (t *degradeTracker) OnWriteFailure(ctx context.Context) {
 		// write that hasn't actually succeeded.
 		t.markerSynced = false
 	}
+	// Stamped from the FIRST failure of this run, not from now. The debounce delays
+	// the notice, never the window it describes: incompleteSince is the client's
+	// "messages at or after this may be missing", so stamping it at the mark would
+	// declare the already-failing seconds before it to be complete history.
+	since := t.firstFailureSince.UnixMilli()
 	t.mu.Unlock()
 	t.metrics.setDegraded(true)
 	if skipWrite {
 		return
 	}
 
-	since := t.now().UnixMilli()
 	if err := t.store.Set(ctx, t.siteID, since); err != nil {
 		slog.ErrorContext(ctx, "failed to set history degraded marker",
 			"error", err, "site", t.siteID, "degraded_since", since)
@@ -196,8 +227,21 @@ func (t *degradeTracker) OnWriteFailure(ctx context.Context) {
 // messages the marker is protecting. The redelivery half of that hold is bounded by
 // drainTailGrace so a permanently stuck message cannot pin the marker forever.
 func (t *degradeTracker) OnWriteSuccess(ctx context.Context) {
-	if !t.Degraded() {
-		return // healthy hot path: no locks beyond the RLock above, no round trips
+	t.mu.RLock()
+	degraded := t.degraded
+	pendingDebounce := !t.firstFailureSince.IsZero()
+	t.mu.RUnlock()
+
+	if pendingDebounce {
+		// A write succeeded, so the cluster is serving and the run of failures is over.
+		// Retire the clock, or a later unrelated blip would inherit this run's start and
+		// mark the site on its very first failure — the debounce undone by arithmetic.
+		t.mu.Lock()
+		t.firstFailureSince = time.Time{}
+		t.mu.Unlock()
+	}
+	if !degraded {
+		return // healthy hot path: one RLock, no round trips
 	}
 
 	now := t.now()

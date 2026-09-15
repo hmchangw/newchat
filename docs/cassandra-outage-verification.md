@@ -88,7 +88,10 @@ curl -s 'localhost:8222/jsz?consumers=true' \
 start in that state (`validateConsumerConfig`), so a running worker with a finite
 cap should be impossible — check the logs if you see one.
 
-**The marker is set**, and is durable in Mongo rather than only in-process:
+**The marker is set** — after `DEGRADE_MARK_DELAY` (default 30s), not instantly. Writes
+have to keep failing for that long before the site is declared degraded, so that a blip
+the retry resolves does not raise a 20-minute site-wide notice. Give it a minute before
+concluding the marker is broken. It is durable in Mongo, not just in-process:
 
 ```bash
 docker exec chat-local-mongodb mongosh chat --quiet \
@@ -205,6 +208,7 @@ request-class error having never actually retried it.
 | `HISTORY_DROP_ENABLED` | `true` | Operator kill switch for destruction. |
 | `MAX_DROPS_PER_MINUTE` | `10` | Per-pod cap on destruction. |
 | `DEGRADE_REFRESH_INTERVAL` | `5s` | How often a pod re-reads the site marker. |
+| `DEGRADE_MARK_DELAY` | `30s` | How long writes must keep failing before the site is marked degraded. Clears the 1s/5s/30s backoff rungs, so a blip the retry resolves never marks. `0` marks on the first failure. |
 | `MESSAGE_BUCKET_HOURS` | `360` | Must match across every service touching `messages_by_room`. |
 | `METRICS_ADDR` | `:9090` | Prometheus endpoint, path `/metrics`. Needs `O11Y_ENABLED=true`. |
 
