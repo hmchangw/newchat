@@ -167,8 +167,15 @@ func (p *directPool) MissingUsers(ids []string) []string {
 // subscription count via setLanes (`verify --lane`).
 func (p *directPool) Add(u *userState) error {
 	du := &directUser{id: u.ID, rooms: make(map[string]struct{})}
+	// Guard the metrics deref: the pool is constructed with a nil Collector in
+	// tests, and newLoadgenNATSHealth already handles nil metrics by keeping a
+	// standalone pool state.
+	var metrics *Metrics
+	if p.collector != nil {
+		metrics = p.collector.m
+	}
 	nc, err := connectWithCredsHealthHook(p.url, "loadgen-daily-"+u.ID, p.credsFile, "daily",
-		p.collector.m, func() { p.recordDisconnectFor(du) })
+		metrics, func() { p.recordDisconnectFor(du) })
 	if err != nil {
 		return fmt.Errorf("connect for %s: %w", u.ID, err)
 	}
