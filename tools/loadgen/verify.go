@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"os"
 	"sort"
 	"sync"
@@ -944,6 +944,8 @@ func (r *verifyRun) requestAccepted(ctx context.Context, subj string, body []byt
 // those still waiting.
 func (r *verifyRun) harvest(ctx context.Context, pending []pendingChange, now time.Time) []pendingChange {
 	keep := pending[:0]
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, pc := range pending {
 		if now.Before(pc.due) {
 			keep = append(keep, pc)
