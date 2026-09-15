@@ -561,6 +561,17 @@ func runConsumer(
 			}
 		}
 
+		// Only now is batch.Error() meaningful, and it is the only report of a
+		// consumer the server has dropped: Fetch keeps returning an empty batch
+		// and a nil error, so without this the loop spins while the collection
+		// indexes nothing and the pod stays ready.
+		if err := batch.Error(); batchErrorIsTerminal(err) {
+			slog.ErrorContext(ctx, "search consumer stopped; this collection will index nothing further",
+				"consumer", handler.collection.ConsumerName(), "error", err)
+			drain()
+			return
+		}
+
 		// Interval trigger: the size trigger above already fired for anything at the cap.
 		if handler.ActionCount() > 0 && time.Since(lastFlush) >= tune.bulkFlushInterval {
 			flushNow()

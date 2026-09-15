@@ -342,7 +342,17 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Choose the pattern based on the service's throughput needs:
   - **High-throughput** (`cons.Messages()` + semaphore): Pull iterator with a channel-based semaphore (`chan struct{}`) sized by `cfg.MaxWorkers` (from `MAX_WORKERS` env var, default `100`), `PullMaxMessages(2 * cfg.MaxWorkers)`, and `sync.WaitGroup` to track in-flight goroutines
   - **Sequential** (`cons.Consume()`): Callback-based sequential processing for lower-volume streams where concurrency is unnecessary
+  - **Batched** (`cons.Fetch()`): Pull a bounded batch per round-trip, for loops that buffer work before flushing it downstream (`search-sync-worker`)
 - Match the pattern already used by the service being modified — don't mix patterns within a single consumer
+- **A `Fetch` loop MUST read `batch.Error()` after draining `Messages()`.** A consumer the
+  server has dropped reaches only that method: `Fetch` itself keeps returning an empty batch
+  and a nil error, so a loop that ignores it spins forever while the service indexes nothing
+  and `/readyz` — which probes only the NATS connection — stays green. An idle poll leaves the
+  error nil (nats.go withholds `ErrTimeout`, `ErrNoMessages` and `ErrMaxBytesExceeded`,
+  `pull.go:944-948`), so anything non-nil is a real failure. `ErrNoHeartbeat` is the one
+  recoverable value — the consumer is still live and the next `Fetch` opens its own pull
+  request — and it is only ever raised when `FetchMaxWait` is at least 10s (`pull.go:840-845`).
+  See `search-sync-worker/consumer_source.go`'s `batchErrorIsTerminal`.
 - Follow existing worker services (`message-worker`, `broadcast-worker`, etc.) as reference implementations
 
 ### JetStream Redelivery Backoff
