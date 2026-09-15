@@ -19,6 +19,13 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
+// Audit actions for the duty switch. Two names rather than one with a flag, so
+// the audit console's action filter can isolate either direction.
+const (
+	auditActionRoomOnDutySet   = "room.onduty.set"
+	auditActionRoomOnDutyUnset = "room.onduty.unset"
+)
+
 // roomRequester issues a synchronous request/reply against room-service. Shaped
 // around messages so *o11ynats.Conn satisfies it and carries headers outbound.
 type roomRequester interface {
@@ -120,8 +127,17 @@ func (h *Handler) setRoomOnDuty(c *gin.Context) {
 		return
 	}
 
-	// No h.audit call, unlike every other mutating handler here: the operation is
-	// specified as leaving no record under its own name. room-service logs the
-	// change (actor, room, flags, owner) and that is the intended trail.
+	// Audited only once the switch is known to have landed — a row for a rejected
+	// call would assert a change that never happened. `owner` is the trimmed form
+	// actually sent downstream, and is empty when turning duty off, matching the
+	// fact that turning off leaves roles alone. A failed append is logged inside
+	// h.audit and never fails the request: the room has already changed, so a
+	// non-2xx here would only invite a retry of an applied switch.
+	action := auditActionRoomOnDutyUnset
+	if onDuty {
+		action = auditActionRoomOnDutySet
+	}
+	h.audit(ctx, c, action, "", owner, map[string]string{"roomId": roomID})
+
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

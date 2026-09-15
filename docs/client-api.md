@@ -7653,7 +7653,7 @@ Returns audit entries for the admin's site, newest-first, with optional filterin
 |---|---|---|
 | `targetAccount` | string | Optional. Filter by the affected user's account. |
 | `actor` | string | Optional. Filter by actor account. |
-| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`, `permission.grant`, `permission.revoke`). |
+| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`, `permission.grant`, `permission.revoke`, `room.onduty.set`, `room.onduty.unset`). |
 | `page` | integer | Page number, 1-based. Defaults to `1`. |
 | `limit` | integer | Page size. Defaults to `20`. |
 
@@ -7785,7 +7785,9 @@ Lets the logged-in admin change their own password. Verifies `oldPassword` again
 
 Toggles a channel room's on-duty state. On-duty staff work off the company network, so `onDuty: true` narrows who may change the roster (`restricted` — only owners may add members) and permits the connection from outside (`externalAccess`); `onDuty: false` clears both. No room or subscription field named `onDuty` exists — the parameter maps onto those two flags, which are owned by room-service.
 
-**Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything. No audit row is written — room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, is the only durable server-side record.
+**Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything.
+
+One `admin_audit` entry is written once the switch has landed — a rejected call writes none. `action` is `room.onduty.set` or `room.onduty.unset`, `details` is `{"roomId": "<room id>"}`, and `targetAccount` is the designated owner (empty when turning duty off, which leaves roles alone). An audit write that fails is logged and does not fail the request: the room has already changed. room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, remains as the finer-grained trail.
 
 Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to the plain `user` role. Turning duty **off** sends no owner, so roles are left exactly as they are.
 
@@ -8150,7 +8152,7 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `id` | string | Audit entry ID. |
 | `actorUserId` | string | Internal user ID of the admin who performed the action. |
 | `actorAccount` | string | Account of the admin. |
-| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`, `permission.grant`, `permission.revoke`. |
+| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`, `permission.grant`, `permission.revoke`, `room.onduty.set`, `room.onduty.unset`. |
 | `targetUserId` | string | Internal ID of the affected user. Omitted when not applicable. |
 | `targetAccount` | string | Account of the affected user. Omitted when not applicable. |
 | `details` | map<string, string> | Non-secret context for the action (e.g. `{"account":"bob"}`). Omitted when empty. Never contains passwords, hashes, or tokens. |
@@ -8307,6 +8309,120 @@ still gets an envelope rather than a dropped connection: that value < that value
 `CLIENT_UPDATE_UPLOAD_TIMEOUT` so it does not abandon a request this service is
 still waiting on. Raising one without the others reintroduces a window where a
 published upload is reported as a failure.
+
+### 9.18 List rooms
+
+**Endpoint:** `GET /v1/admin/rooms`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Lists the rooms in this deployment's database, ordered by `_id` and paged. There is no `siteId` filter: every site runs its own MongoDB, so the collection is already the site's rooms — the endpoint is scoped by which database admin-service is pointed at, not by a query predicate. Each row is projected to the fields the admin console renders — no message previews, no member arrays, no room keys.
+
+#### Query parameters
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `q` | string | no | One exact room `_id`, matched case-sensitively — selects at most one room, and a partial id matches nothing. Surrounding whitespace is trimmed, so a blank value returns every room. Room names are not searchable. |
+| `page` | integer | no | 1-based page. Defaults to `1`; a non-numeric or `< 1` value is ignored. |
+| `limit` | integer | no | Rows per page. Defaults to `20`, capped at `100`. |
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `rooms` | [AdminRoomView](#adminroomview)[] | This page of rooms. Empty array when the site has none. |
+| `total` | integer | Rooms matching `q`, unpaged — `0` or `1` when `q` is set. |
+
+##### AdminRoomView
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Room `_id`. |
+| `name` | string | Room name. |
+| `type` | string | `channel`, `dm`, `botDM`, or `discussion`. |
+| `userCount` | integer | Members counted toward the `RESTRICTED_ROOM_MIN_MEMBERS` floor (§9.12). |
+| `restricted` | boolean | Only owners may change the roster. Always present, including when `false`. |
+| `externalAccess` | boolean | Members may connect from outside the company network. Always present, including when `false`. |
+| `onDuty` | boolean | `restricted && externalAccess`, derived server-side — the inverse of the mapping [§9.12](#912-set-room-on-duty) writes. Branch on this rather than re-deriving it. Always present, including when `false`. |
+
+[§9.12](#912-set-room-on-duty) writes the pair together, but they are stored as independent fields, so a room can be found half-set (for example by an older write). Such a room reports `onDuty: false` while `restricted` stays `true`; the raw flags are returned alongside `onDuty` so that state remains visible.
+
+```json
+{
+  "rooms": [
+    {
+      "id": "aB3xY9kLmN2pQ7rS4",
+      "name": "general",
+      "type": "channel",
+      "userCount": 7,
+      "restricted": true,
+      "externalAccess": true,
+      "onDuty": true
+    }
+  ],
+  "total": 1
+}
+```
+
+#### Errors
+
+| HTTP | `code` | `reason` | When |
+|---|---|---|---|
+| 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
+| 403 | `forbidden` | `not_admin` | Session lacks the admin role or its `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+#### Triggered events
+
+`None — HTTP-only.`
+
+### 9.19 List room members
+
+**Endpoint:** `GET /v1/admin/rooms/:roomId/members`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Lists every account subscribed to the room. Unpaged — a room's roster is bounded, and the caller wants it whole.
+
+Read from the same subscriptions that room-service checks a designated owner against, so an account returned here is one [§9.12 Set room on-duty](#912-set-room-on-duty) will accept as `ownerAccount`. Unlike the client-facing [`member.list`](#list-members) RPC this does not require the caller to be a member — an admin managing a room is usually not in it — and it returns no display names, roles, or join times.
+
+An unknown `roomId` is not an error: it has no subscriptions, so the result is an empty list.
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `members` | [AdminRoomMemberView](#adminroommemberview)[] | Every subscribed account, sorted by account. Empty array when the room has none. |
+
+##### AdminRoomMemberView
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | Member's account. |
+| `isBot` | boolean | Whether the member is a bot. Always present, including when `false`. |
+
+```json
+{
+  "members": [
+    { "account": "alice", "isBot": false },
+    { "account": "helperbot", "isBot": true }
+  ]
+}
+```
+
+#### Errors
+
+| HTTP | `code` | `reason` | When |
+|---|---|---|---|
+| 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
+| 403 | `forbidden` | `not_admin` | Session lacks the admin role or its `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+#### Triggered events
+
+`None — HTTP-only.`
 
 ---
 

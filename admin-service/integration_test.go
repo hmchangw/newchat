@@ -1407,3 +1407,152 @@ func TestIntegration_WithTransaction_SurvivesNonPrimaryClientReadPreference(t *t
 	require.NoError(t, db.Collection("users").FindOne(ctx, bson.M{"_id": "txn-guard-probe"}).Decode(&got))
 	assert.Equal(t, "txn-probe", got["account"])
 }
+
+// -------------------------------------------------------------------------
+// ListRooms / ListRoomMembers
+// -------------------------------------------------------------------------
+
+func TestIntegration_ListRooms(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	ctx := context.Background()
+
+	rooms := []model.Room{
+		{ID: "room-a1", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 7, Restricted: true, ExternalAccess: true},
+		{ID: "room-a2", Name: "random", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 3},
+		{ID: "room-a3", Name: "alice-bob", Type: model.RoomTypeDM, SiteID: "site-a", UserCount: 2},
+		{ID: "room-b1", Name: "other-site", Type: model.RoomTypeChannel, SiteID: "site-b", UserCount: 9},
+	}
+	for i := range rooms {
+		_, err := db.Collection("rooms").InsertOne(ctx, rooms[i])
+		require.NoError(t, err)
+	}
+
+	t.Run("returns every room in the database", func(t *testing.T) {
+		// The listing is scoped by which database admin-service is pointed at,
+		// not by a siteId predicate — room-b1 carries a foreign siteId and is
+		// still listed, because it sits in this deployment's rooms collection.
+		results, total, err := st.ListRooms(ctx, "", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), total)
+		require.Len(t, results, 4)
+	})
+
+	t.Run("projects the console fields", func(t *testing.T) {
+		results, _, err := st.ListRooms(ctx, "", 1, 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+		assert.Equal(t, "room-a1", results[0].ID)
+		assert.Equal(t, "general", results[0].Name)
+		assert.Equal(t, model.RoomTypeChannel, results[0].Type)
+		assert.Equal(t, 7, results[0].UserCount)
+		assert.True(t, results[0].Restricted)
+		assert.True(t, results[0].ExternalAccess)
+		assert.False(t, results[1].Restricted, "an unrestricted room must not inherit the flag")
+		assert.False(t, results[1].ExternalAccess)
+	})
+
+	t.Run("pages by _id in a stable order", func(t *testing.T) {
+		first, total, err := st.ListRooms(ctx, "", 1, 2)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), total)
+		require.Len(t, first, 2)
+		assert.Equal(t, []string{"room-a1", "room-a2"}, []string{first[0].ID, first[1].ID})
+
+		second, _, err := st.ListRooms(ctx, "", 2, 2)
+		require.NoError(t, err)
+		require.Len(t, second, 2)
+		assert.Equal(t, []string{"room-a3", "room-b1"}, []string{second[0].ID, second[1].ID})
+	})
+
+	t.Run("a query selects exactly the room with that id", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "room-a3", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), total)
+		require.Len(t, results, 1)
+		assert.Equal(t, "room-a3", results[0].ID)
+	})
+
+	t.Run("a partial id matches nothing", func(t *testing.T) {
+		// The whole point of the exact match: "room-a" is a prefix of three ids,
+		// and a substring/regex filter would return all three.
+		results, total, err := st.ListRooms(ctx, "room-a", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+
+	t.Run("the id is matched case-sensitively", func(t *testing.T) {
+		// Room ids are base62, so case carries meaning — a case-folded match
+		// could resolve two distinct ids to the same room.
+		results, total, err := st.ListRooms(ctx, "ROOM-A3", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+
+	t.Run("a room name is not searchable", func(t *testing.T) {
+		// room-a1 is named "general"; only its id resolves it.
+		results, total, err := st.ListRooms(ctx, "general", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+
+	t.Run("a foreign-siteId room resolves by id like any other", func(t *testing.T) {
+		// Same rule as the listing: no siteId predicate, so room-b1 is reachable.
+		results, total, err := st.ListRooms(ctx, "room-b1", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), total)
+		require.Len(t, results, 1)
+		assert.Equal(t, "room-b1", results[0].ID)
+	})
+
+	t.Run("an unknown id returns an empty page", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "no-such-room", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+
+	t.Run("a page past the end returns an empty slice, not nil", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "", 99, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), total)
+		assert.NotNil(t, results)
+		assert.Empty(t, results)
+	})
+}
+
+func TestIntegration_ListRoomMembers(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	ctx := context.Background()
+
+	subs := []model.Subscription{
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-1", User: model.SubscriptionUser{ID: "u2", Account: "bob"}},
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}},
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-1", User: model.SubscriptionUser{ID: "b1", Account: "helperbot", IsBot: true}},
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-2", User: model.SubscriptionUser{ID: "u3", Account: "carol"}},
+	}
+	for i := range subs {
+		_, err := db.Collection("subscriptions").InsertOne(ctx, subs[i])
+		require.NoError(t, err)
+	}
+
+	t.Run("returns only that room's members, account-sorted, with the bot flag", func(t *testing.T) {
+		results, err := st.ListRoomMembers(ctx, "room-1")
+		require.NoError(t, err)
+		require.Len(t, results, 3)
+		accounts := []string{results[0].Account, results[1].Account, results[2].Account}
+		assert.Equal(t, []string{"alice", "bob", "helperbot"}, accounts)
+		assert.False(t, results[0].IsBot)
+		assert.True(t, results[2].IsBot)
+	})
+
+	t.Run("a room with no subscriptions returns an empty slice", func(t *testing.T) {
+		results, err := st.ListRoomMembers(ctx, "room-nobody")
+		require.NoError(t, err)
+		assert.Empty(t, results)
+	})
+}

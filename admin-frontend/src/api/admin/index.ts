@@ -39,6 +39,37 @@ export interface AuditEntry {
   timestamp: number
 }
 
+/** Admin-facing room projection (mirrors admin-service's `roomView`). `onDuty` is
+ * derived server-side from both flags — branch on it, not on the raw pair. */
+export interface AdminRoom {
+  id: string
+  name: string
+  type: string
+  userCount: number
+  restricted: boolean
+  externalAccess: boolean
+  onDuty: boolean
+}
+
+/** One member of a room, sourced from the subscriptions the duty toggle validates against. */
+export interface AdminRoomMember {
+  account: string
+  isBot: boolean
+}
+
+export interface ListRoomsParams {
+  /** One exact room id, matched case-sensitively; selects at most one room. */
+  q?: string
+  page?: number
+  limit?: number
+}
+
+/** `ownerAccount` is required by the server when `onDuty` is true, and ignored when false. */
+export interface SetRoomOnDutyInput {
+  onDuty: boolean
+  ownerAccount?: string
+}
+
 export interface ListUsersParams {
   q?: string
   page?: number
@@ -459,4 +490,43 @@ function uploadEnvelopeError(status: number, responseText: string): AsyncJobErro
     body = undefined
   }
   return envelopeErrorFromBody(body, fallback)
+}
+
+/** Lists the rooms homed at admin-service's own site. @throws {AsyncJobError} on a non-2xx response. */
+export async function listRooms(
+  authToken: string,
+  params: ListRoomsParams = {},
+): Promise<{ rooms: AdminRoom[]; total: number }> {
+  const qs = buildQuery({ q: params.q, page: params.page, limit: params.limit })
+  return adminFetch<{ rooms: AdminRoom[]; total: number }>(authToken, 'GET', `/rooms${qs}`)
+}
+
+/** Lists every account subscribed to the room — the accounts the duty toggle will
+ * accept as owner. Unpaged. @throws {AsyncJobError} on a non-2xx response. */
+export async function listRoomMembers(
+  authToken: string,
+  roomId: string,
+): Promise<AdminRoomMember[]> {
+  const raw = await adminFetch<{ members?: AdminRoomMember[] }>(
+    authToken,
+    'GET',
+    `/rooms/${encodeURIComponent(roomId)}/members`,
+  )
+  return raw.members ?? []
+}
+
+/** Toggles a channel's on-duty state (`restricted` + `externalAccess`). Turning duty on
+ * makes `ownerAccount` the room's sole owner; turning it off sends no owner.
+ * @throws {AsyncJobError} on a non-2xx response (e.g. 409 below the member floor). */
+export async function setRoomOnDuty(
+  authToken: string,
+  roomId: string,
+  input: SetRoomOnDutyInput,
+): Promise<void> {
+  await adminFetch<{ status: string }>(
+    authToken,
+    'POST',
+    `/rooms/${encodeURIComponent(roomId)}/onduty`,
+    input,
+  )
 }

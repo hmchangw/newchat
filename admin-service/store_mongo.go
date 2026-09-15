@@ -17,16 +17,20 @@ import (
 )
 
 type storeMongo struct {
-	users      *mongo.Collection
-	adminAudit *mongo.Collection
-	permGrants *mongo.Collection
+	users         *mongo.Collection
+	adminAudit    *mongo.Collection
+	permGrants    *mongo.Collection
+	rooms         *mongo.Collection
+	subscriptions *mongo.Collection
 }
 
 func newStoreMongo(db *mongo.Database) *storeMongo {
 	return &storeMongo{
-		users:      db.Collection("users"),
-		adminAudit: db.Collection("admin_audit"),
-		permGrants: db.Collection("permission_grants"),
+		users:         db.Collection("users"),
+		adminAudit:    db.Collection("admin_audit"),
+		permGrants:    db.Collection("permission_grants"),
+		rooms:         db.Collection("rooms"),
+		subscriptions: db.Collection("subscriptions"),
 	}
 }
 
@@ -153,6 +157,82 @@ func (s *storeMongo) SearchUsers(ctx context.Context, q string, page, limit int)
 		users = []model.User{}
 	}
 	return users, total, nil
+}
+
+// roomProjection contains the fields the admin rooms console renders.
+var roomProjection = bson.M{
+	"_id": 1, "name": 1, "type": 1, "userCount": 1, "restricted": 1, "externalAccess": 1,
+}
+
+// roomMemberProjection contains the subscription fields the owner picker needs.
+// _id is excluded explicitly — Mongo returns it by default and nothing reads it.
+var roomMemberProjection = bson.M{"u.account": 1, "u.isBot": 1, "_id": 0}
+
+// ListRooms pages the rooms collection ordered by _id — the _id index serves the
+// sort for free, so paging stays stable without a blocking in-memory sort. There
+// is no siteId predicate: every site runs its own MongoDB, so this collection is
+// already the site's rooms, and an unfiltered page can stop at skip+limit instead
+// of examining rows it will discard.
+//
+// A search term is an exact room id, so it resolves through that same index as a
+// point lookup rather than a scan: no regex to escape, and unlike SearchUsers no
+// case folding, because a base62 id's case is part of the id.
+func (s *storeMongo) ListRooms(ctx context.Context, q string, page, limit int) ([]model.Room, int64, error) {
+	filter := bson.M{}
+	if q != "" {
+		filter["_id"] = q
+	}
+
+	total, err := s.rooms.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count rooms: %w", err)
+	}
+
+	cur, err := s.rooms.Find(ctx, filter,
+		options.Find().
+			SetProjection(roomProjection).
+			SetSort(bson.D{{Key: "_id", Value: 1}}).
+			SetSkip(int64((page-1)*limit)).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("find rooms: %w", err)
+	}
+
+	var rooms []model.Room
+	if err := cur.All(ctx, &rooms); err != nil {
+		return nil, 0, fmt.Errorf("decode rooms: %w", err)
+	}
+	if rooms == nil {
+		rooms = []model.Room{}
+	}
+	return rooms, total, nil
+}
+
+// ListRoomMembers returns every member of the room, unpaged. Decodes the two
+// projected fields rather than the whole ~45-field Subscription.
+func (s *storeMongo) ListRoomMembers(ctx context.Context, roomID string) ([]model.SubscriptionUser, error) {
+	cur, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID},
+		options.Find().
+			SetProjection(roomMemberProjection).
+			SetSort(bson.D{{Key: "u.account", Value: 1}}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find room members: %w", err)
+	}
+
+	var rows []struct {
+		User model.SubscriptionUser `bson:"u"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode room members: %w", err)
+	}
+
+	members := make([]model.SubscriptionUser, len(rows))
+	for i := range rows {
+		members[i] = rows[i].User
+	}
+	return members, nil
 }
 
 func (s *storeMongo) GetUserByAccount(ctx context.Context, siteID, account string) (*model.User, error) {

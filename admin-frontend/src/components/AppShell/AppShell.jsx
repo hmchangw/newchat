@@ -6,6 +6,7 @@ import './style.css'
 
 const SECTIONS = [
   { key: 'users', label: 'Users', Component: lazy(() => import('@/components/UsersConsole')) },
+  { key: 'rooms', label: 'Rooms', Component: lazy(() => import('@/components/RoomsConsole')) },
   { key: 'audit', label: 'Audit', Component: lazy(() => import('@/components/AuditView')) },
   {
     key: 'permissions',

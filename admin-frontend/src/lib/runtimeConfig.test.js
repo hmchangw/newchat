@@ -59,4 +59,23 @@ describe('runtimeConfig', () => {
     expect(updatesEnabled()).toBe(false)
     expect(permissionsEnabled()).toBe(true)
   })
+
+  it('ondutyMinMembers defaults to 5 when unset', async () => {
+    const { ondutyMinMembers } = await import('./runtimeConfig.js')
+    expect(ondutyMinMembers()).toBe(5)
+  })
+
+  it('ondutyMinMembers reads the envsubst-rendered string from window.__APP_CONFIG__', async () => {
+    window.__APP_CONFIG__ = { ROOM_ONDUTY_MIN_MEMBERS: '8' }
+    const { ondutyMinMembers } = await import('./runtimeConfig.js')
+    expect(ondutyMinMembers()).toBe(8)
+  })
+
+  it('ondutyMinMembers falls back to 5 when the rendered value is not a positive number', async () => {
+    const { ondutyMinMembers } = await import('./runtimeConfig.js')
+    for (const bad of ['', 'abc', '0', '-3', '${ROOM_ONDUTY_MIN_MEMBERS}']) {
+      window.__APP_CONFIG__ = { ROOM_ONDUTY_MIN_MEMBERS: bad }
+      expect(ondutyMinMembers(), `value ${bad}`).toBe(5)
+    }
+  })
 })

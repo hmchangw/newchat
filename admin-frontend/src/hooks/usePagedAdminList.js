@@ -4,8 +4,9 @@ import { useDebouncedSearch } from './useDebouncedSearch'
 import { useHandleAdminError } from './useHandleAdminError'
 import { useLatestRequest } from './useLatestRequest'
 
-/** Shell shared by the paged, debounce-filtered admin consoles (Audit, Permissions): filter
- * state, page state, stale-response guard, and the `not_admin` branch.
+/** Shell shared by the paged admin consoles (Audit, Permissions, Rooms): filter state, page
+ * state, stale-response guard, and the `not_admin` branch. Filtering is optional — a console
+ * with no search box passes `defaultFilters: {}` and simply never triggers the debounce.
  *
  * `fetcher(authToken, filters, { page, limit })` keeps the page-specific query building local to
  * the caller and returns the raw response; it is read through a ref, so an inline arrow is fine.
@@ -43,7 +44,7 @@ export function usePagedAdminList({ authToken, fetcher, defaultFilters, pageSize
         setNotAuthorized(false)
       } catch (err) {
         if (!isCurrent(token)) return
-        // Deliberate: clearing stale rows makes both consoles show empty + the error banner,
+        // Deliberate: clearing stale rows makes the console show empty + the error banner,
         // rather than rows that silently no longer match the filters/page that just failed.
         setData(null)
         if (err instanceof AsyncJobError && err.reason === 'not_admin') {

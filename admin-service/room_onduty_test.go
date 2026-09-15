@@ -118,6 +118,7 @@ func TestSetRoomOnDuty_MapsOnDutyToBothFlags(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			m := NewMockAdminStore(ctrl)
+			m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 
 			rpc := &fakeRoomRPC{reply: okReply(t)}
 			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
@@ -171,6 +172,7 @@ func TestSetRoomOnDuty_OwnerRequiredWhenTurningOn(t *testing.T) {
 func TestSetRoomOnDuty_TrimsOwnerAccount(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	m := NewMockAdminStore(ctrl)
+	m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 
 	rpc := &fakeRoomRPC{reply: okReply(t)}
 	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
@@ -345,6 +347,7 @@ func TestSetRoomOnDuty_NilClientIsUnavailable(t *testing.T) {
 func TestSetRoomOnDuty_PropagatesRequestID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	m := NewMockAdminStore(ctrl)
+	m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 
 	rpc := &fakeRoomRPC{reply: okReply(t)}
 	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
@@ -381,4 +384,133 @@ func TestSetRoomOnDuty_UnknownRemoteCodeIsInternal(t *testing.T) {
 	w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// The duty switch opens external access and resets every other member to plain
+// member, so it leaves an audit row naming the room and the designated owner.
+func TestSetRoomOnDuty_WritesAuditRow(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantAction string
+		wantOwner  string
+	}{
+		{
+			name:       "on records the designated owner",
+			body:       `{"onDuty":true,"ownerAccount":"alice"}`,
+			wantAction: auditActionRoomOnDutySet,
+			wantOwner:  "alice",
+		},
+		{
+			name:       "off records no owner, because roles are left alone",
+			body:       `{"onDuty":false}`,
+			wantAction: auditActionRoomOnDutyUnset,
+			wantOwner:  "",
+		},
+		{
+			name:       "off ignores a supplied owner, matching what is sent downstream",
+			body:       `{"onDuty":false,"ownerAccount":"alice"}`,
+			wantAction: auditActionRoomOnDutyUnset,
+			wantOwner:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			m := NewMockAdminStore(ctrl)
+
+			var got *AuditEntry
+			m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, e *AuditEntry) error {
+					got = e
+					return nil
+				})
+
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), &fakeRoomRPC{reply: okReply(t)}, nil)
+			w := doOnDuty(h, "r1", tc.body)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			require.NotNil(t, got)
+			assert.Equal(t, tc.wantAction, got.Action)
+			assert.Equal(t, tc.wantOwner, got.TargetAccount)
+			assert.Equal(t, map[string]string{"roomId": "r1"}, got.Details)
+			assert.Equal(t, "p_admin", got.ActorAccount)
+			assert.Equal(t, "admin-user-id", got.ActorUserID)
+			assert.Equal(t, "site-A", got.SiteID)
+			assert.NotZero(t, got.Timestamp)
+		})
+	}
+}
+
+// The owner is trimmed before it is sent downstream, so the row must not record
+// the untrimmed form either — the audit console filters on an exact account.
+func TestSetRoomOnDuty_AuditRecordsTheTrimmedOwner(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	m := NewMockAdminStore(ctrl)
+
+	var got *AuditEntry
+	m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, e *AuditEntry) error {
+			got = e
+			return nil
+		})
+
+	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), &fakeRoomRPC{reply: okReply(t)}, nil)
+	w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"  alice  "}`)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, got)
+	assert.Equal(t, "alice", got.TargetAccount)
+}
+
+// A rejected switch changed nothing, so it must not leave a row claiming it did.
+func TestSetRoomOnDuty_NoAuditRowWhenTheSwitchFails(t *testing.T) {
+	tests := []struct {
+		name string
+		rpc  *fakeRoomRPC
+		body string
+	}{
+		{
+			name: "room-service rejects it",
+			rpc:  &fakeRoomRPC{reply: errReply(errcode.Conflict("too few members"))},
+			body: `{"onDuty":true,"ownerAccount":"alice"}`,
+		},
+		{
+			name: "the round trip fails",
+			rpc:  &fakeRoomRPC{err: nats.ErrTimeout},
+			body: `{"onDuty":true,"ownerAccount":"alice"}`,
+		},
+		{
+			name: "the body is rejected before the round trip",
+			rpc:  &fakeRoomRPC{reply: okReply(t)},
+			body: `{"onDuty":true}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			// No AppendAudit expectation: gomock fails the test if one is called.
+			m := NewMockAdminStore(ctrl)
+
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), tc.rpc, nil)
+			w := doOnDuty(h, "r1", tc.body)
+
+			assert.NotEqual(t, http.StatusOK, w.Code)
+		})
+	}
+}
+
+// An audit write that fails must not turn an applied switch into a client error:
+// the room has already changed, and reporting failure would invite a retry.
+func TestSetRoomOnDuty_AuditFailureDoesNotFailTheRequest(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	m := NewMockAdminStore(ctrl)
+	m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(fmt.Errorf("mongo down"))
+
+	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), &fakeRoomRPC{reply: okReply(t)}, nil)
+	w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
+
+	assert.Equal(t, http.StatusOK, w.Code)
 }

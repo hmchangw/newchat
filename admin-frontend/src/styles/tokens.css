@@ -39,6 +39,9 @@
   --text-lg:   17px;
   --text-xl:   20px;
 
+  /* The app's monospace stack, for opaque ids and raw error text. */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
   /* Font weights */
   --font-regular: 400;
   --font-medium:  500;

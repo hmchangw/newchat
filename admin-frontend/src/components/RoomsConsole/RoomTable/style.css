@@ -1,0 +1,7 @@
+/* Chrome comes from the shared .data-table base; only this column needs more. */
+
+/* Room ids are opaque base62/concat strings — a monospace column keeps them
+   scannable next to the human-readable name. */
+.rooms-table-id {
+  font-family: var(--font-mono);
+}
