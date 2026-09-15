@@ -1,88 +1,76 @@
-# cassandra-web source handoff
+# cassandra-web: OpenSSL CVE fix, pending on master
 
 **This branch is a transport, not a change. Do not merge it. Delete it once the
 fork PR is open.**
 
-It carries two commits for
-[Joey0538/cassandra-web](https://github.com/Joey0538/cassandra-web) as a git
-bundle, because the session that produced them could not push there: the git
-proxy only injects credentials for repositories in a session's authorized set,
-and a session already holding `hmchangw/newchat` cannot add a repo under a
-different owner (`add_repo: cross-tier adds are not supported in v1`).
+The earlier bundle here (three commits) is gone: PR #1 and PR #2 landed on
+`Joey0538/cassandra-web` master, so two of those three are already merged. What
+is left is the one commit that never made it — the OpenSSL patch — rebased onto
+current master (`eaa23f1`).
 
-This repository is public, so a session rooted on the fork can read the bundle
-anonymously even though it cannot read this repo's private API.
+## The CVEs
 
-## Recovering the commits
+`alpine:3.24.1` ships `openssl 3.5.7-r0`. Both of these apply to it, both rated
+critical, and Alpine fixed both in **`3.5.8-r0`** (see
+https://secdb.alpinelinux.org/v3.24/main.json):
+
+| CVE | CVSS 3.1 | Issue |
+|---|---|---|
+| CVE-2026-63073 | 9.8 | CMP response validation passes an unexpected sender distinguished name straight to `ERR_raise_data()` as a format string, so a malicious or intercepted CMP endpoint can crash the client |
+| CVE-2026-75803 | 9.1 | ChaCha20-Poly1305 and AES-OCB decryption of an *empty* ciphertext can report success without verifying the authentication tag, when finalized via `EVP_Cipher()` |
+
+Real exposure in this image is minimal — the service is built `CGO_ENABLED=0`
+and uses Go's own crypto, so it never links OpenSSL. `libcrypto3`/`libssl3` are
+present only because `apk-tools` and busybox's `ssl_client` depend on them, and
+neither goes near the CMP or `EVP_Cipher` paths these need. This is scanner
+hygiene rather than live exposure, but a critical finding is worth clearing.
+
+## Recovering the commit
 
 ```bash
-git clone https://github.com/Joey0538/cassandra-web
-cd cassandra-web
+git clone https://github.com/Joey0538/cassandra-web && cd cassandra-web
 
-# Anonymous read of this branch, just for the bundle.
 git clone --depth 1 -b claude/cassandra-web-source-handoff \
   https://github.com/hmchangw/newchat /tmp/handoff
 
-git fetch /tmp/handoff/cassandra-web-handoff/cassandra-web-go1.26-frozen-map-fix.bundle \
-  HEAD:go1.26-frozen-map-fix
-git push -u origin go1.26-frozen-map-fix
+git fetch /tmp/handoff/cassandra-web-handoff/openssl-cve-fix.bundle \
+  HEAD:openssl-cve-fix
+git push -u origin openssl-cve-fix
 ```
 
-The bundle applies onto `665507c`, which is where the fork's `master` sits, so
-it fetches cleanly. `git bundle verify` passes.
+It applies onto `eaa23f1`, which is where master sits, so it fetches cleanly.
 
-## What the two commits do
+## Or just apply it by hand
 
-- **`5dd65e4`** — Decode UDT-keyed maps instead of panicking; build on Go 1.26.8.
+It is a single hunk in the final stage of the `Dockerfile`, immediately after
+`FROM alpine:3.24.1`:
 
-  `reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>` cannot be read by
-  gocql's untyped row APIs: `goType()` maps a UDT to `map[string]interface{}`
-  and a map to `reflect.MapOf(key, elem)`, so a UDT-keyed map asks reflect for
-  a map keyed by a Go map. `reflect.MapOf` panics rather than returning an
-  error, so even `NewWithError` cannot catch it, and with no recover middleware
-  the request died mid-response and the table rendered empty with no error.
+```dockerfile
+# Patch the base image's own packages. alpine:3.24.1 ships openssl 3.5.7-r0,
+# which CVE-2026-63073 (CMP response format string, 9.8) and CVE-2026-75803
+# (ChaCha20-Poly1305 / AES-OCB empty-ciphertext auth-tag bypass, 9.1) apply to.
+# Alpine fixed both in 3.5.8-r0.
+#
+# The version floor is explicit as well as the blanket upgrade: `apk upgrade`
+# alone would silently produce an unpatched image if the mirror were stale,
+# whereas a floor fails the build instead. Rebuild periodically — a pinned base
+# tag freezes these packages at whatever that tag shipped with.
+#
+# Note the service itself does not link OpenSSL (CGO_ENABLED=0, so Go's own
+# crypto). libcrypto3/libssl3 are here because apk-tools and busybox's
+# ssl_client depend on them, and neither reaches the CMP or EVP_Cipher paths
+# these two CVEs need. This is scanner hygiene, not live exposure.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache "libcrypto3>=3.5.8-r0" "libssl3>=3.5.8-r0"
+```
 
-  `Unmarshal` checks for the `Unmarshaler` interface before any `goType` call,
-  so `CQLValue` decodes from the wire instead. Adds a recover middleware, pins
-  `ProtoVersion = 4`, serves `DESCRIBE` over native CQL (the bundled `cqlsh` is
-  no longer installable — its tarball 404s and it needs python2, dropped from
-  Alpine after 3.16), rewrites the Dockerfile to build from the build context
-  on `golang:1.26.8-alpine3.24` and `alpine:3.24.1`, and adds 14 decoder tests.
+The floor matters as much as the upgrade: `apk upgrade` on its own would
+quietly produce an unpatched image against a stale mirror, whereas the floor
+fails the build.
 
-- **`f0cb73b`** — Bump x/crypto, x/net and x/text; stop patching vendored deps.
+## Verified
 
-  govulncheck on the Go 1.26.8 binary still reported 40 vulnerabilities the code
-  calls, all in transitive `x/crypto@v0.7.0`, `x/net@v0.8.0` and
-  `x/text@v0.8.0`. Now 0.
-
-  Note for future maintenance: `vendor/` carried two local patches that
-  `go mod vendor` silently deletes, taking the build with it. The 71-line
-  `cast.FToStringMapStringE` moved into the repo as `service/castmap.go`, so
-  that one is gone for good. The 6-line `gocql.Session.GetHosts` remains and now
-  carries a comment saying it must be re-applied after any vendoring or gocql
-  bump.
-
-- **`c34d6c6`** — Patch the runtime image's OpenSSL.
-
-  `alpine:3.24.1` ships openssl 3.5.7-r0, which CVE-2026-63073 (CMP response
-  format string, 9.8) and CVE-2026-75803 (ChaCha20-Poly1305 / AES-OCB
-  empty-ciphertext auth-tag bypass, 9.1) both apply to. Alpine fixed both in
-  3.5.8-r0, so the final stage upgrades and pins that floor — the floor as well
-  as the upgrade, because `apk upgrade` alone would quietly produce an
-  unpatched image against a stale mirror.
-
-  Real exposure was minimal: the service is `CGO_ENABLED=0` and never links
-  OpenSSL, which is only present because apk-tools and busybox's `ssl_client`
-  pull it in. A pinned base tag freezes these packages, so the image wants
-  periodic rebuilds regardless.
-
-## Verification already done
-
-Against Cassandra 5.0.9 with real UDT-keyed reaction rows: the published
-`ipushc/cassandra-web:v1.1.6` panics at `main.go:541` and drops the connection;
-this build returns the rows with reactions decoded, on all four tables, with no
-panics. Built and pushed as `josephsylvan/cassandra-web:0.1.0-rc3`
-(`git-c34d6c6`) and re-verified from a clean registry pull.
-
-Not verified: the Vue UI does not mount in a headless browser here, identically
-with the upstream image, so it says nothing about these commits.
+Built from master + this commit: `libcrypto3`/`libssl3` are `3.5.8-r0`, the UI
+serves, `DESCRIBE` works, and all four Cassandra tables return rows with
+reactions decoded, with no panics. The same rebuild also moves `apk-tools`
+3.0.6-r0 to 3.0.8-r0. Published as `josephsylvan/cassandra-web:0.1.0`.
