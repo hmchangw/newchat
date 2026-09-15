@@ -6645,8 +6645,8 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 | `roomId` | string | The room the thread lives in. |
 | `siteId` | string | |
 | `parentMessageId` | string | The thread parent message's ID. Clients use this to locate the message in their cache and update its badge. |
-| `newTcount` | number | Authoritative exact reply count for the parent message. Replaces any locally-computed count — do not delta. |
-| `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0 (all replies deleted). |
+| `newTcount` | number | Reply count for the parent message. Replaces any locally-computed count — do not delta. Exact for threads under the server-side scan limit; beyond it the server adjusts it per reply without recounting, so it is approximate and periodically re-derived from an exact count (same contract as `tcount` on [Message](#message)). |
+| `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent only when no reply survives. On `reply_deleted` past the scan limit the server does not re-derive it — resolving the new newest reply needs the recount that path skips — so it repeats the timestamp already stamped, which may still name the deleted reply until the next re-anchor. |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 | `replyMessageId` | string | The reply that was added or deleted. |
 | `timestamp` | number | Milliseconds since Unix epoch (UTC). When broadcast-worker published this event. |

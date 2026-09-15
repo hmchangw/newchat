@@ -386,6 +386,11 @@ func TestMaintain_Delete_PastLimit_DecrementsAndLeavesTLM(t *testing.T) {
 	res, err := Maintain(ctx, sess, "thread-1", testParent, Policy{ScanLimit: 100, ReanchorBudget: 0}, -1, nil, false)
 	require.NoError(t, err)
 	assert.Equal(t, 899, res.Count)
+	// Result.TLM is what the column now holds, and callers put it straight on
+	// the canonical event where nil means "no replies remain". Leaving the
+	// column alone must therefore report the value still in it, not nil.
+	require.NotNil(t, res.TLM, "an unresolved tlm must not be reported as no-replies-remain")
+	assert.Equal(t, t0.UnixMilli(), res.TLM.UnixMilli())
 
 	gotN, gotTLM := readStamped(t, sess, "parent-1")
 	require.NotNil(t, gotN)
@@ -447,27 +452,6 @@ func TestReconcile_AllDeleted_ClearsCountAndTLM(t *testing.T) {
 	require.NotNil(t, gotN)
 	assert.Equal(t, 0, *gotN)
 	assert.Nil(t, gotTLM, "an exact scan proves there is no survivor, so clearing is correct")
-}
-
-func TestReanchorIfDue(t *testing.T) {
-	ctx := context.Background()
-	sess := setupThreadTable(t)
-	seedReplies(t, sess, "thread-1", "live", 6, nil)
-	seedStamp(t, sess, "parent-1", 500, nil)
-
-	done, err := ReanchorIfDue(ctx, sess, "thread-1", testParent, Policy{ReanchorBudget: 0})
-	require.NoError(t, err)
-	assert.False(t, done, "a zero budget never re-anchors")
-	gotN, _ := readStamped(t, sess, "parent-1")
-	require.NotNil(t, gotN)
-	assert.Equal(t, 500, *gotN)
-
-	done, err = ReanchorIfDue(ctx, sess, "thread-1", testParent, Policy{ReanchorBudget: 1_000_000})
-	require.NoError(t, err)
-	assert.True(t, done)
-	gotN, _ = readStamped(t, sess, "parent-1")
-	require.NotNil(t, gotN)
-	assert.Equal(t, 6, *gotN)
 }
 
 // The scan cap bounds rows READ, and soft-deleted replies hold rows, so a

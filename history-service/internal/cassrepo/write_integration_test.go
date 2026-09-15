@@ -482,6 +482,11 @@ func TestRepository_SoftDeleteMessage_PastScanLimit_DecrementsIncrementally(t *t
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	repo.threadPolicy.ScanLimit = 3
+	// Re-anchoring off: ShouldReanchor returns true unconditionally while the
+	// stamped count is under the budget, so with the default 50 this test would
+	// reconcile from an exact scan and never reach the incremental path it
+	// names.
+	repo.threadPolicy.ReanchorBudget = 0
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -531,8 +536,11 @@ func TestRepository_SoftDeleteMessage_PastScanLimit_DecrementsIncrementally(t *t
 	require.True(t, applied)
 	require.NotNil(t, newTcount)
 	assert.Equal(t, 4, *newTcount, "stamped 5 decremented once, not recounted")
-	require.NotNil(t, newTlm)
-	assert.True(t, newTlm.Equal(replyAt(4)), "tlm = newest survivor from the truncated scan")
+	// Resolving the new newest survivor needs the scan this path exists to
+	// skip, so the column keeps what it had. That stamped value is what must
+	// be reported: nil on the canonical event tells clients no replies remain.
+	require.NotNil(t, newTlm, "an unresolved tlm must not be reported as no-replies-remain")
+	assert.True(t, newTlm.Equal(staleTlm), "tlm = the value still stamped on the parent")
 
 	var (
 		gotTcount int
@@ -543,20 +551,27 @@ func TestRepository_SoftDeleteMessage_PastScanLimit_DecrementsIncrementally(t *t
 		parentID,
 	).Scan(&gotTcount, &gotTlm))
 	assert.Equal(t, 4, gotTcount)
-	assert.Equal(t, replyAt(4).UnixMilli(), gotTlm.UTC().UnixMilli())
+	assert.Equal(t, staleTlm.UnixMilli(), gotTlm.UTC().UnixMilli(), "the delete leaves the column alone")
 
 	require.NoError(t, session.Query(
 		`SELECT tcount, thread_last_msg_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
 		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
 	).Scan(&gotTcount, &gotTlm))
 	assert.Equal(t, 4, gotTcount)
-	assert.Equal(t, replyAt(4).UnixMilli(), gotTlm.UTC().UnixMilli())
+	assert.Equal(t, staleTlm.UnixMilli(), gotTlm.UTC().UnixMilli(), "the mirror tracks the authority")
 }
 
-// The retry of a partly-applied delete (LWT committed, decrement failed) lands
-// on the !applied branch. Past the scan limit nothing recounts any more, so
-// without a reconcile the reply would stay counted forever.
-func TestRepository_SoftDeleteMessage_CASMiss_ReconcilesParentCount(t *testing.T) {
+// A delete whose LWT reports "already deleted" lost the CAS to a concurrent
+// delete, and that winner owns the parent count: it is running its own
+// Maintain right now. This branch must leave the count alone rather than
+// recount and stamp, which would race the winner and can write the pre-delete
+// count back over its decrement.
+//
+// The retry of a partly-applied delete never reaches here: the service layer
+// reads the message before deleting and short-circuits on msg.Deleted, so a
+// committed LWT means the retry returns before the CAS. Repairing that gap
+// belongs at that short-circuit, not on a branch that only ever sees the race.
+func TestRepository_SoftDeleteMessage_CASMiss_LeavesParentCountToTheWinner(t *testing.T) {
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	repo.threadPolicy.ScanLimit = 3
@@ -569,7 +584,7 @@ func TestRepository_SoftDeleteMessage_CASMiss_ReconcilesParentCount(t *testing.T
 	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
 	bucket := msgbucket.New(24 * time.Hour).Of(parentCreatedAt)
 
-	// Parent stamped at 5 — one too high, as a failed decrement would leave it.
+	// Parent stamped at 5. Whatever it holds, this branch must not move it.
 	require.NoError(t, session.Query(
 		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 5,
@@ -612,13 +627,13 @@ func TestRepository_SoftDeleteMessage_CASMiss_ReconcilesParentCount(t *testing.T
 	require.NoError(t, session.Query(
 		`SELECT tcount FROM messages_by_id WHERE message_id = ?`, parentID,
 	).Scan(&gotTcount))
-	assert.Equal(t, 3, gotTcount, "reconcile drops the stale count to the 3 surviving replies")
+	assert.Equal(t, 5, gotTcount, "the CAS loser leaves the count exactly as it found it")
 
 	require.NoError(t, session.Query(
 		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
 		roomID, bucket, parentCreatedAt, parentID,
 	).Scan(&gotTcount))
-	assert.Equal(t, 3, gotTcount, "the mirror follows the reconciled authority")
+	assert.Equal(t, 5, gotTcount, "and does not touch the mirror either")
 }
 
 func TestRepository_SoftDeleteMessage_UpdatesParentTlm(t *testing.T) {

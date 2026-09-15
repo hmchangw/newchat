@@ -140,16 +140,27 @@ func Maintain(ctx context.Context, session *gocql.Session, threadRoomID string, 
 			"error", reconcileErr, "thread_room_id", threadRoomID, "parent_message_id", p.MessageID)
 	}
 
-	// tlm moves forward only on the add path. A delete leaves it alone: the
-	// removed reply may or may not have been the newest, and resolving that
+	// tlm moves forward only on the add path. A delete leaves the column alone:
+	// the removed reply may or may not have been the newest, and resolving that
 	// needs the scan this path exists to skip.
-	var tlm *time.Time
+	//
+	// It is still reported as the value the column holds, never as nil. Result
+	// describes what thread_last_msg_at now is, and the delete path puts it
+	// straight onto the canonical event, where absent means "no replies
+	// remain" — so returning nil here would tell every client to clear the
+	// thread's freshness on nearly every delete in a long thread. Only
+	// writeTLM decides what is written; leaving it false keeps the column
+	// untouched, so a concurrent add cannot be regressed by stamping the value
+	// we happened to read back over it.
+	tlm := stampedTLM
+	writeTLM := false
 	if replyAt != nil {
 		t := LaterOf(stampedTLM, *replyAt)
 		tlm = &t
+		writeTLM = true
 	}
 	n := adjusted(stamped, delta)
-	if err := stampParent(ctx, session, p, n, tlm, tlm != nil); err != nil {
+	if err := stampParent(ctx, session, p, n, tlm, writeTLM); err != nil {
 		return Result{}, fmt.Errorf("maintain thread %s count: %w", threadRoomID, err)
 	}
 	return Result{Count: n, TLM: tlm}, nil
@@ -183,28 +194,6 @@ func Reconcile(ctx context.Context, session *gocql.Session, threadRoomID string,
 		return Result{}, fmt.Errorf("reconcile thread %s: %w", threadRoomID, err)
 	}
 	return Result{Count: n, TLM: latest}, nil
-}
-
-// ReanchorIfDue re-derives the parent's count from an exact scan, but only when
-// this write draws the re-anchor sample, so a caller outside Maintain pays the
-// same amortized budget as one inside it. Best-effort: it reports whether it
-// stamped anything, and any error is the caller's to log and ignore.
-//
-// For repair paths that sit outside the add/delete flow — notably a delete
-// whose LWT reports the message was already deleted, which is what the retry
-// of a partly applied delete looks like.
-func ReanchorIfDue(ctx context.Context, session *gocql.Session, threadRoomID string, p Parent, pol Policy) (bool, error) {
-	stamped, _, err := readParent(ctx, session, p.MessageID)
-	if err != nil {
-		return false, fmt.Errorf("re-anchor thread %s count: %w", threadRoomID, err)
-	}
-	if stamped == nil || !ShouldReanchor(*stamped, pol.ReanchorBudget) {
-		return false, nil
-	}
-	if _, err := Reconcile(ctx, session, threadRoomID, p, pol); err != nil {
-		return false, fmt.Errorf("re-anchor thread %s count: %w", threadRoomID, err)
-	}
-	return true, nil
 }
 
 // ShouldReanchor reports whether this write should re-derive the count from a

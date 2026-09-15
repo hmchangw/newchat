@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -347,7 +346,11 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 			}
 			return time.Time{}, false, nil, nil, fmt.Errorf("read updated_at after cas miss for message %s: %w", msg.MessageID, err)
 		}
-		r.reconcileAfterCASMiss(ctx, msg)
+		// The parent count is the CAS winner's to maintain, and it is running
+		// its own Maintain concurrently with this branch. Recounting and
+		// stamping here would race it: a scan taken before the winner's
+		// tombstone lands, stamped after the winner's decrement, writes the
+		// pre-delete count back and undoes it.
 		return existing, false, nil, nil, nil
 	}
 
@@ -419,25 +422,5 @@ func (r *Repository) parent(msg *models.Message) threadcount.Parent {
 		RoomID:    msg.RoomID,
 		CreatedAt: parentCreatedAt,
 		Bucket:    r.bucket.Of(parentCreatedAt),
-	}
-}
-
-// reconcileAfterCASMiss repairs the parent count when a thread reply's delete
-// LWT reports "already deleted".
-//
-// Usually a concurrent delete won and did the decrement itself, so there is
-// nothing to do. But it is also what the retry of a partly applied delete sees
-// — LWT committed, count not adjusted — which above the scan limit nothing
-// else would ever correct. Gated by ShouldReanchor so the full scan it costs
-// stays inside the same amortized budget as every other re-anchor, and
-// best-effort throughout: the delete has already committed, so a failure here
-// must not fail the request.
-func (r *Repository) reconcileAfterCASMiss(ctx context.Context, msg *models.Message) {
-	if msg.ThreadParentID == "" || msg.ThreadRoomID == "" || msg.ThreadParentCreatedAt == nil {
-		return
-	}
-	if _, err := threadcount.ReanchorIfDue(ctx, r.session, msg.ThreadRoomID, r.parent(msg), r.threadPolicy); err != nil {
-		slog.WarnContext(ctx, "thread tcount re-anchor after delete cas miss failed — parent count left as stamped",
-			"error", err, "thread_room_id", msg.ThreadRoomID, "parent_message_id", msg.ThreadParentID)
 	}
 }

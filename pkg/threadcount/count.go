@@ -97,8 +97,11 @@ type Parent struct {
 	Bucket    int64
 }
 
-// Result is what Maintain stamped. TLM is the thread_last_msg_at written, nil
-// when the column was cleared or deliberately left alone.
+// Result is what Maintain left on the parent. TLM is the thread_last_msg_at
+// the column now holds — the value written, or the one already there when the
+// path deliberately left it alone. It is nil only when the column genuinely
+// holds no timestamp, because callers forward it to the canonical event where
+// absent means "no replies remain".
 type Result struct {
 	Count int
 	TLM   *time.Time
