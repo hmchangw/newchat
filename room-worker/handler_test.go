@@ -4865,8 +4865,8 @@ func TestProcessCreateRoom_DM_PublishesLocalInbox(t *testing.T) {
 	assert.Equal(t, "site-A", inner.SiteID)
 	assert.Nil(t, inner.HistorySharedSince, "HistorySharedSince must be nil at create-time")
 
-	wantMsgID := natsutil.InboxDedupID(ctx, "site-A", "room-dm-inbox:alice:"+strconv.FormatInt(ts, 10))
-	assert.Equal(t, wantMsgID, got.msgID, "Nats-Msg-Id must be natsutil.InboxDedupID(ctx, originSite, payloadSeed)")
+	wantMsgID := natsutil.InboxDedupID(ctx, "site-A", model.InboxMemberAdded, "room-dm-inbox:alice:"+strconv.FormatInt(ts, 10))
+	assert.Equal(t, wantMsgID, got.msgID, "Nats-Msg-Id must be natsutil.InboxDedupID(ctx, originSite, eventType, payloadSeed)")
 }
 
 func TestProcessCreateRoom_Channel_PublishesLocalInbox(t *testing.T) {
@@ -4918,7 +4918,7 @@ func TestProcessCreateRoom_Channel_PublishesLocalInbox(t *testing.T) {
 	assert.Equal(t, "site-A", inner.SiteID)
 	assert.Nil(t, inner.HistorySharedSince, "create-time event must be unrestricted regardless of req.History")
 
-	wantMsgID := natsutil.InboxDedupID(ctx, "site-A", "room-ch-inbox:alice:"+strconv.FormatInt(ts, 10))
+	wantMsgID := natsutil.InboxDedupID(ctx, "site-A", model.InboxMemberAdded, "room-ch-inbox:alice:"+strconv.FormatInt(ts, 10))
 	assert.Equal(t, wantMsgID, got.msgID)
 }
 

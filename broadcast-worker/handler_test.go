@@ -3770,14 +3770,14 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			wantRecords: []outboxRecord{
 				{
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
-					msgID:   testMentionRequestID + ":site-b",
+					msgID:   testMentionRequestID + ":" + model.InboxSubscriptionMention + ":site-b",
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
-					msgID:   testMentionRequestID + ":site-c",
+					msgID:   testMentionRequestID + ":" + model.InboxSubscriptionMention + ":site-c",
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
@@ -3919,7 +3919,7 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 			require.Len(t, got, 1)
 			assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
 			// An edit is its own canonical event, so it carries its own request ID.
-			assert.Equal(t, testMentionRequestID+":site-b", got[0].msgID)
+			assert.Equal(t, testMentionRequestID+":"+model.InboxSubscriptionMention+":site-b", got[0].msgID)
 			assert.Equal(t, tc.wantAccounts, got[0].event.Accounts)
 			assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
 		})

@@ -954,7 +954,7 @@ func TestProcessCreateRoomChannel_InboxPerRemoteSite(t *testing.T) {
 	assert.Equal(t, "site-A", memberPayloadB.SiteID)
 	assert.Equal(t, "alice", memberPayloadB.RequesterAccount)
 	assert.Nil(t, memberPayloadB.HistorySharedSince)
-	assert.Equal(t, reqID+":site-B", memberB[0].msgID)
+	assert.Equal(t, reqID+":"+model.InboxMemberAdded+":site-B", memberB[0].msgID)
 
 	_, memberEnvC := unwrapOutbox(t, memberC[0].data)
 	var memberPayloadC model.MemberAddEvent
@@ -965,7 +965,7 @@ func TestProcessCreateRoomChannel_InboxPerRemoteSite(t *testing.T) {
 	assert.Equal(t, "site-A", memberPayloadC.SiteID)
 	assert.Equal(t, "alice", memberPayloadC.RequesterAccount)
 	assert.Nil(t, memberPayloadC.HistorySharedSince)
-	assert.Equal(t, reqID+":site-C", memberC[0].msgID)
+	assert.Equal(t, reqID+":"+model.InboxMemberAdded+":site-C", memberC[0].msgID)
 }
 
 func TestProcessCreateRoomDM_InboxToCounterpartSite(t *testing.T) {
@@ -1022,7 +1022,7 @@ func TestProcessCreateRoomDM_InboxToCounterpartSite(t *testing.T) {
 	assert.ElementsMatch(t, []string{"bob"}, memberPayload.Accounts)
 	assert.Equal(t, "alice", memberPayload.RequesterAccount, "DM counterpart resolution depends on this")
 	assert.Equal(t, "site-A", memberPayload.SiteID)
-	assert.Equal(t, reqID+":site-B", memberB[0].msgID)
+	assert.Equal(t, reqID+":"+model.InboxMemberAdded+":site-B", memberB[0].msgID)
 }
 
 func TestProcessAddMembers_InboxPerRemoteSite(t *testing.T) {
@@ -1104,7 +1104,7 @@ func TestProcessAddMembers_InboxPerRemoteSite(t *testing.T) {
 	assert.ElementsMatch(t, []string{"bob"}, evtB.Accounts)
 	assert.Equal(t, roomName, evtB.RoomName)
 	assert.Equal(t, "site-A", evtB.SiteID)
-	assert.Equal(t, reqID+":site-B", pubsB[0].msgID)
+	assert.Equal(t, reqID+":"+model.InboxMemberAdded+":site-B", pubsB[0].msgID)
 
 	_, envC := unwrapOutbox(t, pubsC[0].data)
 	var evtC model.MemberAddEvent
@@ -1112,7 +1112,7 @@ func TestProcessAddMembers_InboxPerRemoteSite(t *testing.T) {
 	assert.ElementsMatch(t, []string{"ian"}, evtC.Accounts)
 	assert.Equal(t, roomName, evtC.RoomName)
 	assert.Equal(t, "site-A", evtC.SiteID)
-	assert.Equal(t, reqID+":site-C", pubsC[0].msgID)
+	assert.Equal(t, reqID+":"+model.InboxMemberAdded+":site-C", pubsC[0].msgID)
 }
 
 func TestProcessCreateRoomIdempotentRedelivery(t *testing.T) {
@@ -1206,8 +1206,8 @@ func TestProcessAddMembers_PublishesLocalInbox_Integration(t *testing.T) {
 	assert.Equal(t, "site-A", inner.SiteID)
 	assert.ElementsMatch(t, []string{"charlie", "bob"}, inner.Accounts,
 		"local INBOX must carry full add set — same-site (charlie) + remote (bob)")
-	assert.Equal(t, reqID+":site-A", pubs[0].msgID,
-		"Nats-Msg-Id must be natsutil.InboxDedupID(ctx, originSite, payloadSeed) so JetStream dedups self-loop replays")
+	assert.Equal(t, reqID+":"+model.InboxMemberAdded+":site-A", pubs[0].msgID,
+		"Nats-Msg-Id must be natsutil.InboxDedupID(ctx, originSite, eventType, payloadSeed) so JetStream dedups self-loop replays")
 
 	// members_added sys-message: requester is the sender, Content is server-rendered.
 	sysPubs := cap.publishesOnPrefix(subject.MsgCanonicalCreated("site-A"))
@@ -1440,7 +1440,7 @@ func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {
 	assert.Equal(t, "member_removed", inner.Type, "admin-remove: inner type is member_removed")
 	assert.Equal(t, roomID, inner.RoomID)
 	assert.Equal(t, []string{"bob"}, inner.Accounts)
-	assert.Equal(t, reqID+":site-A", pubs[0].msgID)
+	assert.Equal(t, reqID+":"+model.InboxMemberRemoved+":site-A", pubs[0].msgID)
 
 	// member_removed sys-message: requester is the sender, Content is server-rendered.
 	sysPubs := cap.publishesOnPrefix(subject.MsgCanonicalCreated("site-A"))

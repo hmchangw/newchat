@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
@@ -173,4 +174,52 @@ func TestNewMsgEncoded_KeepsRequestIDHeader(t *testing.T) {
 func TestNewMsgEncoded_EmptyEncodingMatchesNewMsg(t *testing.T) {
 	msg := natsutil.NewMsgEncoded(context.Background(), "chat.foo", []byte("p"), "")
 	assert.Nil(t, msg.Header)
+}
+
+// TestInboxDedupID_DistinguishesEventTypes is the regression guard for a silent
+// federation data-loss bug: one handler pass publishing several event types to
+// the same peer under the same request ID produced one identical Nats-Msg-Id
+// for all of them, so JetStream's stream-level dedup dropped every publish after
+// the first.
+//
+// room-worker's Teams membership sync does exactly that — joinedAt refresh, then
+// member_added, then member_removed, same ctx, same destination — so departed
+// members were never removed at their home site.
+func TestInboxDedupID_DistinguishesEventTypes(t *testing.T) {
+	ctx := natsutil.WithRequestID(context.Background(), "01970a4f-8c2d-7c9a-abcd-e0123456789f")
+
+	refreshed := natsutil.InboxDedupID(ctx, "site-b", model.InboxMemberJoinedAtRefreshed, "seed")
+	added := natsutil.InboxDedupID(ctx, "site-b", model.InboxMemberAdded, "seed")
+	removed := natsutil.InboxDedupID(ctx, "site-b", model.InboxMemberRemoved, "seed")
+
+	assert.NotEqual(t, added, removed,
+		"member_added and member_removed to one peer in one pass must not collide")
+	assert.NotEqual(t, added, refreshed)
+	assert.NotEqual(t, removed, refreshed)
+}
+
+// TestInboxDedupID_StableForRedelivery pins the property the dedup ID exists
+// for: the same logical publish, retried, must produce the same ID so the
+// destination stores it once.
+func TestInboxDedupID_StableForRedelivery(t *testing.T) {
+	ctx := natsutil.WithRequestID(context.Background(), "01970a4f-8c2d-7c9a-abcd-e0123456789f")
+
+	first := natsutil.InboxDedupID(ctx, "site-b", model.InboxMemberAdded, "seed")
+	second := natsutil.InboxDedupID(ctx, "site-b", model.InboxMemberAdded, "seed")
+	assert.Equal(t, first, second, "a redelivery of the same event must dedup")
+
+	other := natsutil.InboxDedupID(ctx, "site-c", model.InboxMemberAdded, "seed")
+	assert.NotEqual(t, first, other, "different destinations must not dedup against each other")
+}
+
+// TestInboxDedupID_FallsBackToPayloadSeed keeps the partial-deployment path
+// distinguishable too: with no request ID on ctx the seed carries the identity,
+// and the event type must still separate the lanes.
+func TestInboxDedupID_FallsBackToPayloadSeed(t *testing.T) {
+	ctx := context.Background()
+
+	added := natsutil.InboxDedupID(ctx, "site-b", model.InboxMemberAdded, "seed-1")
+	removed := natsutil.InboxDedupID(ctx, "site-b", model.InboxMemberRemoved, "seed-1")
+	assert.NotEqual(t, added, removed)
+	assert.Contains(t, added, "seed-1", "the payload seed must still carry the identity")
 }
