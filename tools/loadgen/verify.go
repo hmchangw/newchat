@@ -1060,7 +1060,13 @@ func (r *verifyRun) requestAccepted(ctx context.Context, subj string, body []byt
 		return fmt.Errorf("request: %w", err)
 	}
 	if envErr, ok := errcode.Parse(raw); ok {
-		return fmt.Errorf("%w: %w", errChangeRejected, envErr)
+		// %v, not %w, for the envelope: two %w verbs would put a second error in
+		// the chain, and an *errcode.Error among them defeats the one-per-chain
+		// invariant Classify relies on (.semgrep/errcode.yml guards this). Only
+		// the sentinel needs to be unwrappable — every caller tests it with
+		// errors.Is and none reaches for the envelope's type, so the envelope is
+		// carried as diagnostic text.
+		return fmt.Errorf("%w: %v", errChangeRejected, envErr)
 	}
 	return nil
 }
