@@ -154,3 +154,16 @@ func TestConfig_UserReadPreferenceDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }
+
+func TestConfigRetryLaneDefaultsOff(t *testing.T) {
+	t.Setenv("VALKEY_ADDRS", "valkey:6379")
+	t.Setenv("MODE", "user")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Retry.Enabled, "the retry lane must be opt-in per service")
+	assert.Equal(t, 3, cfg.Retry.FastSteps)
+	assert.Equal(t, 4000, cfg.Retry.Consumer.MaxAckPending,
+		"the retry lane holds the long waits and needs its own large budget")
+}

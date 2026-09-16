@@ -47,6 +47,11 @@ services:
       - MENTION_NAMES_ENABLED=${MENTION_NAMES_ENABLED:-true}
       - MENTION_NAMES_TIMEOUT=${MENTION_NAMES_TIMEOUT:-2s}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Tiered-redelivery lane (phase 2 canary); disabled by default. The retry
+      # consumer still binds and drains regardless of this flag — see pkg/retrylane.
+      - RETRY_LANE_ENABLED=${RETRY_LANE_ENABLED:-false}
+      - RETRY_CONSUMER_MAX_ACK_PENDING=${RETRY_CONSUMER_MAX_ACK_PENDING:-4000}
+      - RETRY_CONSUMER_MAX_DELIVER=${RETRY_CONSUMER_MAX_DELIVER:-3}
     volumes:
       - ../../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
