@@ -106,7 +106,7 @@ command can be scripted without parsing stdout.
 | Flag | Default | Notes |
 |---|---|---|
 | `--preset` | `daily-heavy` | Same presets as `daily` |
-| `--users` | `preset.Users` | Total activation count. Background load; probe recipients are chosen separately (§6) |
+| `--users` | `preset.Users` | Overrides `preset.Users`, exactly as `daily --users` does. **Must match `loadgen seed --users`** — it regenerates the fixture population, not just the activation count; preflight rejects a mismatch against Mongo's user count. Background load; probe recipients are chosen separately (§6) |
 | `--probe-rooms` | `50` | Number of probe rooms; their members are forced into the direct pool (§6) |
 | `--reserve-users` | `200` | Direct-connected floaters, initially in no probe room, used as membership-change targets (§6.0 step 3) |
 | `--member-churn` | `0.2` | Membership changes per probe room per minute. `0` disables §9 entirely |

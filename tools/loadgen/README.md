@@ -1433,7 +1433,7 @@ Three things worth repeating because they will bite an operator immediately:
 | Flag | Default | Notes |
 |---|---|---|
 | `--preset` | `daily-heavy` | `daily-light` \| `daily-heavy` \| `daily-power` |
-| `--users` | `0` | Total activation count (`0` = preset default) |
+| `--users` | `0` | Overrides `preset.Users` (`0` = preset default). **Must match `loadgen seed --users` if you used it** — it changes the generated fixture population, not just how many users are activated. A mismatch is caught by preflight with a user-count error rather than producing phantom violations |
 | `--probe-rooms` | `50` | Number of probe rooms selected deterministically from `--seed` |
 | `--reserve-users` | `200` | Direct-connected floaters used as membership-change targets |
 | `--member-churn` | `0.2` | Membership changes per probe room per minute (`0` disables churn). Above `0`, a run that issues **no** change is INCONCLUSIVE — see the membership floor below |

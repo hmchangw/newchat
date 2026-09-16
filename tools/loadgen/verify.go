@@ -46,7 +46,13 @@ func parseVerifyFlags(args []string) (verifyConfig, error) {
 	var vc verifyConfig
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.StringVar(&vc.Preset, "preset", "daily-heavy", "daily-light | daily-heavy | daily-power")
-	fs.IntVar(&vc.Users, "users", 0, "total activation count (0 = preset default)")
+	// No backquotes in this usage string: flag treats the first backquoted word
+	// as the argument-name placeholder, so "`loadgen seed --users`" would render
+	// the flag as "-users loadgen seed --users".
+	fs.IntVar(&vc.Users, "users", 0,
+		"override preset.Users (0 = use preset default; must match 'loadgen seed --users' if you used it). "+
+			"This regenerates the fixture population, not just the activation count — a mismatch against the "+
+			"seeded database is rejected by preflight")
 	fs.IntVar(&vc.ProbeRooms, "probe-rooms", 50, "number of probe rooms")
 	fs.IntVar(&vc.ReserveUsers, "reserve-users", 200, "direct-connected floaters for membership changes")
 	fs.Float64Var(&vc.MemberChurn, "member-churn", 0.2, "membership changes per probe room per minute (0 disables)")
