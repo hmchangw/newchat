@@ -4,12 +4,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/retrylane"
-	"github.com/hmchangw/chat/pkg/stream"
 )
 
 func TestSlowBackoffIsTheTailOfTheFullSchedule(t *testing.T) {
@@ -55,7 +55,7 @@ func TestConsumerConfigFiltersToItsOwnConsumer(t *testing.T) {
 	s := retrylane.Settings{
 		Enabled:   true,
 		FastSteps: 3,
-		Consumer: stream.ConsumerSettings{
+		Consumer: retrylane.ConsumerSettings{
 			AckWait: 30 * time.Second, MaxDeliver: 3, MaxWaiting: 512,
 			MaxAckPending: 4000, BackOffSteps: 3, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
 		},
@@ -69,15 +69,30 @@ func TestConsumerConfigFiltersToItsOwnConsumer(t *testing.T) {
 		"the retry lane holds the long waits, so it needs its own large budget")
 }
 
-func TestApplyDefaultsFillsOnlyUnsetConsumerSettings(t *testing.T) {
-	filled := retrylane.Settings{Enabled: true, FastSteps: 3}.ApplyDefaults()
-	assert.Equal(t, 4000, filled.Consumer.MaxAckPending)
-	assert.Equal(t, 3, filled.Consumer.MaxDeliver)
+// wrapperConfig embeds Settings the way a service's own Config would, so
+// env.Parse exercises the real default-resolution path instead of a struct
+// literal — a struct literal is exactly the blind spot that let the retry
+// lane silently inherit the hot lane's 1000-slot ack-pending budget: a nested
+// stream.ConsumerSettings carries its own envDefault tags regardless of the
+// outer struct, so it could never default to anything else under env.Parse.
+type wrapperConfig struct {
+	Retry retrylane.Settings `envPrefix:"RETRY_"`
+}
 
-	explicit := retrylane.Settings{
-		Enabled:  true,
-		Consumer: stream.ConsumerSettings{MaxAckPending: 250, MaxDeliver: 9},
-	}.ApplyDefaults()
-	assert.Equal(t, 250, explicit.Consumer.MaxAckPending, "an operator override must survive")
-	assert.Equal(t, 9, explicit.Consumer.MaxDeliver)
+func TestSettingsConsumerDefaultsThroughEnvParse(t *testing.T) {
+	cfg, err := env.ParseAs[wrapperConfig]()
+	require.NoError(t, err)
+
+	assert.Equal(t, 4000, cfg.Retry.Consumer.MaxAckPending,
+		"the retry lane must default to its own 4000 budget, not the hot lane's 1000")
+	assert.Equal(t, 3, cfg.Retry.Consumer.MaxDeliver, "MaxDeliver counts retry-lane attempts only")
+}
+
+func TestSettingsConsumerOverrideSurvivesEnvParse(t *testing.T) {
+	t.Setenv("RETRY_CONSUMER_MAX_ACK_PENDING", "250")
+
+	cfg, err := env.ParseAs[wrapperConfig]()
+	require.NoError(t, err)
+
+	assert.Equal(t, 250, cfg.Retry.Consumer.MaxAckPending, "an operator override must survive")
 }

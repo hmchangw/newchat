@@ -25,47 +25,56 @@ type Settings struct {
 	FastSteps int `env:"LANE_FAST_STEPS" envDefault:"3"`
 
 	// Consumer tunes the retry lane's own durable, envPrefix RETRY_CONSUMER_.
-	// MaxAckPending defaults high: this lane deliberately holds the long waits,
-	// sized for ~5 escalations/s against ~720s of slow-rung occupancy.
-	Consumer stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Consumer ConsumerSettings `envPrefix:"CONSUMER_"`
+}
+
+// ConsumerSettings is the retry lane's own tagged view of the durable
+// consumer knobs, carrying the retry-lane numbers directly as envDefault
+// tags so env.Parse produces the right values on the first pass.
+//
+// This can't be stream.ConsumerSettings: caarlos0/env resolves envDefault
+// per field, not per embedding, so a nested stream.ConsumerSettings would
+// always default to the hot lane's own numbers (MaxAckPending=1000,
+// MaxDeliver=6) here regardless of what this struct wants — the retry lane
+// would silently inherit the hot lane's budget instead of its own.
+//
+// MaxAckPending defaults high: this lane deliberately holds the long waits,
+// sized for ~5 escalations/s against ~720s of slow-rung occupancy.
+// MaxDeliver counts retry-lane attempts only.
+type ConsumerSettings struct {
+	AckWait       time.Duration `env:"ACK_WAIT"        envDefault:"30s"`
+	MaxDeliver    int           `env:"MAX_DELIVER"     envDefault:"3"`
+	MaxWaiting    int           `env:"MAX_WAITING"     envDefault:"512"`
+	MaxAckPending int           `env:"MAX_ACK_PENDING" envDefault:"4000"`
+	BackOffSteps  int           `env:"BACKOFF_STEPS"  envDefault:"3"`
+	BackOffFactor float64       `env:"BACKOFF_FACTOR" envDefault:"2"`
+	BackOffMax    time.Duration `env:"BACKOFF_MAX"    envDefault:"8m"`
+}
+
+// streamSettings converts to stream.ConsumerSettings so ConsumerConfig can
+// feed stream.DurableConsumerDefaults — the single place that derives
+// BackOff from AckWait; a hand-rolled cc.BackOff is a blocking semgrep
+// finding.
+func (c ConsumerSettings) streamSettings() stream.ConsumerSettings {
+	return stream.ConsumerSettings{
+		AckWait:       c.AckWait,
+		MaxDeliver:    c.MaxDeliver,
+		MaxWaiting:    c.MaxWaiting,
+		MaxAckPending: c.MaxAckPending,
+		BackOffSteps:  c.BackOffSteps,
+		BackOffFactor: c.BackOffFactor,
+		BackOffMax:    c.BackOffMax,
+	}
 }
 
 // DurableName is the retry consumer's durable for a service.
 func DurableName(consumer string) string { return consumer + "-retry" }
 
-// DefaultConsumerSettings are the retry lane's consumer defaults, which differ
-// from a hot lane's. This lane deliberately parks the long waits, so its
-// ack-pending budget is sized for ~5 escalations/s against ~720s of slow-rung
-// occupancy (≈3,600 in flight), and MaxDeliver counts retry-lane attempts only.
-//
-// Services apply this when their parsed Settings carry no explicit override —
-// struct-tag envDefaults cannot express a different default for an embedded
-// stream.ConsumerSettings than the hot lane's.
-func DefaultConsumerSettings() stream.ConsumerSettings {
-	return stream.ConsumerSettings{
-		AckWait:       30 * time.Second,
-		MaxDeliver:    3,
-		MaxWaiting:    512,
-		MaxAckPending: 4000,
-		BackOffSteps:  3,
-		BackOffFactor: 2,
-		BackOffMax:    8 * time.Minute,
-	}
-}
-
-// ApplyDefaults fills in DefaultConsumerSettings when the operator set no
-// retry-consumer env vars, leaving any explicit value untouched. Call it once
-// after env parsing.
-func (s Settings) ApplyDefaults() Settings {
-	if s.Consumer.MaxAckPending == 0 {
-		s.Consumer = DefaultConsumerSettings()
-	}
-	return s
-}
-
 // SlowBackoff returns the rungs the fast schedule left behind. The retry budget
 // is relocated, not redefined: fast + slow equals the original schedule, so
-// total patience per message is unchanged and only the occupancy moves.
+// total patience per message is unchanged and only the occupancy moves — that
+// additivity has to hold even at the edges, so fastSteps is clamped into
+// range rather than special-cased, and the last rung is never counted twice.
 //
 // It never returns an empty slice — jsretry floors an empty schedule at a 1ms
 // nak, which would burn the retry lane's MaxDeliver in milliseconds.
@@ -76,9 +85,8 @@ func SlowBackoff(fastSteps int, full []time.Duration) []time.Duration {
 	if fastSteps < 0 {
 		fastSteps = 0
 	}
-	if fastSteps >= len(full) {
-		// Everything is a fast rung; reuse the last entry so the lane still paces.
-		return []time.Duration{full[len(full)-1]}
+	if fastSteps > len(full)-1 {
+		fastSteps = len(full) - 1
 	}
 	return full[fastSteps:]
 }
@@ -93,7 +101,7 @@ func jsretryFallback() []time.Duration {
 // derived BackOff and AckWait cannot disagree (a hardcoded cc.BackOff is a
 // blocking semgrep finding).
 func ConsumerConfig(siteID, consumer string, s Settings) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s.Consumer)
+	cc := stream.DurableConsumerDefaults(s.Consumer.streamSettings())
 	cc.Durable = DurableName(consumer)
 	cc.FilterSubjects = []string{subject.RetryConsumerWildcard(siteID, consumer)}
 	return cc
