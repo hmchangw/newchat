@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
@@ -3328,6 +3330,38 @@ func (s stubJSMsg) NakWithDelay(time.Duration) error { return nil }
 func (s stubJSMsg) InProgress() error                { return nil }
 func (s stubJSMsg) Term() error                      { return nil }
 func (s stubJSMsg) TermWithReason(string) error      { return nil }
+
+// TestBroadcastProcessor_UntrackedMessageLogsInsteadOfPanicking proves the
+// msg.(*natsmetrics.Message) assertion in broadcastProcessor degrades safely:
+// guardedProcessor always hands it a tracked message in production, but a
+// plain jetstream.Msg (stubJSMsg stands in for a future call site that broke
+// that invariant) must not panic. It must instead log — silently dropping
+// the OnEscalate hook would only ever show up as a missing "escalated"
+// metric label, indistinguishable from no escalation happening at all.
+func TestBroadcastProcessor_UntrackedMessageLogsInsteadOfPanicking(t *testing.T) {
+	rec := installRecorder(t)
+
+	msgTime := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	lane := &retrylane.Lane{Consumer: "broadcast-worker", SiteID: "site-a"} // zero-value Enabled: disabled
+	process := broadcastProcessor(h, lane, 0)
+
+	msg := stubJSMsg{subject: "chat.msg.canonical.site-a.created", data: makeMessageEvent("room-1", "hello", msgTime)}
+	require.NotPanics(t, func() { process(context.Background(), msg) })
+
+	assert.True(t, rec.has(slog.LevelWarn, "broadcast processor: message not natsmetrics-tracked, escalation will be unlabeled"),
+		"an untracked message must log instead of silently dropping the escalation label")
+}
 
 // terminalCountFor runs fn under a tracked delivery and returns how many
 // terminal failures it recorded for reason. A log-and-drop path returns nil, so

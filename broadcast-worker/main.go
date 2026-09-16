@@ -626,6 +626,12 @@ func broadcastProcessor(handler *Handler, lane *retrylane.Lane, fastSteps int) m
 		if tracked, ok := msg.(*natsmetrics.Message); ok {
 			onEscalate = tracked.Escalated
 		} else {
+			// Cannot happen through the production path (guardedProcessor always wraps
+			// a *natsmetrics.Message), but a future refactor that broke the invariant
+			// would otherwise fail silently: escalation would still Ack correctly, just
+			// with no "escalated" outcome recorded — indistinguishable from no
+			// escalation at all, on the exact metric this feature exists to surface
+			// early. Loud here so that regression is visible instead of silent.
 			slog.WarnContext(handlerCtx, "broadcast processor: message not natsmetrics-tracked, escalation will be unlabeled",
 				"request_id", natsutil.RequestIDFromContext(handlerCtx))
 		}
