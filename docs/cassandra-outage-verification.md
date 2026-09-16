@@ -83,10 +83,16 @@ curl -s 'localhost:8222/jsz?consumers=true' \
         | {num_pending, num_ack_pending, max_deliver: .config.max_deliver}'
 ```
 
-`max_deliver` anything other than `-1` means the deployment overrode
-`CONSUMER_MAX_DELIVER` and the old loss boundary is back. The service refuses to
-start in that state (`validateConsumerConfig`), so a running worker with a finite
-cap should be impossible — check the logs if you see one.
+This check applies to the **default-mode** `message-worker` consumer only, where
+`max_deliver` must be `-1`: anything else means the old loss boundary is back, and
+`validateConsumerConfig` refuses to start in that state, so a running default-mode
+worker with a finite cap should be impossible — check the logs if you see one.
+
+Teams mode is the deliberate exception. It binds a separate durable
+(`message-worker-teams`) and *requires* a finite positive cap, because it settles
+through plain `jsretry.Settle` and has no give-up path of its own —
+`validateConsumerConfig` rejects an unlimited cap there. Do not apply the `-1`
+check to it.
 
 **The marker is set** — after `DEGRADE_MARK_DELAY` (default 30s), not instantly. Writes
 have to keep failing for that long before the site is declared degraded, so that a blip
@@ -142,11 +148,15 @@ schedule, not an env knob:
 
 | Outage length | Messages parked on | Backfill lands |
 |---|---|---|
-| under ~35s | the 1s / 5s / 30s rungs | seconds after restart |
+| under ~36s | the 1s / 5s / 30s rungs | seconds after restart |
+| ~36s to ~2m36s | the 2m rung | up to 2 min after restart |
 | longer | the 10m tail | up to 10 min after restart |
 
-**Keep the outage under ~35 seconds for a fast loop.** A ten-minute backfill
-after a long outage is the schedule working, not a failure.
+Nominal figures. Equal jitter draws each wait from `[d/2, d]`, so a given message
+can land anywhere from half these times to the full value.
+
+**Keep the outage under ~36 seconds for a fast loop.** A two- or ten-minute
+backfill after a longer outage is the schedule working, not a failure.
 
 Two other clocks, both of which look like bugs if you do not know them:
 

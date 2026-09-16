@@ -3145,6 +3145,7 @@ Degraded-case example (history catching up after a persistence outage):
 ```json
 {
   "messages": [],
+  "hasNext": false,
   "incompleteSince": 1700000000000
 }
 ```
@@ -3224,6 +3225,7 @@ Degraded-case example (history catching up after a persistence outage):
 ```json
 {
   "messages": [],
+  "hasNext": false,
   "incompleteSince": 1700000000000
 }
 ```
@@ -3316,6 +3318,8 @@ Degraded-case example (history catching up after a persistence outage):
 ```json
 {
   "messages": [],
+  "moreBefore": false,
+  "moreAfter": false,
   "incompleteSince": 1700000000000
 }
 ```
