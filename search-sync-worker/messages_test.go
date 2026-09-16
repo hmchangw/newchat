@@ -857,6 +857,11 @@ func TestMessageCollection_BuildAction_BareSystemMessageIsFiltered(t *testing.T)
 		// publisher skipped the envelope, which must stay loud.
 		{"bare ordinary message is still poison", bare("m3", ""), "missing message id"},
 		{"an empty envelope is still poison", []byte(`{}`), "missing message id"},
+		// An envelope that carries a "message" key is an envelope, however empty.
+		// model.Message has no such field, so decoding it as bare silently ignores
+		// the key — the sniff must look for it rather than infer its absence.
+		{"an envelope with an empty message is not bare", []byte(`{"id":"m","type":"members_added","message":{}}`), "missing message id"},
+		{"an envelope with a null message is not bare", []byte(`{"id":"m","type":"members_added","message":null}`), "missing message id"},
 		{"malformed json is still an error", []byte(`{`), "unmarshal message event"},
 	}
 	for _, tt := range tests {

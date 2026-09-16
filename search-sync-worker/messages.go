@@ -244,7 +244,19 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 // isBareSystemMessage reports whether data is a bare model.Message carrying a
 // system message type, rather than the MessageEvent envelope. A bare message of
 // any OTHER type is still a publisher bug worth surfacing, so it stays poison.
+//
+// The "message" key is checked explicitly rather than inferred from an empty
+// decode: model.Message has no such field, so an envelope carrying one decodes
+// as a bare message with the key ignored. Without this, a malformed envelope
+// would be silently Acked as filtered — which is the poison alarm this whole
+// path exists to keep honest.
 func isBareSystemMessage(data []byte) bool {
+	var envelope struct {
+		Message json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil || envelope.Message != nil {
+		return false
+	}
 	var m model.Message
 	if err := json.Unmarshal(data, &m); err != nil {
 		return false
