@@ -81,15 +81,25 @@ func maxToleratedOracleErrs(totalChanges int) int {
 	return max(1, totalChanges/oracleErrToleranceDivisor)
 }
 
-// membershipNotExercisedReason explains a run that asked for churn and issued
-// nothing. Built from the tailroom constants so the operator-facing advice
-// cannot drift from churnTailroom's actual arithmetic.
-func membershipNotExercisedReason() string {
+// membershipNotExercisedReason explains a run that asked for churn and resolved
+// nothing. The two ways to get there need different advice, so they read
+// differently: nothing issued is a configuration problem, while issued-but-
+// unresolved points at the oracle or a window that closed too early. The
+// zero-issued text is built from the tailroom constants so the operator-facing
+// advice cannot drift from churnTailroom's actual arithmetic.
+func membershipNotExercisedReason(total int) string {
+	if total == 0 {
+		return fmt.Sprintf(
+			"membership churn was requested but no change was issued — the membership dimension was not exercised: "+
+				"--steady must exceed the churn tailroom (max(%s, --settle + %s observation budget)), "+
+				"or every add/remove was rejected by the server",
+			verifyChurnTailroom, verifyChurnObservation)
+	}
 	return fmt.Sprintf(
-		"membership churn was requested but no change was issued — the membership dimension was not exercised: "+
-			"--steady must exceed the churn tailroom (max(%s, --settle + %s observation budget)), "+
-			"or every add/remove was rejected by the server",
-		verifyChurnTailroom, verifyChurnObservation)
+		"membership churn issued %d changes and resolved none of them — the membership dimension was not "+
+			"exercised: every change's outcome was unknown (its oracle query failed, or it was still "+
+			"inside its settle window when the steady window ended), so none was checked either way",
+		total)
 }
 
 // VerifyResult is the evaluated outcome plus human-readable reasons.
@@ -114,8 +124,9 @@ type VerifyResult struct {
 //
 // A membership *epoch* change (Changes.Adds/Removes) is deliberately NOT
 // considered here: churn legitimately changes the expected recipient set and is
-// not, on its own, evidence that measurement was untrustworthy. Changes.Total
-// at zero is, when churn was requested — that is the floor, not the churn.
+// not, on its own, evidence that measurement was untrustworthy. A run that
+// resolved no change at all is, when churn was requested — that is the floor,
+// not the churn.
 //
 // Multiplex drops (MultiplexDrops) are deliberately NOT considered here either,
 // though they were originally. The multiplex pool's per-user inbox channels are
@@ -161,11 +172,21 @@ func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugePar
 		}
 		reasons = append(reasons, reason)
 	}
-	// The membership analogue of the --min-probes floor. Zero changes with churn
-	// requested means the dimension never ran, which is the one outcome a
-	// correctness tool must never render as a clean PASS.
-	if in.ChurnRequested && in.Changes.Total == 0 {
-		reasons = append(reasons, membershipNotExercisedReason())
+	// The membership analogue of the --min-probes floor, and a stronger statement
+	// than the tolerance rule above rather than a special case of it. The
+	// tolerance asks "were most changes resolved?"; the floor asks "was ANY
+	// change resolved?" — because a change whose outcome nobody learned teaches
+	// exactly as much as a change never issued. Asking only whether a change was
+	// *issued* left a hole at Total=1: the tolerance is max(1, …), so one
+	// unresolved change sits inside the budget and the run reports PASS having
+	// resolved nothing at all.
+	//
+	// Clamped rather than trusted: Total comes from MembershipModel and the
+	// unresolved counters from verifyRun, so a future divergence must not let a
+	// negative difference read as "resolved something" and switch the floor off.
+	resolved := max(0, in.Changes.Total-unresolved)
+	if in.ChurnRequested && resolved == 0 {
+		reasons = append(reasons, membershipNotExercisedReason(in.Changes.Total))
 	}
 	if in.Counts.Tracked < in.MinProbes {
 		reasons = append(reasons, fmt.Sprintf(
