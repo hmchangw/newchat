@@ -40,6 +40,14 @@ type roomState struct {
 	members   map[string]struct{}
 	history   [][]string // index = epoch, value = sorted members at that epoch
 	settleEnd time.Time
+
+	// flux is the room's mutation barrier, held for write from before churn
+	// issues its membership RPC until the change is applied (or abandoned), and
+	// for read across a probe's snapshot-and-publish. It is deliberately NOT mu:
+	// mu guards the model's fields for microseconds, flux is held across a
+	// seconds-long RPC and must be per room, so churn in one room cannot stall
+	// probes in the other 49.
+	flux sync.RWMutex
 }
 
 // MembershipModel is loadgen's own model of probe-room membership — the oracle
@@ -52,8 +60,12 @@ type roomState struct {
 // system's self-report (spec §9.3).
 //
 // Every exported method is safe for concurrent use: the publish hot path reads
-// InSettle/Epoch/MembersAtEpoch while a churn goroutine writes via
-// ApplyAdd/ApplyRemove.
+// via WithStableRoom while a churn goroutine writes via ApplyAdd/ApplyRemove
+// under BeginChange.
+//
+// Two locks, in a single order — a room's flux barrier, then mu — and never the
+// reverse. mu is only ever held for a field read or write; flux is held across
+// the caller's RPC or publish.
 type MembershipModel struct {
 	mu      sync.Mutex
 	rooms   map[string]*roomState
@@ -133,6 +145,91 @@ func (m *MembershipModel) InSettle(roomID string, now time.Time) bool {
 		return false
 	}
 	return now.Before(rs.settleEnd)
+}
+
+// flux returns the room's mutation barrier, or nil for a room the model never
+// registered. mu is released before the caller touches the barrier: the whole
+// lock order depends on flux never being taken while mu is held.
+func (m *MembershipModel) flux(roomID string) *sync.RWMutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rs, ok := m.rooms[roomID]
+	if !ok {
+		return nil
+	}
+	return &rs.flux
+}
+
+// BeginChange marks roomID as having a membership change in flight and returns
+// the release. Churn calls it *before* issuing the membership RPC, not after:
+// the settle window only opens once ApplyAdd/ApplyRemove runs, which is after
+// the RPC has completed and (for an add) after the new member has subscribed.
+// Membership and message operations travel independent subjects and workers, so
+// in that gap the backend may already have applied the change while a probe is
+// still capturing the pre-change expected set — a false missing_recipient on a
+// healthy system, and the mirror case on an add.
+//
+// The release reopens the room: after ApplyAdd/ApplyRemove the settle window
+// takes over, and after a rejected or failed RPC the room simply reopens with
+// its epoch unmoved. An unknown room yields a no-op release.
+func (m *MembershipModel) BeginChange(roomID string) func() {
+	f := m.flux(roomID)
+	if f == nil {
+		return func() {}
+	}
+	f.Lock()
+	return f.Unlock
+}
+
+// WithStableRoom runs fn with the epoch and expected-recipient set in force for
+// roomID, guaranteeing the room cannot change while it runs, and reports
+// whether it ran. It returns false — fn untouched — when a change is in flight
+// (BeginChange) or the room is inside its post-change settle window; the caller
+// records those as suppressed (spec §9.2).
+//
+// The send must happen inside fn. Snapshotting the epoch and then publishing
+// outside the barrier reintroduces the very race in miniature, and taking the
+// snapshot after the publish returns is worse still: a change landing in between
+// registers the probe against an epoch that did not exist when it was sent.
+//
+// fn never blocks on the barrier — a room with a change in flight is skipped
+// rather than waited on, so a churn RPC that takes seconds costs that room its
+// probes for the duration instead of stalling the single probe emitter and with
+// it every other room.
+func (m *MembershipModel) WithStableRoom(roomID string, now time.Time, fn func(epoch int, members []string)) bool {
+	f := m.flux(roomID)
+	if f == nil {
+		return false
+	}
+	if !f.TryRLock() {
+		return false
+	}
+	defer f.RUnlock()
+
+	// Safe to read as two steps: settleEnd only moves in apply, which runs
+	// under the write side of the barrier we are holding.
+	if m.InSettle(roomID, now) {
+		return false
+	}
+	epoch, members, ok := m.stableSnapshot(roomID)
+	if !ok {
+		return false
+	}
+	fn(epoch, members)
+	return true
+}
+
+// stableSnapshot reads the room's epoch and its member set in one critical
+// section, so the two can never come from either side of a change. Caller must
+// hold the room's flux barrier for read.
+func (m *MembershipModel) stableSnapshot(roomID string) (int, []string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rs, ok := m.rooms[roomID]
+	if !ok {
+		return 0, nil, false
+	}
+	return rs.epoch, append([]string(nil), rs.history[rs.epoch]...), true
 }
 
 // ApplyAdd records that loadgen added userID to roomID.

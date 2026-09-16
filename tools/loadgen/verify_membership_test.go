@@ -260,3 +260,88 @@ func TestMembershipModel_MembersAtEpoch_ReturnsCopyNotReference(t *testing.T) {
 	assert.Equal(t, []string{"u-1", "u-2", "u-3"}, m.MembersAtEpoch("room-small-000001", 0),
 		"mutating a slice returned by MembersAtEpoch must not affect the model's stored history")
 }
+
+// TestMembershipModel_WithStableRoom_RunsWithCurrentEpochAndMembers pins the
+// happy path: an unchanging room hands the probe the epoch and member set in
+// force, atomically.
+func TestMembershipModel_WithStableRoom_RunsWithCurrentEpochAndMembers(t *testing.T) {
+	m := modelForTest()
+	m.ApplyAdd("room-small-000001", "u-9", at(10))
+
+	var gotEpoch int
+	var gotMembers []string
+	ok := m.WithStableRoom("room-small-000001", at(100), func(epoch int, members []string) {
+		gotEpoch, gotMembers = epoch, members
+	})
+
+	assert.True(t, ok)
+	assert.Equal(t, 1, gotEpoch)
+	assert.Equal(t, []string{"u-1", "u-2", "u-3", "u-9"}, gotMembers)
+}
+
+func TestMembershipModel_WithStableRoom_ReturnsACopyOfMembers(t *testing.T) {
+	m := modelForTest()
+
+	require.True(t, m.WithStableRoom("room-small-000001", at(100), func(_ int, members []string) {
+		members[0] = "tampered"
+	}))
+
+	assert.Equal(t, []string{"u-1", "u-2", "u-3"}, m.Members("room-small-000001"),
+		"the snapshot handed to a probe must not alias the model's history")
+}
+
+// TestMembershipModel_WithStableRoom_SuppressedDuringSettle keeps the existing
+// settle-window suppression reachable through the new entry point: inside the
+// window either delivery outcome is legitimate, so no probe may be adjudicated.
+func TestMembershipModel_WithStableRoom_SuppressedDuringSettle(t *testing.T) {
+	m := modelForTest()
+	m.ApplyAdd("room-small-000001", "u-9", at(10))
+
+	ran := false
+	ok := m.WithStableRoom("room-small-000001", at(12), func(int, []string) { ran = true })
+
+	assert.False(t, ok, "inside the settle window the probe must be suppressed")
+	assert.False(t, ran, "and the publish must not be adjudicated")
+
+	assert.True(t, m.WithStableRoom("room-small-000001", at(20), func(int, []string) {}),
+		"once the window closes probing resumes")
+}
+
+// TestMembershipModel_WithStableRoom_SuppressedWhileAChangeIsInFlight is the
+// core of the mutation barrier: BeginChange marks the room in flux *before* the
+// membership RPC goes out, so a probe published while the backend may already
+// have applied the change is never adjudicated against the pre-change set.
+func TestMembershipModel_WithStableRoom_SuppressedWhileAChangeIsInFlight(t *testing.T) {
+	m := modelForTest()
+	m.SetSettle(0)
+
+	release := m.BeginChange("room-small-000001")
+
+	ran := false
+	ok := m.WithStableRoom("room-small-000001", at(100), func(int, []string) { ran = true })
+	assert.False(t, ok, "a room with a change in flight must not be probed")
+	assert.False(t, ran)
+
+	assert.True(t, m.WithStableRoom("room-dm-000001", at(100), func(int, []string) {}),
+		"the barrier is per room: churn in one room must not stall probes in another")
+
+	release()
+
+	assert.True(t, m.WithStableRoom("room-small-000001", at(100), func(int, []string) {}),
+		"releasing a rejected change reopens the room without bumping the epoch")
+	assert.Equal(t, 0, m.Epoch("room-small-000001"),
+		"a released-but-unapplied change must not move the epoch")
+}
+
+// TestMembershipModel_BeginChange_UnknownRoom_IsANoOp pins that churn against a
+// room the model never registered neither panics nor leaves a lock held.
+func TestMembershipModel_BeginChange_UnknownRoom_IsANoOp(t *testing.T) {
+	m := modelForTest()
+
+	release := m.BeginChange("room-does-not-exist")
+	require.NotNil(t, release)
+	release()
+
+	assert.False(t, m.WithStableRoom("room-does-not-exist", at(100), func(int, []string) {}),
+		"an unknown room has no member set to judge against, so it is never probed")
+}
