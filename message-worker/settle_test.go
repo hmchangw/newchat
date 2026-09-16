@@ -258,10 +258,11 @@ func TestHandler_Settle(t *testing.T) {
 	})
 
 	t.Run("the production default window drops on the 17th delivery", func(t *testing.T) {
-		// Pins the documented mapping: 1h of accumulated backoff is first reached
-		// on delivery 11 (36s + 2m + 6 × 10m). This number moved from 34 when the
-		// shared schedule grew a 10m tail, which is exactly why the config is a
-		// duration and not a delivery count.
+		// Pins the documented mapping: 1h of accumulated backoff is first reached on
+		// delivery 17, measured against the jittered floor (jsretry.MinWindow) rather
+		// than the nominal schedule. The number moves whenever the shared schedule is
+		// retuned — it was 11 against the nominal measure — which is exactly why the
+		// config is a duration and not a delivery count.
 		under := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
 		msg16 := &fakeJetStreamMsg{numDelivered: 16}
 		under.settle(context.Background(), msg16, requestClassErr())
