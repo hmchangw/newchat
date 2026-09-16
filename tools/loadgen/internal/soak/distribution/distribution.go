@@ -138,6 +138,31 @@ func ContentOfSize(size int) string {
 	return strings.Repeat("x", max(0, size))
 }
 
+// ContentOfSizeWithPrefix returns a body of `size` bytes beginning with prefix.
+// The prefix is absorbed into the sampled budget rather than added on top of
+// it: the percentiles were validated against the gatekeeper's content limit and
+// against the page budget, and widening every body would invalidate both.
+//
+// The one case that overshoots is a sampled size below the prefix itself, where
+// the prefix is returned whole — a half-written label would be worse than none,
+// and the overshoot is bounded by its length.
+func ContentOfSizeWithPrefix(prefix string, size int) string {
+	if size <= len(prefix) {
+		return prefix
+	}
+	return prefix + ContentOfSize(size-len(prefix))
+}
+
+// MaxPrefixBytes reports the longest prefix that still leaves filler at the
+// configured median, so a label cannot quietly turn every body into a constant.
+//
+// A median at or below the encryption overhead fits no prefix at all. It is
+// rejected in its own right when the sizer is built; clamping at zero keeps
+// that config from reporting a negative budget here instead.
+func MaxPrefixBytes(medianEncryptedBytes int) int {
+	return max(0, medianEncryptedBytes-encryptedContentOverhead-1)
+}
+
 // ThreadBudgetSampler samples the number of replies allowed for a thread.
 type ThreadBudgetSampler struct {
 	rng   *rand.Rand

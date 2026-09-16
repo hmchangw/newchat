@@ -52,7 +52,7 @@ func TestSoakCatalog_KeepsTheTermTheSearchProbeQueriesWith(t *testing.T) {
 	message, known := catalog.Get("room-1", "msg-1")
 
 	require.True(t, known)
-	assert.Equal(t, SearchTerm(body), message.SearchTerm)
+	assert.Equal(t, SearchTerm(body, ""), message.SearchTerm)
 }
 
 func TestSoakCatalog_RefreshesTheDigestAndTermWhenAMessageIsEdited(t *testing.T) {
@@ -66,7 +66,7 @@ func TestSoakCatalog_RefreshesTheDigestAndTermWhenAMessageIsEdited(t *testing.T)
 	require.True(t, known)
 	digest := sha256.Sum256([]byte("replacement wording here"))
 	assert.Equal(t, hex.EncodeToString(digest[:]), message.ContentSHA256)
-	assert.Equal(t, SearchTerm("replacement wording here"), message.SearchTerm)
+	assert.Equal(t, SearchTerm("replacement wording here", ""), message.SearchTerm)
 	assert.Equal(t, len("replacement wording here"), message.ContentLength)
 }
 
@@ -178,4 +178,49 @@ func TestSoakCatalog_RetainedSearchTermDoesNotPinTheBody(t *testing.T) {
 	assert.Less(t, large, small*1.5,
 		"retaining terms from 8KB bodies cost %.1fMB against %.1fMB from 64B ones; "+
 			"the term is still a window onto the body", large, small)
+}
+
+// A prefix every body carries discriminates nothing. If it became the probe
+// term, the probe would page through unrelated hits in the same room and
+// report the message missing — a data-loss claim manufactured by the label.
+func TestSoakCatalog_SearchTermSkipsTheConstantMessagePrefix(t *testing.T) {
+	const prefix = "[LoadTest] "
+
+	assert.Equal(t, "soakterm", SearchTerm(prefix+"soakterm trailing", prefix))
+	assert.Equal(t, strings.Repeat("x", 64), SearchTerm(prefix+strings.Repeat("x", 64), prefix))
+}
+
+func TestSoakCatalog_SearchTermWithoutAPrefixIsUnchanged(t *testing.T) {
+	assert.Equal(t, "soakterm", SearchTerm("ab soakterm trailing", ""))
+	assert.Equal(t, "soak", SearchTerm("", ""))
+	assert.Equal(t, "soak", SearchTerm("a b", ""))
+}
+
+// Only a leading occurrence is the label; the same characters mid-body are
+// ordinary content and must still be able to serve as the term.
+func TestSoakCatalog_SearchTermOnlySkipsALeadingPrefix(t *testing.T) {
+	const prefix = "[LoadTest] "
+
+	assert.Equal(t, "body", SearchTerm("body "+prefix, prefix))
+}
+
+// A body that is nothing but the prefix has no discriminating token left. The
+// fallback is the existing one, so the probe still issues a well-formed query.
+func TestSoakCatalog_SearchTermFallsBackWhenOnlyThePrefixRemains(t *testing.T) {
+	const prefix = "[LoadTest] "
+
+	assert.Equal(t, "soak", SearchTerm(prefix, prefix))
+}
+
+func TestSoakCatalog_TermSkipsThePrefixTheCatalogWasConfiguredWith(t *testing.T) {
+	const prefix = "[LoadTest] "
+	catalog := New(16, 64, 0, nil)
+	catalog.RetainSearchTerms(true)
+	catalog.SkipSearchTermPrefix(prefix)
+	trackAcceptedSoakMessage(t, catalog, "room-1", "msg-1", prefix+"soakterm trailing")
+
+	message, known := catalog.Get("room-1", "msg-1")
+
+	require.True(t, known)
+	assert.Equal(t, "soakterm", message.SearchTerm)
 }

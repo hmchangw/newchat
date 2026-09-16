@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
 	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
@@ -75,6 +76,7 @@ type soakConfig struct {
 	PayloadMedianBytes          int           `env:"PAYLOAD_MEDIAN_BYTES"             envDefault:"1024"`
 	PayloadP95Bytes             int           `env:"PAYLOAD_P95_BYTES"                envDefault:"2048"`
 	PayloadMaxBytes             int           `env:"PAYLOAD_MAX_BYTES"                envDefault:"10240"`
+	MessagePrefix               string        `env:"MESSAGE_PREFIX"                   envDefault:"[LoadTest] "`
 	PersistGrace                time.Duration `env:"PERSIST_GRACE"                    envDefault:"10s"`
 	MutationRetries             int           `env:"MUTATION_RETRIES"                 envDefault:"3"`
 	RetryMinBackoff             time.Duration `env:"RETRY_MIN_BACKOFF"                envDefault:"100ms"`
@@ -377,6 +379,12 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.PayloadMaxBytes < cfg.PayloadP95Bytes {
 		return fmt.Errorf("SOAK_PAYLOAD_MAX_BYTES must be at least SOAK_PAYLOAD_P95_BYTES")
+	}
+	if limit := distribution.MaxPrefixBytes(cfg.PayloadMedianBytes); len(cfg.MessagePrefix) > limit {
+		return fmt.Errorf(
+			"SOAK_MESSAGE_PREFIX must be at most %d bytes at the configured median, got %d",
+			limit, len(cfg.MessagePrefix),
+		)
 	}
 
 	switch cfg.ReactionMessageScope {

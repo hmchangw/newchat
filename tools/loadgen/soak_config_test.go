@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -735,4 +736,44 @@ func TestValidateSoakConfig_SearchSettleMustFitTheDeadline(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SOAK_SEARCH_SETTLE")
+}
+
+func TestSoakConfig_MessagePrefixDefaultsToALabelRealUsersCanRecognise(t *testing.T) {
+	cfg := mustDefaultSoakConfig(t)
+
+	assert.Equal(t, "[LoadTest] ", cfg.MessagePrefix)
+	assert.True(t, strings.HasSuffix(cfg.MessagePrefix, " "),
+		"the trailing space keeps the label off the first content token")
+}
+
+func TestValidateSoakConfig_MessagePrefixBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{name: "empty is the opt-out", prefix: ""},
+		{name: "default", prefix: "[LoadTest] "},
+		{
+			name:   "longer than the median leaves no filler",
+			prefix: strings.Repeat("p", 1024),
+			want:   "SOAK_MESSAGE_PREFIX",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			cfg.MessagePrefix = tt.prefix
+
+			err := validateSoakConfig(&cfg, "")
+
+			if tt.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
 }

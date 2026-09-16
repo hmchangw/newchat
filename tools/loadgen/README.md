@@ -330,6 +330,7 @@ Run A environment variables:
 | `SOAK_PAYLOAD_MEDIAN_BYTES` | `1024` | Modeled encrypted payload median. |
 | `SOAK_PAYLOAD_P95_BYTES` | `2048` | Modeled encrypted payload p95. |
 | `SOAK_PAYLOAD_MAX_BYTES` | `10240` | Modeled encrypted payload maximum. |
+| `SOAK_MESSAGE_PREFIX` | `[LoadTest] ` | Label prepended to every body the run sends or edits, so a real user sharing the environment can tell load traffic from a colleague. Absorbed into the sampled payload size, never added on top, so the percentiles above still bound the wire. Empty disables the label. |
 | `SOAK_PERSIST_GRACE` | `10s` | Accepted-message age before mutation/thread/read-back. |
 | `SOAK_MUTATION_RETRIES` | `3` | Not-found retries before a soft skip. |
 | `SOAK_RETRY_MIN_BACKOFF` | `100ms` | Initial transient/mutation retry delay. |

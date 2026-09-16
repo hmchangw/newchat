@@ -188,6 +188,9 @@ soak:
   payloadMedianBytes: "1024"
   payloadP95Bytes: "2048"
   payloadMaxBytes: "10240"
+  # Labels every body so a real user sharing the environment can tell load
+  # traffic apart. Absorbed into the sampled size, never added on top.
+  messagePrefix: "[LoadTest] "
   persistGrace: 10s
   mutationRetries: "3"
   retryMinBackoff: 100ms
