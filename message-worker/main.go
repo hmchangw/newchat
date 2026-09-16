@@ -369,21 +369,31 @@ func main() {
 	var (
 		retryIter            o11ynats.MessagesContext
 		retryConsumerMetrics *natsmetrics.Consumer
+		retryCons            o11ynats.Consumer
+		retryConsumerCfg     jetstream.ConsumerConfig
 	)
 	if cfg.Mode == "default" {
 		retryStreamCfg := stream.Retry(cfg.SiteID)
-		retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, defaultConsumerDurable, cfg.Retry)
+		retryConsumerCfg = retrylane.ConsumerConfig(cfg.SiteID, defaultConsumerDurable, cfg.Retry)
 		retryConsumerMetrics = sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 			Site:   cfg.SiteID,
 			Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
 		})
 		retryConsumerMetrics.LoopStopped(ctx)
-		// The retry consumer binds unconditionally — see the rollback-asymmetry note above.
-		retryCons, err := js.CreateOrUpdateConsumer(ctx, retryStreamCfg.Name, retryConsumerCfg)
-		if err != nil {
-			slog.Error("create retry consumer failed", "error", err)
+		// The retry consumer binds whenever RETRY-{siteID} exists — see the
+		// rollback-asymmetry note above. The one tolerated failure is the stream
+		// simply not being provisioned while the lane is off: phase 1 ships dark,
+		// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
+		var bindErr error
+		retryCons, bindErr = js.CreateOrUpdateConsumer(ctx, retryStreamCfg.Name, retryConsumerCfg)
+		if bindErr != nil && !retrylane.SkipMissingStream(ctx, retryStreamCfg.Name, cfg.Retry.Enabled, bindErr) {
+			slog.Error("create retry consumer failed", "error", bindErr)
 			os.Exit(1)
 		}
+	}
+	// nil outside default mode, and when the lane is off with RETRY-{siteID}
+	// unprovisioned — in which case nothing can be parked there to drain.
+	if retryCons != nil {
 		// The retry lane does not escalate again in phases 0-3, so it settles with
 		// plain jsretry.Settle on the slow-rung schedule relocated off the hot consumer.
 		slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)

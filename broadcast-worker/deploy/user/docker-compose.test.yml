@@ -35,6 +35,14 @@ services:
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - INPUT_STREAM=MESSAGES-CANONICAL-site1
       - INPUT_SUBJECT_FILTER=chat.msg.canonical.site1.*
+      # This harness has no ops/IaC to pre-provision streams, so the worker creates
+      # its own — including RETRY-site1, which the retry consumer binds at startup.
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Tiered-redelivery lane; disabled by default, matching deploy/{user,bot}/docker-compose.yml.
+      # The retry consumer still binds and drains regardless of this flag — see pkg/retrylane.
+      - RETRY_LANE_ENABLED=${RETRY_LANE_ENABLED:-false}
+      - RETRY_CONSUMER_MAX_ACK_PENDING=${RETRY_CONSUMER_MAX_ACK_PENDING:-4000}
+      - RETRY_CONSUMER_MAX_DELIVER=${RETRY_CONSUMER_MAX_DELIVER:-3}
       # No ATREST_ENABLED here, unlike deploy/{user,bot}/docker-compose.yml: this
       # harness runs no Vault, and the worker exits on startup if it cannot reach one.
       # Previews are therefore off for these scenarios, which is what we want — they

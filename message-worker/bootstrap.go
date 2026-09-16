@@ -72,8 +72,9 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID, mode string
 	// Production path: verify the stream exists. Fail fast if it doesn't —
 	// ops/IaC owns provisioning, and a missing stream means the deploy is
 	// broken before the first publish or consume. RETRY absence here is
-	// non-fatal: the retry consumer's own bind (default mode only) surfaces a
-	// genuinely missing RETRY stream at startup.
+	// non-fatal: with the lane off the worker skips the retry consumer entirely
+	// (main.go, retrylane.SkipMissingStream) so phase 1 ships dark, and with it
+	// on the retry consumer's own bind is the fail-fast point.
 	if _, err := js.Stream(ctx, cfg.Name); err != nil {
 		return fmt.Errorf("verify %s stream: %w", cfg.Name, err)
 	}

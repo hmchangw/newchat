@@ -372,7 +372,10 @@ func main() {
 	// downstream gets BackpressureBackoff, not LowLatencyBackoff's 200ms first rung), so
 	// the truncation has to follow whichever curve that message actually settles on.
 
-	// The retry consumer binds unconditionally — see the rollback-asymmetry note above.
+	// The retry consumer binds whenever RETRY-{siteID} exists — see the
+	// rollback-asymmetry note above. The one tolerated failure is the stream
+	// simply not being provisioned while the lane is off: phase 1 ships dark,
+	// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
 	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, cfg.Retry)
 	retryConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
@@ -381,8 +384,11 @@ func main() {
 	retryConsumerMetrics.LoopStopped(ctx)
 	retryCons, err := js.CreateOrUpdateConsumer(ctx, retryStreamCfg.Name, retryConsumerCfg)
 	if err != nil {
-		slog.Error("create retry consumer failed", "error", err)
-		os.Exit(1)
+		if !retrylane.SkipMissingStream(ctx, retryStreamCfg.Name, cfg.Retry.Enabled, err) {
+			slog.Error("create retry consumer failed", "error", err)
+			os.Exit(1)
+		}
+		retryCons = nil
 	}
 	// The retry lane does not escalate again in phases 0-3, so it settles with plain
 	// jsretry.Settle on the slow-rung schedule SlowBackoff relocated off the hot consumer.
@@ -490,20 +496,25 @@ func main() {
 	// phases 0-3, so it settles with plain jsretry.Settle over slowBackoff. Counted on the
 	// same wg as the hot loop (natsmetrics.Start registers it before returning), so
 	// shutdown's single wg.Wait() step below covers both consume loops.
-	retryIter, err := retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("retry messages failed", "error", err)
-		os.Exit(1)
+	// retryCons is nil only when the lane is off and RETRY-{siteID} is unprovisioned —
+	// in which case nothing can be parked there to drain.
+	var retryIter o11ynats.MessagesContext
+	if retryCons != nil {
+		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			slog.Error("retry messages failed", "error", err)
+			os.Exit(1)
+		}
+		retryConsumerMetrics.LoopStarted(ctx)
+		// The retry-lane worker budget deliberately mirrors the hot lane's MaxWorkers rather
+		// than getting its own knob: by the time a message reaches RETRY it has already spent
+		// its low-latency fast budget (~6s across the default 3 fast rungs), so the retry
+		// lane's job is no longer to stay sub-second — it's to keep draining without a second,
+		// independently-tuned concurrency budget to reason about at 3am.
+		natsmetrics.Start(ctx, retryIter, retryConsumerMetrics, cfg.MaxWorkers, retryConsumerCfg.MaxDeliver, &wg,
+			func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+			guardedProcessor(retryProcessor(handler, slowBackoff)))
 	}
-	retryConsumerMetrics.LoopStarted(ctx)
-	// The retry-lane worker budget deliberately mirrors the hot lane's MaxWorkers rather
-	// than getting its own knob: by the time a message reaches RETRY it has already spent
-	// its low-latency fast budget (~6s across the default 3 fast rungs), so the retry
-	// lane's job is no longer to stay sub-second — it's to keep draining without a second,
-	// independently-tuned concurrency budget to reason about at 3am.
-	natsmetrics.Start(ctx, retryIter, retryConsumerMetrics, cfg.MaxWorkers, retryConsumerCfg.MaxDeliver, &wg,
-		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		guardedProcessor(retryProcessor(handler, slowBackoff)))
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -523,10 +534,12 @@ func main() {
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
-			// Stopped unconditionally alongside the hot iterator, regardless of
+			// Stopped alongside the hot iterator whenever it exists, regardless of
 			// cfg.Retry.Enabled — see the rollback-asymmetry note above.
-			retryConsumerMetrics.LoopStopped(ctx)
-			retryIter.Stop()
+			if retryIter != nil {
+				retryConsumerMetrics.LoopStopped(ctx)
+				retryIter.Stop()
+			}
 			return nil
 		},
 		func(ctx context.Context) error {

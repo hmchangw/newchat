@@ -1,10 +1,14 @@
 package retrylane_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -95,4 +99,26 @@ func TestSettingsConsumerOverrideSurvivesEnvParse(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 250, cfg.Retry.Consumer.MaxAckPending, "an operator override must survive")
+}
+
+func TestSkipMissingStream(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		err     error
+		want    bool
+	}{
+		{"disabled lane, stream absent", false, fmt.Errorf("create consumer: %w", jetstream.ErrStreamNotFound), true},
+		{"disabled lane, bare not-found", false, jetstream.ErrStreamNotFound, true},
+		{"enabled lane, stream absent", true, jetstream.ErrStreamNotFound, false},
+		{"disabled lane, some other bind failure", false, errors.New("nats: connection closed"), false},
+		{"disabled lane, consumer config rejected", false, jetstream.ErrConsumerNotFound, false},
+		{"no error at all", false, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want,
+				retrylane.SkipMissingStream(context.Background(), "RETRY-site1", tt.enabled, tt.err))
+		})
+	}
 }

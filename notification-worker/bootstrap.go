@@ -27,8 +27,10 @@ type streamManager interface {
 // bootstrapStreams creates the input+output+retry streams when enabled (dev/integration), otherwise verifies
 // the input stream exists and the output stream's duplicate window covers the consumer's outage retry budget,
 // so a misconfigured deploy fails at startup; identities are env-driven. RETRY-{siteID} is dev-only like the
-// output stream — in production it is ops/IaC-owned, and the retry consumer binds to it regardless of
-// RETRY_LANE_ENABLED (see main.go), so a missing stream there surfaces at that bind instead.
+// output stream — in production it is ops/IaC-owned and deliberately not verified here: with
+// RETRY_LANE_ENABLED=false the worker runs without the retry consumer rather than refusing to start
+// (main.go, retrylane.SkipMissingStream), so the lane ships dark. With the lane on, the bind in main.go is
+// the fail-fast point.
 func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubject, retryStream, retrySubject string, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{

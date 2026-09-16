@@ -10,6 +10,8 @@ import (
 
 	"github.com/bytedance/sonic"
 
+	o11ynats "github.com/flywindy/o11y/nats"
+
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -244,7 +246,10 @@ func main() {
 		fastBackoff = jsretry.DefaultBackoff[:steps]
 	}
 
-	// The retry consumer binds unconditionally — see the rollback-asymmetry note above.
+	// The retry consumer binds whenever RETRY-{siteID} exists — see the
+	// rollback-asymmetry note above. The one tolerated failure is the stream
+	// simply not being provisioned while the lane is off: phase 1 ships dark,
+	// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
 	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, cfg.Retry)
 	retryConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
@@ -253,8 +258,11 @@ func main() {
 	retryConsumerMetrics.LoopStopped(ctx)
 	retryCons, err := otelJS.CreateOrUpdateConsumer(ctx, retryStreamCfg.Name, retryConsumerCfg)
 	if err != nil {
-		slog.Error("create retry consumer failed", "error", err)
-		os.Exit(1)
+		if !retrylane.SkipMissingStream(ctx, retryStreamCfg.Name, cfg.Retry.Enabled, err) {
+			slog.Error("create retry consumer failed", "error", err)
+			os.Exit(1)
+		}
+		retryCons = nil
 	}
 	// The retry lane does not escalate again in phases 0-3, so it settles with plain
 	// jsretry.Settle on the slow-rung schedule SlowBackoff relocated off the hot consumer.
@@ -439,45 +447,49 @@ func main() {
 	// The retry consumer binds and drains regardless of cfg.Retry.Enabled (the rollback
 	// asymmetry from spec §4): disabling the lane stops new escalations onto RETRY-{siteID},
 	// but must not strand messages already parked there. It never escalates again in
-	// phases 0-3, so it settles with plain jsretry.Settle over slowBackoff.
-	retryIter, err := retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("retry messages failed", "error", err)
-		os.Exit(1)
-	}
-	retryConsumerMetrics.LoopStarted(ctx)
-
-	retrySem := make(chan struct{}, cfg.MaxWorkers)
-
-	wg.Add(1)
-	go func() {
-		// Counted on the same wg as the hot loop so shutdown's single wg.Wait() step
-		// covers both consume loops.
-		defer wg.Done()
-		for {
-			msgCtx, msg, err := retryIter.Next()
-			if err != nil {
-				retryConsumerMetrics.LoopFailed(context.Background(), err)
-				return
-			}
-			retrySem <- struct{}{}
-			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg) {
-				tracked := retryConsumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), retryConsumerCfg.MaxDeliver)
-				msg = tracked
-				msgCtx = tracked.Context(msgCtx)
-				defer func() {
-					tracked.Finish(msgCtx)
-					<-retrySem
-					wg.Done()
-				}()
-				jobguard.Run(msg, func() {
-					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-					jsretry.Settle(handlerCtx, msg, slowBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
-				})
-			}(msgCtx, msg)
+	// phases 0-3, so it settles with plain jsretry.Settle over slowBackoff. nil only when
+	// the lane is off and the stream is unprovisioned — nothing can be parked there.
+	var retryIter o11ynats.MessagesContext
+	if retryCons != nil {
+		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			slog.Error("retry messages failed", "error", err)
+			os.Exit(1)
 		}
-	}()
+		retryConsumerMetrics.LoopStarted(ctx)
+
+		retrySem := make(chan struct{}, cfg.MaxWorkers)
+
+		wg.Add(1)
+		go func() {
+			// Counted on the same wg as the hot loop so shutdown's single wg.Wait() step
+			// covers both consume loops.
+			defer wg.Done()
+			for {
+				msgCtx, msg, err := retryIter.Next()
+				if err != nil {
+					retryConsumerMetrics.LoopFailed(context.Background(), err)
+					return
+				}
+				retrySem <- struct{}{}
+				wg.Add(1)
+				go func(msgCtx context.Context, msg jetstream.Msg) {
+					tracked := retryConsumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), retryConsumerCfg.MaxDeliver)
+					msg = tracked
+					msgCtx = tracked.Context(msgCtx)
+					defer func() {
+						tracked.Finish(msgCtx)
+						<-retrySem
+						wg.Done()
+					}()
+					jobguard.Run(msg, func() {
+						handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+						jsretry.Settle(handlerCtx, msg, slowBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
+					})
+				}(msgCtx, msg)
+			}
+		}()
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -502,10 +514,12 @@ func main() {
 		func(_ context.Context) error {
 			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()
-			// Stopped unconditionally alongside the hot iterator, regardless of
+			// Stopped alongside the hot iterator whenever it exists, regardless of
 			// cfg.Retry.Enabled — see the rollback-asymmetry note above.
-			retryConsumerMetrics.LoopStopped(context.Background())
-			retryIter.Stop()
+			if retryIter != nil {
+				retryConsumerMetrics.LoopStopped(context.Background())
+				retryIter.Stop()
+			}
 			return nil
 		},
 		func(ctx context.Context) error {

@@ -1,6 +1,9 @@
 package retrylane
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -105,4 +108,23 @@ func ConsumerConfig(siteID, consumer string, s Settings) jetstream.ConsumerConfi
 	cc.Durable = DurableName(consumer)
 	cc.FilterSubjects = []string{subject.RetryConsumerWildcard(siteID, consumer)}
 	return cc
+}
+
+// SkipMissingStream reports whether a retry-consumer bind failure is the benign
+// "not provisioned yet" case, and logs it once when it is. Phase 1 ships dark:
+// RETRY-{siteID} is ops/IaC-owned and production runs BOOTSTRAP_STREAMS=false,
+// so a site that has not provisioned it yet would otherwise crash-loop every
+// hot-path worker on a feature that is switched off.
+//
+// It cannot strand a message: if the stream does not exist, nothing can be
+// parked on it. The tolerance is deliberately narrow — only ErrStreamNotFound,
+// and only while the lane is disabled. With RETRY_LANE_ENABLED=true an operator
+// has asked for the lane, and a missing stream must stay a loud startup failure.
+func SkipMissingStream(ctx context.Context, streamName string, enabled bool, err error) bool {
+	if err == nil || enabled || !errors.Is(err, jetstream.ErrStreamNotFound) {
+		return false
+	}
+	slog.WarnContext(ctx, "retry lane disabled and its stream is not provisioned — running without the retry consumer",
+		"stream", streamName, "retry_lane_enabled", enabled)
+	return true
 }
