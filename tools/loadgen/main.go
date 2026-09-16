@@ -399,6 +399,10 @@ func runSoakPhase(
 	phase soakPhase,
 	opts soakOptions,
 ) int {
+	// Resolve before validating so the payload-budget check measures the
+	// prefix bodies will really carry, not the sentinel that stands for none.
+	cfg.Soak.MessagePrefix = resolveSoakMessagePrefix(cfg.Soak.MessagePrefix)
+
 	var validationErr error
 	if phase == soakPhaseTeardown {
 		validationErr = validateSoakTeardownConfig(

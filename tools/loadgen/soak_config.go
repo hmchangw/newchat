@@ -408,6 +408,26 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	return nil
 }
 
+// soakMessagePrefixNone turns the message label off.
+//
+// The label needs a word for "off" because caarlos0/env cannot express one:
+// it applies envDefault to a variable that is set but empty and cannot tell
+// that apart from an absent variable — a pointer field reads nil for both —
+// so an empty SOAK_MESSAGE_PREFIX takes the default rather than clearing it.
+// It matches SOAK_CASSANDRA_CLEANUP, which spells its own off state the same
+// way. An operator wanting the literal word as a label can write "none ".
+const soakMessagePrefixNone = "none"
+
+// resolveSoakMessagePrefix turns the configured value into the prefix bodies
+// actually carry. Call it once, before validation: everything downstream
+// measures and stamps the resolved value.
+func resolveSoakMessagePrefix(configured string) string {
+	if configured == soakMessagePrefixNone {
+		return ""
+	}
+	return configured
+}
+
 // soakRoomCreateBudgetMax bounds the rooms one run may create, and with them
 // the read-target set the create lane grows in memory.
 const soakRoomCreateBudgetMax = 100000
