@@ -430,12 +430,19 @@ one; it is not optional polish.** It ships before the behavioral changes (§6).
 
 ### 3.8 Why the retry load is safe for NATS
 
-Redelivery rate is bounded by `MaxAckPending ÷ backoff tail` = **1000 ÷ 120s ≈ 8.3
-redeliveries/sec**, flat, regardless of incoming traffic and regardless of outage
-length. Against a stream already doing ~34 publishes/s and 169 delivery-ops/s
-(`docs/nats-traffic-estimation.md:235`), that is roughly 5% overhead. Each NAK is a
-consumer-state update (a RAFT proposal on a replicated consumer), which at 8/s is
+Redelivery rate is bounded by `MaxAckPending ÷ backoff tail`, flat, regardless of
+incoming traffic and regardless of outage length. `DefaultBackoff`'s tail is 10m, and
+equal jitter draws each wait from `[tail/2, tail]`, so the conservative bound is the
+half-tail: **1000 ÷ 300s ≈ 3.3 redeliveries/sec** worst case, ≈1.7/s nominal. Against a
+stream already doing ~34 publishes/s and 169 delivery-ops/s
+(`docs/nats-traffic-estimation.md:235`), that is roughly 2% overhead. Each NAK is a
+consumer-state update (a RAFT proposal on a replicated consumer), which at 3/s is
 noise.
+
+These numbers were computed against a 2m tail (≈8.3/s, ~5%) until #344 grew the shared
+schedule's tail to 10m — the same change that moved the drop delivery from 11 to 17.
+A longer tail only lowers the rate, so the conclusion held throughout; the arithmetic
+is corrected here rather than quietly left overstating the load.
 
 **The rate does not grow with the backlog.** Once 1000 messages are pending the
 consumer stops pulling; the remaining ~121,000 messages arriving during the hour sit in
@@ -447,11 +454,13 @@ for the *first* time after recovery.
 Two consequences to carry into implementation:
 
 - **Do not raise `MaxAckPending` to avoid the stall.** Redelivery rate scales with it;
-  at 100k pending it would be ~833/s plus a 100k-entry pending map in replicated
-  consumer state.
-- **Expect ~2 minutes of dead time after recovery** while the in-flight batch waits on
-  its NAK timers. Cosmetic, but it will appear in metrics as a lag plateau after
-  Cassandra looks healthy.
+  at 100k pending it would be ~333/s on the same conservative basis, plus a 100k-entry
+  pending map in replicated consumer state.
+- **Expect up to ~10 minutes of dead time after recovery** — the backoff tail — while
+  the in-flight batch waits on its NAK timers; jitter puts each message somewhere in
+  5–10 minutes. Cosmetic, but it will appear in metrics as a lag plateau after
+  Cassandra looks healthy, and it is long enough that an operator watching a recovery
+  needs to expect it rather than read it as a stuck consumer.
 
 Unbounded retry costs **zero in steady state** — it is inert until something fails.
 
