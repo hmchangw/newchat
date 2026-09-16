@@ -23,7 +23,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // Escalation headers. Metadata rides in headers so the body stays
@@ -40,9 +39,19 @@ const (
 	HeaderReason        = "X-Retry-Reason"
 )
 
-// traceparentHeader is the W3C trace context header carried through every hop
-// so a retry lands in the same trace lineage as the original send.
-const traceparentHeader = "traceparent"
+// jetstreamPublishHeaders address the ORIGIN stream, not the escalation: a
+// forwarded Nats-Msg-Id would fight the escalation's own deterministic dedup id,
+// and a forwarded Nats-Expected-* would assert the origin stream's sequence
+// state against RETRY-{siteID} and reject the publish. They are the only
+// headers escalation drops.
+var jetstreamPublishHeaders = []string{
+	jetstream.MsgIDHeader,
+	jetstream.ExpectedStreamHeader,
+	jetstream.ExpectedLastSeqHeader,
+	jetstream.ExpectedLastSubjSeqHeader,
+	jetstream.ExpectedLastSubjSeqSubjHeader,
+	jetstream.ExpectedLastMsgIDHeader,
+}
 
 // DedupID is the escalation's Nats-Msg-Id. Escalation is publish-then-Ack and
 // therefore at-least-once: a crash between the two re-runs the handler and
@@ -68,17 +77,29 @@ func ReasonFor(err error) string {
 // message's headers and is never mutated. Attempts accumulate across lanes and
 // the first-failure timestamp survives every hop, so time-to-dead-letter stays
 // truthful however many times a message is re-escalated.
+//
+// It copies every inbound header and overrides the X-Retry-* set on top, rather
+// than allow-listing the few it knows about. An escalation is a relocation of
+// the same delivery, so the handler on the retry lane must see what the handler
+// on the hot lane saw: X-Request-ID and traceparent for lineage, X-Debug and
+// X-Debug-Payload so an operator who stamped a rung keeps visibility on exactly
+// the messages that failed, and above all X-Migration — message-worker skips
+// thread-subscription, mention and badge side effects on migrated events, and
+// dropping the header would re-notify users about migrated history. The same
+// reasoning covers headers no adopter reads yet: Data() is forwarded
+// byte-identically, so a future Nats-Encoding payload must keep the header that
+// says how to decode it.
 func BuildHeaders(in nats.Header, meta *jetstream.MsgMetadata,
 	originSubject, consumer, reason string, now time.Time,
 ) nats.Header {
+	// Values are copied, not aliased: out is handed to a publish that may add to
+	// it while the live message still holds in.
 	out := nats.Header{}
-
-	// Correlation first: a retry must stay in the original trace lineage.
-	if v := in.Get(natsutil.RequestIDHeader); v != "" {
-		out.Set(natsutil.RequestIDHeader, v)
+	for k, vs := range in {
+		out[k] = append([]string(nil), vs...)
 	}
-	if v := in.Get(traceparentHeader); v != "" {
-		out.Set(traceparentHeader, v)
+	for _, h := range jetstreamPublishHeaders {
+		out.Del(h)
 	}
 
 	out.Set(HeaderOriginSubject, originSubject)

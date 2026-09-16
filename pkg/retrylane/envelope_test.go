@@ -120,3 +120,72 @@ func TestBuildHeadersHandlesNilMetadata(t *testing.T) {
 	assert.Equal(t, "c", got.Get(retrylane.HeaderConsumer))
 	assert.Equal(t, "", got.Get(retrylane.HeaderOriginStream))
 }
+
+func TestBuildHeadersForwardsEveryInboundHeader(t *testing.T) {
+	in := nats.Header{}
+	in.Set(natsutil.HeaderMigration, natsutil.MigrationLive)
+	in.Set(natsutil.DebugHeader, "trace")
+	in.Set(natsutil.DebugPayloadHeader, "1")
+	in.Set("Nats-Encoding", "zstd")
+
+	got := retrylane.BuildHeaders(in, meta("S", 1, 4), "subj", "c", "internal", time.Now())
+
+	assert.Equal(t, natsutil.MigrationLive, got.Get(natsutil.HeaderMigration),
+		"a migrated event that escalates must still suppress re-notification on the retry lane")
+	assert.Equal(t, "trace", got.Get(natsutil.DebugHeader),
+		"logctx.Admit on the retry loop is dead code unless the debug rung survives escalation")
+	assert.Equal(t, "1", got.Get(natsutil.DebugPayloadHeader))
+	assert.Equal(t, "zstd", got.Get("Nats-Encoding"),
+		"Data() is forwarded byte-identically, so a content-encoding header must ride with it")
+}
+
+func TestBuildHeadersDropsJetStreamPublishHeaders(t *testing.T) {
+	in := nats.Header{}
+	in.Set(jetstream.MsgIDHeader, "origin-dedup-id")
+	in.Set(jetstream.ExpectedStreamHeader, "MESSAGES-CANONICAL-site1")
+	in.Set(jetstream.ExpectedLastSeqHeader, "41")
+	in.Set(jetstream.ExpectedLastSubjSeqHeader, "7")
+	in.Set(jetstream.ExpectedLastSubjSeqSubjHeader, "chat.msg.canonical.site1.created")
+	in.Set(jetstream.ExpectedLastMsgIDHeader, "prev-id")
+
+	got := retrylane.BuildHeaders(in, meta("S", 1, 4), "subj", "c", "internal", time.Now())
+
+	for _, h := range []string{
+		jetstream.MsgIDHeader, jetstream.ExpectedStreamHeader, jetstream.ExpectedLastSeqHeader,
+		jetstream.ExpectedLastSubjSeqHeader, jetstream.ExpectedLastSubjSeqSubjHeader,
+		jetstream.ExpectedLastMsgIDHeader,
+	} {
+		assert.Empty(t, got.Get(h),
+			"%s addresses the origin stream; forwarding it would fight the escalation's own dedup id", h)
+	}
+}
+
+func TestBuildHeadersOverridesForwardedRetryHeaders(t *testing.T) {
+	in := nats.Header{}
+	in.Set(retrylane.HeaderOriginStream, "STALE-STREAM")
+	in.Set(retrylane.HeaderOriginSeq, "999")
+	in.Set(retrylane.HeaderOriginSubject, "stale.subject")
+	in.Set(retrylane.HeaderConsumer, "stale-consumer")
+	in.Set(retrylane.HeaderReason, "stale")
+
+	got := retrylane.BuildHeaders(in, meta("S", 1, 4), "subj", "c", "internal", time.Now())
+
+	assert.Equal(t, "S", got.Get(retrylane.HeaderOriginStream), "this hop's provenance wins")
+	assert.Equal(t, "1", got.Get(retrylane.HeaderOriginSeq))
+	assert.Equal(t, "subj", got.Get(retrylane.HeaderOriginSubject))
+	assert.Equal(t, "c", got.Get(retrylane.HeaderConsumer))
+	assert.Equal(t, "internal", got.Get(retrylane.HeaderReason))
+}
+
+func TestBuildHeadersDoesNotMutateForwardedMultiValueInput(t *testing.T) {
+	in := nats.Header{}
+	in.Add("X-Multi", "a")
+	in.Add("X-Multi", "b")
+
+	got := retrylane.BuildHeaders(in, meta("S", 1, 4), "subj", "c", "internal", time.Now())
+	got.Add("X-Multi", "c")
+
+	assert.Equal(t, []string{"a", "b"}, in["X-Multi"],
+		"the copy must be deep enough that appending to it cannot reach the live message")
+	assert.Equal(t, []string{"a", "b", "c"}, got["X-Multi"])
+}
