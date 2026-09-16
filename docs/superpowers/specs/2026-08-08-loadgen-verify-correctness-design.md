@@ -116,10 +116,10 @@ command can be scripted without parsing stdout.
 | `--drain` | `30s` | Post-quiesce wait for in-flight probes |
 | `--probe-rate` | `0.01` | Fraction of sends into probe rooms that are tracked (§5) |
 | `--min-probes` | `50` | Below this, verdict is INCONCLUSIVE |
-| `--large-room-threshold` | `500` | Must match the gatekeeper's setting; preflight enforces (§6.1) |
+| `--large-room-threshold` | `500` | Must match the gatekeeper's `LARGE_ROOM_THRESHOLD`. Preflight rejects probe rooms at or above **this** value; it never queries the gatekeeper, so a mismatch is not detected (§6.1) |
 | `--lane` | `both` | `global` \| `local` \| `both`. Halves subscription count when set explicitly (§6.3) |
 | `--direct-only` | `false` | Disable multiplex; every user gets a dedicated conn. Preflight errors if `--users` exceeds the direct budget (§6.3) |
-| `--seed` | `42` | Drives fixtures, probe-room choice, and probe selection; same seed ⇒ same probe set |
+| `--seed` | `42` | Drives probe-room choice and probe selection; same seed ⇒ same probe set. Does **not** drive fixtures — those are pinned to the seed `loadgen seed` used, because a different fixture seed regenerates every user and room ID (§8) |
 | `--json` | `""` | Full violation detail output path |
 
 ## 5. Probe Sampling
