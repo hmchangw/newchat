@@ -101,6 +101,7 @@ func TestTerminal(t *testing.T) {
 			}
 			if ee == nil {
 				t.Fatal("terminal must return the typed *Error")
+				return
 			}
 			if ee.Code != tc.wantCode {
 				t.Fatalf("Code = %v, want %v", ee.Code, tc.wantCode)
