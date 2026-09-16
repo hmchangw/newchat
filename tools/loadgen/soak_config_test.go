@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -776,4 +777,15 @@ func TestValidateSoakConfig_MessagePrefixBounds(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+// Compose substitutes ${VAR:-default} when VAR is set but empty, which would
+// override the documented way to turn the label off. Only ${VAR-default}
+// leaves an explicitly empty value alone.
+func TestSoakCompose_MessagePrefixDefaultYieldsToAnExplicitEmptyValue(t *testing.T) {
+	source, err := os.ReadFile("deploy/docker-compose.yml")
+	require.NoError(t, err)
+
+	assert.Contains(t, string(source), "${SOAK_MESSAGE_PREFIX-[LoadTest] }")
+	assert.NotContains(t, string(source), "${SOAK_MESSAGE_PREFIX:-")
 }

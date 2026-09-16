@@ -380,10 +380,14 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if cfg.PayloadMaxBytes < cfg.PayloadP95Bytes {
 		return fmt.Errorf("SOAK_PAYLOAD_MAX_BYTES must be at least SOAK_PAYLOAD_P95_BYTES")
 	}
-	if limit := distribution.MaxPrefixBytes(cfg.PayloadMedianBytes); len(cfg.MessagePrefix) > limit {
+	// Charged at its serialized cost, not its raw length: the body is
+	// JSON-marshalled before it is sealed, so an escaping character is wider on
+	// the wire than it reads here.
+	if limit, cost := distribution.MaxPrefixBytes(cfg.PayloadMedianBytes),
+		distribution.PrefixBudgetBytes(cfg.MessagePrefix); cost > limit {
 		return fmt.Errorf(
-			"SOAK_MESSAGE_PREFIX must be at most %d bytes at the configured median, got %d",
-			limit, len(cfg.MessagePrefix),
+			"SOAK_MESSAGE_PREFIX must serialize to at most %d bytes at the configured median, got %d",
+			limit, cost,
 		)
 	}
 

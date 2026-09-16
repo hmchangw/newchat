@@ -254,3 +254,47 @@ func TestSoakDistribution_MaxPrefixBytesNeverGoesNegative(t *testing.T) {
 	assert.Equal(t, 0, MaxPrefixBytes(0))
 	assert.Equal(t, 0, MaxPrefixBytes(-100))
 }
+
+// serializedContentCost measures what a body actually contributes to the
+// at-rest JSON envelope, which is what the payload percentiles model.
+func serializedContentCost(t *testing.T, body string) int {
+	t.Helper()
+	serialized, err := json.Marshal(atrest.EncryptedFields{Msg: body})
+	require.NoError(t, err)
+	return len(serialized) - (encryptedContentOverhead - gcmTagBytes)
+}
+
+// atrest.Encrypt JSON-marshals the body before sealing it, so a prefix holding
+// a quote, backslash or HTML metacharacter costs more bytes on the wire than it
+// has. Charging raw length would understate every sample by that difference.
+func TestSoakDistribution_PrefixBudgetChargesTheSerializedCost(t *testing.T) {
+	for _, prefix := range []string{
+		"[LoadTest] ", `"quoted" `, `back\slash `, "<b> ", "a&b ", "line\nbreak ", "\x01",
+	} {
+		assert.Equal(t, serializedContentCost(t, prefix), PrefixBudgetBytes(prefix),
+			"prefix %q", prefix)
+	}
+}
+
+func TestSoakDistribution_PrefixBudgetIsRawLengthWhenNothingEscapes(t *testing.T) {
+	assert.Equal(t, len("[LoadTest] "), PrefixBudgetBytes("[LoadTest] "))
+	assert.Equal(t, 0, PrefixBudgetBytes(""))
+}
+
+// The percentiles are validated against the gatekeeper limit and the page
+// budget, so a labelled body must serialize to exactly the sampled size —
+// whatever characters the label is made of.
+func TestSoakDistribution_LabelledBodySerializesToTheSampledSize(t *testing.T) {
+	for _, prefix := range []string{
+		"", "[LoadTest] ", `"quoted" `, `back\slash `, "<b> ", "a&b ", "line\nbreak ",
+	} {
+		for _, size := range []int{256, 1024, 10240} {
+			body := ContentOfSizeWithPrefix(prefix, size)
+
+			assert.Equal(t, size, serializedContentCost(t, body),
+				"prefix %q at size %d", prefix, size)
+			assert.LessOrEqual(t, len(body), size,
+				"raw body must also stay inside the gatekeeper's plaintext limit")
+		}
+	}
+}
