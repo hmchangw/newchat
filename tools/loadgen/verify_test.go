@@ -527,9 +527,14 @@ func TestVerifyRun_Harvest(t *testing.T) {
 	assert.Equal(t, "r-4", keep[1].roomID,
 		"surviving changes must keep their relative order through the in-place filter")
 	assert.Len(t, *observed, 2, "exactly the two settled changes are observed")
+	// This run has no oracle connection, so the authorization probe answers
+	// nothing for either settled change. subscription.list answering alone is
+	// not resolution — each of the two is charged one unresolved unit, and none
+	// of them silently reads as a clean result.
 	n, sample := r.takeOracleErrs()
-	assert.Zero(t, n)
-	assert.NoError(t, sample)
+	assert.Equal(t, 2, n)
+	require.Error(t, sample)
+	assert.Contains(t, sample.Error(), "authorization probe unobservable")
 }
 
 // TestVerifyRun_DriveChurn_CancelledWithPendingChanges_CountsUnobserved pins
@@ -973,6 +978,10 @@ func TestVerifyRun_ApplyChange_ClosesTheRoomBeforeTheMembershipRPC(t *testing.T)
 // TestVerifyRun_ApplyChange_ReopensTheRoomWhenTheRPCIsRejected pins the other
 // exit: a rejected change must not leave the room permanently unprobeable, and
 // must not bump the epoch.
+//
+// The rejection here is a *definite* one — room-service answered with an errcode
+// envelope. A transport failure reaches the same barrier exit but is not the
+// same event; see TestVerifyRun_ApplyChange_TransportErrorIsFatal.
 func TestVerifyRun_ApplyChange_ReopensTheRoomWhenTheRPCIsRejected(t *testing.T) {
 	const roomID = "room-small-000001"
 	prs := probeRoomSetForTest(map[string][]string{roomID: {"u-1", "u-2"}}, roomID)
@@ -987,7 +996,7 @@ func TestVerifyRun_ApplyChange_ReopensTheRoomWhenTheRPCIsRejected(t *testing.T) 
 		reserve: []string{"u-2"},
 		env: &stepEnv{
 			request: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
-				return nil, errors.New("room-service timeout")
+				return errcodeEnvelopeForTest("forbidden", "not_room_owner", "only owners may remove"), nil
 			},
 		},
 	}
@@ -999,4 +1008,292 @@ func TestVerifyRun_ApplyChange_ReopensTheRoomWhenTheRPCIsRejected(t *testing.T) 
 	assert.Equal(t, 0, mm.Epoch(roomID), "and never moves the epoch")
 	assert.True(t, mm.WithStableRoom(roomID, time.Now(), func(int, []string) {}),
 		"the room reopens to probes immediately")
+}
+
+// errcodeEnvelopeForTest builds the wire form of an errcode reply. Hand-rolled
+// rather than errnats.Marshal so the test pins the *wire* shape verify parses,
+// not whatever the marshaller happens to emit today.
+func errcodeEnvelopeForTest(code, reason, message string) []byte {
+	body := map[string]string{"code": code, "error": message}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	out, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
+// churnRunForTest builds a verifyRun whose churn picks the add branch (u-2 is a
+// reserve floater not yet in the room) and whose membership RPC answers with
+// reply/err.
+func churnRunForTest(roomID string, reply func() ([]byte, error)) *verifyRun {
+	prs := probeRoomSetForTest(map[string][]string{roomID: {"u-1"}}, roomID)
+	return &verifyRun{
+		vc:     &verifyConfig{Seed: 1, MemberChurn: 600, Settle: time.Hour, MinProbes: 1},
+		prs:    prs,
+		mm:     NewMembershipModel(prs),
+		siteID: "site-a",
+		byID: map[string]*userState{
+			"u-1": {ID: "u-1", Account: "user-1"},
+			"u-2": {ID: "u-2", Account: "user-2"},
+		},
+		reserve: []string{"u-2"},
+		env: &stepEnv{
+			request: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+				return reply()
+			},
+		},
+	}
+}
+
+// TestVerifyRun_ApplyChange_TransportErrorIsFatal pins the distinction the
+// swallow-everything version erased. A transport failure is not "no change":
+// room-service may have committed the add while loadgen's model did not, so the
+// model and the system have silently diverged and every later probe in that room
+// would be judged against a stale expected set. That is a harness failure, the
+// same treatment the post-add SubscribeRoom failure already gets.
+func TestVerifyRun_ApplyChange_TransportErrorIsFatal(t *testing.T) {
+	const roomID = "room-small-000001"
+	r := churnRunForTest(roomID, func() ([]byte, error) {
+		return nil, errors.New("room-service timeout")
+	})
+
+	_, ok, err := r.applyChange(t.Context(), roomID, churnRandForTest(1))
+
+	require.Error(t, err, "an unanswered membership RPC leaves the outcome unknown")
+	assert.False(t, ok)
+	assert.ErrorContains(t, err, "room-service timeout", "the cause must survive the wrap")
+	assert.Equal(t, 0, r.mm.Epoch(roomID), "an unknown outcome never moves the model")
+	assert.True(t, r.mm.WithStableRoom(roomID, time.Now(), func(int, []string) {}),
+		"and the barrier still releases, so the room is not wedged for the rest of the run")
+}
+
+// TestVerifyRun_ApplyChange_DefiniteRejectionIsNotFatal pins the other half: an
+// errcode reply means the server answered and refused, so nothing happened and
+// nothing diverged. Churn continues; the membership floor is what catches a run
+// where every change is refused, because Changes.Total stays 0.
+func TestVerifyRun_ApplyChange_DefiniteRejectionIsNotFatal(t *testing.T) {
+	const roomID = "room-small-000001"
+	r := churnRunForTest(roomID, func() ([]byte, error) {
+		return errcodeEnvelopeForTest("forbidden", "not_room_owner", "only owners may add"), nil
+	})
+
+	_, ok, err := r.applyChange(t.Context(), roomID, churnRandForTest(1))
+
+	require.NoError(t, err, "a definite refusal is not a harness failure")
+	assert.False(t, ok)
+	assert.Equal(t, 0, r.mm.Counts().Total,
+		"a refused change was never issued, so the floor sees an unexercised dimension")
+}
+
+// TestVerifyRun_DriveChurn_TransportErrorAbortsTheRun walks the whole path: a
+// transport failure inside applyChange must reach driveChurn as a harness error
+// and make the verdict INCONCLUSIVE, never a PASS built on a diverged model.
+func TestVerifyRun_DriveChurn_TransportErrorAbortsTheRun(t *testing.T) {
+	const roomID = "room-small-000001"
+	r := churnRunForTest(roomID, func() ([]byte, error) {
+		return nil, errors.New("room-service timeout")
+	})
+
+	r.driveChurn(t.Context(), time.Now().Add(time.Hour))
+
+	harnessErr := r.takeHarnessErr()
+	require.Error(t, harnessErr, "churn must abort rather than treat the change as a no-op")
+	n, _ := r.takeOracleErrs()
+	assert.Zero(t, n, "a churn abort is not an oracle query failure and gets no tolerance")
+
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.HarnessErr = harnessErr
+	res := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, res.Verdict)
+	require.NotEmpty(t, res.Reasons)
+	assert.Contains(t, res.Reasons[0], "harness failed during membership setup")
+}
+
+// TestVerifyRun_DriveChurn_DefiniteRejectionDoesNotAbort pins that a refused
+// change leaves churn running and the change count untouched.
+func TestVerifyRun_DriveChurn_DefiniteRejectionDoesNotAbort(t *testing.T) {
+	const roomID = "room-small-000001"
+	var calls int
+	r := churnRunForTest(roomID, func() ([]byte, error) {
+		calls++
+		return errcodeEnvelopeForTest("forbidden", "not_room_owner", "only owners may add"), nil
+	})
+	// Three verifyChurnPoll ticks, so a driver that kept running has visibly
+	// issued more than once.
+	ctx, cancel := context.WithTimeout(t.Context(), 3*verifyChurnPoll+200*time.Millisecond)
+	defer cancel()
+
+	r.driveChurn(ctx, time.Now().Add(time.Hour))
+
+	assert.NoError(t, r.takeHarnessErr(), "a definite refusal never aborts churn")
+	assert.Greater(t, calls, 1, "churn kept issuing after the refusal")
+	assert.Equal(t, 0, r.mm.Counts().Total, "and no refused change is counted as issued")
+	assert.Zero(t, r.takeChangesUnobserved(), "nothing was pending, so nothing is unobserved")
+}
+
+// TestClassifySendReply pins the authorization oracle's three-way answer. The
+// middle row is the load-bearing one: before it, ANY errcode reply counted as
+// "rejected", so an unrelated Internal from the gatekeeper *satisfied* the
+// post-remove expectation and masked a real membership_remove_ineffective.
+func TestClassifySendReply(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want sendOutcome
+	}{
+		{
+			name: "success reply is an accepted send",
+			data: []byte(`{"messageId":"m-1","createdAt":1}`),
+			want: sendAccepted,
+		},
+		{
+			name: "not_subscribed is the gatekeeper's definite authorization answer",
+			data: errcodeEnvelopeForTest("forbidden", "not_subscribed", "not subscribed"),
+			want: sendRejected,
+		},
+		{
+			name: "an unrelated internal error answers nothing about authorization",
+			data: errcodeEnvelopeForTest("internal", "", "boom"),
+			want: sendUnobservable,
+		},
+		{
+			name: "a forbidden carrying a different reason is not an authorization answer",
+			data: errcodeEnvelopeForTest("forbidden", "large_room_post_restricted", "too large"),
+			want: sendUnobservable,
+		},
+		{
+			name: "a bad_request is not an authorization answer either",
+			data: errcodeEnvelopeForTest("bad_request", "", "malformed"),
+			want: sendUnobservable,
+		},
+		{
+			name: "an empty reply body is not an error envelope, so the send was accepted",
+			data: []byte(`{}`),
+			want: sendAccepted,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := classifySendReply(tc.data)
+			assert.Equal(t, tc.want, got)
+			if tc.want == sendUnobservable {
+				assert.Error(t, err, "an unobservable outcome must carry why")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// observeRunForTest builds a verifyRun whose subscription.list oracle answers
+// with rows (or fails) and whose authorization probe is always unobservable —
+// oracleNC is nil, the cheapest way to reach sendUnobservable without NATS.
+func observeRunForTest(rows string, listErr error) *verifyRun {
+	const roomID = "room-small-000001"
+	prs := probeRoomSetForTest(map[string][]string{roomID: {"u-1"}}, roomID)
+	mm := NewMembershipModel(prs)
+	mm.SetSettle(0)
+	mm.ApplyAdd(roomID, "u-2", time.Unix(0, 0))
+	return &verifyRun{
+		vc:     &verifyConfig{Settle: 0},
+		prs:    prs,
+		mm:     mm,
+		siteID: "site-a",
+		env: &stepEnv{
+			request: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+				if listErr != nil {
+					return nil, listErr
+				}
+				return []byte(rows), nil
+			},
+		},
+	}
+}
+
+// TestVerifyRun_Observe_UnobservableSendLeavesTheChangeUnresolved pins the
+// silent-PASS hole this fixes. subscription.list answering alone makes the change
+// Applied but never Effective: the add/remove effectiveness assertion was simply
+// not performed, Finalize emits nothing, and before this the run could PASS with
+// the check skipped. A change is resolved only when BOTH oracles answered.
+func TestVerifyRun_Observe_UnobservableSendLeavesTheChangeUnresolved(t *testing.T) {
+	const roomID = "room-small-000001"
+	r := observeRunForTest(`{"subscriptions":[{"roomId":"room-small-000001"}],"hasMore":false}`, nil)
+	pc := pendingChange{
+		kind: changeAdd, roomID: roomID, userID: "u-2", account: "user-2",
+		epoch: r.mm.Epoch(roomID), due: at(10),
+	}
+
+	r.observe(t.Context(), &pc)
+
+	counts := r.mm.Counts()
+	assert.Equal(t, 1, counts.Applied, "subscription.list answered, so Applied is known")
+	assert.Equal(t, 0, counts.Effective, "the authorization probe did not, so Effective is not")
+	n, sample := r.takeOracleErrs()
+	assert.Equal(t, 1, n,
+		"a half-answered change is unresolved: it must spend the budget, not vanish")
+	require.Error(t, sample)
+	assert.Empty(t, r.mm.Finalize(),
+		"and it must not produce a violation either — nobody judged it")
+}
+
+// TestVerifyRun_Observe_BothOraclesFailingChargeOneUnit pins that the unresolved
+// budget counts changes, not queries: two failures still blind exactly one
+// change, and double-charging would misreport "N of M changes unresolved".
+func TestVerifyRun_Observe_BothOraclesFailingChargeOneUnit(t *testing.T) {
+	const roomID = "room-small-000001"
+	r := observeRunForTest("", errors.New("subscription.list timeout"))
+	pc := pendingChange{
+		kind: changeAdd, roomID: roomID, userID: "u-2", account: "user-2",
+		epoch: r.mm.Epoch(roomID), due: at(10),
+	}
+
+	r.observe(t.Context(), &pc)
+
+	n, sample := r.takeOracleErrs()
+	assert.Equal(t, 1, n, "one blinded change is one unresolved change")
+	require.Error(t, sample)
+	assert.Contains(t, sample.Error(), "subscription.list timeout",
+		"the first failure is still the sample")
+}
+
+// TestVerifyRun_Observe_UnresolvedSendTripsTheMembershipFloor wires the new
+// counter through to the verdict: a run whose only change had an unobservable
+// authorization probe has resolved nothing and must not report PASS.
+func TestVerifyRun_Observe_UnresolvedSendTripsTheMembershipFloor(t *testing.T) {
+	const roomID = "room-small-000001"
+	r := observeRunForTest(`{"subscriptions":[{"roomId":"room-small-000001"}],"hasMore":false}`, nil)
+	pc := pendingChange{
+		kind: changeAdd, roomID: roomID, userID: "u-2", account: "user-2",
+		epoch: r.mm.Epoch(roomID), due: at(10),
+	}
+	r.observe(t.Context(), &pc)
+
+	oracleErrs, sample := r.takeOracleErrs()
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = r.mm.Counts()
+	in.OracleErrs = oracleErrs
+	in.OracleErrSample = sample
+	in.ChangesUnobserved = r.takeChangesUnobserved()
+
+	res := evaluateVerify(in)
+
+	assert.Equal(t, VerdictInconclusive, res.Verdict,
+		"one change, half-observed, is not a membership signal")
+}
+
+// TestVerifyRun_SendAsTarget_NoOracleConnIsUnobservable pins that a missing
+// oracle connection reports "unknown", never "rejected" — the latter would
+// silently satisfy every post-remove expectation in the run.
+func TestVerifyRun_SendAsTarget_NoOracleConnIsUnobservable(t *testing.T) {
+	r := &verifyRun{vc: &verifyConfig{}}
+
+	got, err := r.sendAsTarget(t.Context(), &pendingChange{roomID: "r-1", account: "user-2"})
+
+	assert.Equal(t, sendUnobservable, got)
+	assert.Error(t, err)
 }

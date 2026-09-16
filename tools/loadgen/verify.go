@@ -293,10 +293,13 @@ type verifyRun struct {
 
 	mu      sync.Mutex
 	targets []ReadbackTarget
-	// oracleErrs counts failed membership-oracle queries; oracleErrSample keeps
-	// the first for the operator-facing message. Counted, not latched, because
-	// the verdict tolerates a few (see maxToleratedOracleErrs) and the count is
-	// what distinguishes one blip from a service that was down all run.
+	// oracleErrs counts changes left unresolved by an oracle that did not
+	// answer — either subscription.list erroring, or the authorization probe
+	// being unobservable (see observe, which charges at most one per change);
+	// oracleErrSample keeps the first for the operator-facing message. Counted,
+	// not latched, because the verdict tolerates a few (see
+	// maxToleratedOracleErrs) and the count is what distinguishes one blip from
+	// a service that was down all run.
 	oracleErrs      int
 	oracleErrSample error
 	// changesUnobserved counts changes driveChurn issued but left still inside
@@ -580,10 +583,11 @@ func (r *verifyRun) closeOracleConn() {
 	}
 }
 
-// recordOracleErr counts one failed membership-supporting query and keeps the
-// first as the sample. Each failure is logged here rather than at the call site,
-// so failures 2..N are visible to an operator instead of being silently folded
-// into a latched first error (spec §10). IDs only — never message content.
+// recordOracleErr counts one change whose membership oracles did not both
+// answer, and keeps the first failure as the sample. Each failure is logged
+// here rather than at the call site, so failures 2..N are visible to an
+// operator instead of being silently folded into a latched first error
+// (spec §10). IDs only — never message content.
 func (r *verifyRun) recordOracleErr(roomID, userID string, err error) {
 	r.mu.Lock()
 	r.oracleErrs++
@@ -958,6 +962,15 @@ func (r *verifyRun) addMember(ctx context.Context, roomID, targetID string) (pen
 		return pendingChange{}, false, fmt.Errorf("marshal member add: %w", err)
 	}
 	if err := r.requestAccepted(ctx, subject.MemberAdd(requester.Account, roomID, r.siteID), body); err != nil {
+		if !errors.Is(err, errChangeRejected) {
+			// No answer arrived, so the outcome is unknown: room-service may
+			// have committed the add while the model did not, and every later
+			// probe in this room would then be judged against a stale expected
+			// set. Fatal for the same reason the SubscribeRoom failure below is.
+			return pendingChange{}, false, fmt.Errorf(
+				"membership churn aborted, add outcome unknown: add %s to %s: %w",
+				targetID, roomID, err)
+		}
 		slog.Warn("member add rejected", "room", roomID, "target", targetID, "err", err)
 		return pendingChange{}, false, nil
 	}
@@ -987,6 +1000,14 @@ func (r *verifyRun) removeMember(ctx context.Context, roomID, targetID string) (
 		return pendingChange{}, false, fmt.Errorf("marshal member remove: %w", err)
 	}
 	if err := r.requestAccepted(ctx, subject.MemberRemove(target.Account, roomID, r.siteID), body); err != nil {
+		if !errors.Is(err, errChangeRejected) {
+			// See addMember: an unanswered RPC may still have been applied, so
+			// continuing would judge this room against a model the system no
+			// longer agrees with.
+			return pendingChange{}, false, fmt.Errorf(
+				"membership churn aborted, remove outcome unknown: remove %s from %s: %w",
+				targetID, roomID, err)
+		}
 		slog.Warn("member remove rejected", "room", roomID, "target", targetID, "err", err)
 		return pendingChange{}, false, nil
 	}
@@ -1015,16 +1036,28 @@ func (r *verifyRun) roomRequester(roomID string) *userState {
 	return r.byID[members[0]]
 }
 
+// errChangeRejected marks a membership RPC the server definitely refused: it
+// answered, with an errcode envelope, so the change did not happen and nothing
+// diverged. Its ABSENCE from a requestAccepted error is the load-bearing case —
+// then no answer arrived at all, the outcome is unknown, and treating it as "no
+// change" is what silently desynchronises loadgen's model from the system.
+var errChangeRejected = errors.New("membership change rejected")
+
 // requestAccepted issues a request/reply and reports the errcode envelope as an
 // error. room-service replies with an ordinary message body on error, which the
 // requestFn returns with a nil Go error.
+//
+// The two failures are deliberately distinguishable by errors.Is rather than
+// collapsed into one error type: a refusal means the change did not happen,
+// while a transport failure means nobody knows whether it did. Callers treat
+// them differently — see addMember.
 func (r *verifyRun) requestAccepted(ctx context.Context, subj string, body []byte) error {
 	raw, err := r.env.request(ctx, subj, body, defaultRequestTimeout)
 	if err != nil {
 		return fmt.Errorf("request: %w", err)
 	}
 	if envErr, ok := errcode.Parse(raw); ok {
-		return fmt.Errorf("rejected: %w", envErr)
+		return fmt.Errorf("%w: %w", errChangeRejected, envErr)
 	}
 	return nil
 }
@@ -1047,11 +1080,25 @@ func (r *verifyRun) harvest(ctx context.Context, pending []pendingChange, now ti
 
 // observe runs both membership oracles for one settled change: what
 // subscription.list reports, and whether the target's own send is authorized.
+//
+// A change is resolved only if BOTH oracles answered. subscription.list
+// answering while the authorization probe did not means Applied is known and
+// Effective is not — the add/remove effectiveness assertion (spec §9.1) was
+// never performed for that change, and Finalize emits nothing for a change it
+// could not judge. So an unobservable probe spends the same unresolved budget a
+// failed subscription.list query does; without that, a run could report PASS
+// with the check silently skipped, which is the floor's whole reason to exist.
+//
+// At most one unit is charged per change. The budget counts changes, not
+// queries: both oracles failing still blinds exactly one change, and
+// double-charging would misreport "N of M membership changes unresolved".
 func (r *verifyRun) observe(ctx context.Context, pc *pendingChange) {
+	listAnswered := false
 	has, err := r.oracleHasRoom(ctx, pc.account, pc.roomID)
 	if err != nil {
 		r.recordOracleErr(pc.roomID, pc.userID, err)
 	} else {
+		listAnswered = true
 		var observed []string
 		if has {
 			observed = []string{pc.userID}
@@ -1059,10 +1106,20 @@ func (r *verifyRun) observe(ctx context.Context, pc *pendingChange) {
 		r.mm.RecordOracle(pc.roomID, observed, pc.epoch)
 	}
 
-	accepted, seen := r.sendAsTarget(ctx, pc)
-	if seen {
-		r.mm.RecordSendResult(pc.roomID, pc.userID, accepted, pc.epoch)
+	outcome, sendErr := r.sendAsTarget(ctx, pc)
+	if outcome == sendUnobservable {
+		if listAnswered {
+			r.recordOracleErr(pc.roomID, pc.userID,
+				fmt.Errorf("authorization probe unobservable: %w", sendErr))
+			return
+		}
+		// The subscription.list failure above already charged this change; log
+		// so the second oracle's failure is still visible to an operator.
+		slog.Warn("membership authorization probe unobservable",
+			"room", pc.roomID, "user", pc.userID, "err", sendErr)
+		return
 	}
+	r.mm.RecordSendResult(pc.roomID, pc.userID, outcome == sendAccepted, pc.epoch)
 }
 
 // verifySubscriptionListRequest / verifySubscriptionRow mirror user-service's
@@ -1122,48 +1179,77 @@ func (r *verifyRun) oracleHasRoom(ctx context.Context, account, roomID string) (
 	return false, nil
 }
 
+// sendOutcome is the authorization oracle's answer for one settled change.
+// sendUnobservable is deliberately the zero value: a code path that forgets to
+// set an outcome reports "unknown" rather than fabricating an answer.
+type sendOutcome int
+
+const (
+	// sendUnobservable means the gatekeeper's authorization decision was never
+	// learned — no reply, or a reply that decided something else. It is NOT
+	// "rejected": collapsing the two makes any transient gatekeeper error
+	// satisfy the post-remove expectation and mask a real
+	// membership_remove_ineffective.
+	sendUnobservable sendOutcome = iota
+	sendAccepted
+	sendRejected
+)
+
+// classifySendReply maps one gatekeeper reply onto an authorization outcome.
+//
+// Only errcode.MessageNotSubscribed is the gatekeeper's *authorization* answer
+// (message-gatekeeper/store.go). Every other errcode reply — an Internal, a
+// bad_request, a large-room refusal — decided something other than membership
+// and tells us nothing about whether the change took effect, so it is
+// unobservable. The reason is matched as a typed value through the error chain,
+// never by comparing strings.
+func classifySendReply(data []byte) (sendOutcome, error) {
+	envErr, isErr := errcode.Parse(data)
+	if !isErr {
+		return sendAccepted, nil
+	}
+	if errcode.HasReason(envErr, errcode.MessageNotSubscribed) {
+		return sendRejected, nil
+	}
+	return sendUnobservable, fmt.Errorf(
+		"gatekeeper reply decided something other than authorization: %w", envErr)
+}
+
 // sendAsTarget attempts one send into the room as the changed user and reports
-// whether the gatekeeper accepted it. The second result is false when no reply
-// was observed at all — that is not evidence either way, so nothing is
-// recorded (spec §9.1).
-func (r *verifyRun) sendAsTarget(ctx context.Context, pc *pendingChange) (accepted, seen bool) {
+// what the gatekeeper decided about it. A sendUnobservable result carries why,
+// and is not evidence either way — nothing is recorded against the change, and
+// observe charges it to the unresolved budget instead (spec §9.1).
+func (r *verifyRun) sendAsTarget(ctx context.Context, pc *pendingChange) (sendOutcome, error) {
 	if r.oracleNC == nil {
-		return false, false
+		return sendUnobservable, errors.New("no membership oracle connection")
 	}
 	reqID := idgen.GenerateRequestID()
 	sub, err := r.oracleNC.SubscribeSync(subject.UserResponse(pc.account, reqID))
 	if err != nil {
-		slog.Warn("subscribe gatekeeper reply failed", "room", pc.roomID, "err", err)
-		return false, false
+		return sendUnobservable, fmt.Errorf("subscribe gatekeeper reply: %w", err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 	if err := r.oracleNC.Flush(); err != nil {
-		slog.Warn("flush gatekeeper reply subscription failed", "room", pc.roomID, "err", err)
-		return false, false
+		return sendUnobservable, fmt.Errorf("flush gatekeeper reply subscription: %w", err)
 	}
 
 	data, err := json.Marshal(model.SendMessageRequest{
 		ID: idgen.GenerateMessageID(), Content: verifyProbeContent, RequestID: reqID,
 	})
 	if err != nil {
-		slog.Warn("marshal membership probe send failed", "room", pc.roomID, "err", err)
-		return false, false
+		return sendUnobservable, fmt.Errorf("marshal membership probe send: %w", err)
 	}
 	if err := r.env.publish(ctx, subject.MsgSend(pc.account, pc.roomID, r.siteID), data); err != nil {
-		slog.Warn("membership probe send failed", "room", pc.roomID, "err", err)
-		return false, false
+		return sendUnobservable, fmt.Errorf("publish membership probe send: %w", err)
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, defaultRequestTimeout)
 	defer cancel()
 	msg, err := sub.NextMsgWithContext(waitCtx)
 	if err != nil {
-		return false, false
+		return sendUnobservable, fmt.Errorf("await gatekeeper reply: %w", err)
 	}
-	if _, isErr := errcode.Parse(msg.Data); isErr {
-		return false, true
-	}
-	return true, true
+	return classifySendReply(msg.Data)
 }
 
 // readback confirms every tracked probe persisted. Queries run as the probe's

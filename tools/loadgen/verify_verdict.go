@@ -35,10 +35,14 @@ type VerifyInputs struct {
 	MultiplexDrops    int64
 	DroppedRecipients int
 	ReadbackErr       error
-	// OracleErrs counts failed membership-oracle queries and OracleErrSample
-	// carries the first; they are tolerated up to maxToleratedOracleErrs. A
-	// fatal harness-side churn abort is HarnessErr instead — a different class,
-	// with no tolerance. See evaluateVerify.
+	// OracleErrs counts changes an oracle failed to resolve — subscription.list
+	// erroring, or the authorization probe answering nothing — and
+	// OracleErrSample carries the first; they are tolerated up to
+	// maxToleratedOracleErrs. A change is resolved only when BOTH oracles
+	// answered, so a half-observed change lands here rather than reading as a
+	// clean result with the effectiveness assertion silently skipped. A fatal
+	// harness-side churn abort is HarnessErr instead — a different class, with
+	// no tolerance. See evaluateVerify.
 	OracleErrs      int
 	OracleErrSample error
 	// ChangesUnobserved counts membership changes that were issued but still
@@ -73,8 +77,10 @@ const oracleErrToleranceDivisor = 10
 // persistence results over a single transient subscription.list timeout.
 //
 // Two distinct failures spend this one budget, because they say the same thing
-// about the verdict: an oracle query that errored (VerifyInputs.OracleErrs) and
-// a change dropped still inside its settle window when the steady window closed
+// about the verdict: an oracle that did not answer (VerifyInputs.OracleErrs —
+// subscription.list erroring, or the authorization probe being unobservable,
+// since a change is resolved only when BOTH answered) and a change dropped
+// still inside its settle window when the steady window closed
 // (VerifyInputs.ChangesUnobserved). Splitting the budget would let a run hide
 // nine of each behind two separate sub-tolerances.
 func maxToleratedOracleErrs(totalChanges int) int {

@@ -539,6 +539,30 @@ end.
 A removed member's send being accepted is the severe direction here: it
 means stale membership on the write path.
 
+The authorization oracle's answer is **three-valued**, not two. Only the
+gatekeeper's `not_subscribed` reason (`errcode.MessageNotSubscribed`) is an
+answer *about authorization*; it maps to "rejected". A success reply maps to
+"accepted". Every other errcode reply — an `internal`, a `bad_request`, a
+large-room refusal — decided something else entirely and leaves the
+authorization outcome **unknown**, as does no reply at all. Collapsing
+unknown into "rejected" is not conservative: "rejected" is the *expected*
+outcome after a remove, so any transient gatekeeper error would have
+satisfied the expectation and masked a real
+`membership_remove_ineffective`. The reason is matched as a typed value
+through the error chain, never by string comparison.
+
+**A change is resolved only if BOTH oracles answered.** `subscription.list`
+answering while the authorization probe did not means `Applied` is known
+and `Effective` is not — the add/remove effectiveness assertion above was
+simply never performed for that change, and nothing in `Finalize` fires for
+a change nobody judged. Such a change counts against the unresolved
+tolerance and the membership floor (§10) exactly like a failed
+`subscription.list` query; at most one unresolved unit is charged per
+change, because the budget counts changes, not queries.
+
+An `add`/`remove` RPC that gets no answer at all is a different class again
+and never reaches the oracles: see the harness-failure bullet in §10.
+
 ### 9.2 Membership epochs and the settle window
 
 E is no longer static. A message published microseconds before an add
@@ -596,6 +620,20 @@ membership write were lost, both the system's state and its self-report
 would agree, and judging against it would mask exactly the bug the check
 exists to find.
 
+Each settled change is then checked by **two oracles**, and both must
+answer for the change to count as checked:
+
+| Oracle | Question | Feeds |
+|---|---|---|
+| `subscription.list` | does the system's self-report reflect the change? | `Applied`, `membership_not_applied` |
+| Authorization probe (§9.1) | may the changed user still send into the room? | `Effective`, `membership_{add,remove}_ineffective` |
+
+They answer different questions and fail independently, so "one answered"
+is not "the change was checked". A change either oracle could not resolve
+is unresolved — see §9.1 and the unresolved bullet in §10 — rather than a
+clean half-result, because a run must never report PASS with the
+effectiveness assertion silently skipped.
+
 ### 9.4 Ordering caveat
 
 Per-room message ordering is out of scope (§2), but membership changes have
@@ -622,20 +660,41 @@ from §3 surviving retries, **or** any membership change shows a
   epoch change: a membership change legitimately alters the expected set
   (§9.2) and is never INCONCLUSIVE on its own
 - Readback errored or timed out
-- The harness itself failed while setting up a membership change — the
-  `SubscribeRoom` of a just-added churn target failed and aborted churn.
+- The harness itself failed while setting up a membership change, and the
+  pool or the model has diverged from the system. Two causes, both
+  aborting churn:
+  - the `SubscribeRoom` of a just-added churn target failed, so the added
+    user is unobservable;
+  - the `member.add`/`member.remove` RPC got **no answer** — a timeout or
+    a lost reply. This is *not* the same event as a refusal: room-service
+    may have committed the change while loadgen's model did not, so every
+    later probe in that room would be judged against a stale expected set.
+    A refusal (an errcode envelope) is the opposite — the server answered
+    and said no, so nothing happened and nothing diverged; churn logs it
+    at Warn and continues, and the membership floor catches a run where
+    every change was refused, since `Changes.Total` stays 0. The two are
+    distinguished by a sentinel wrapped into the refusal error and matched
+    with `errors.Is`, never by string.
+
   This is a loadgen-side failure, not a statement about the system, and it
-  carries **no** tolerance: the pool and the system have diverged, so every
-  later observation in the run is suspect. Reported as a harness failure,
-  never under an "oracle" prefix
+  carries **no** tolerance: every later observation in the run is suspect.
+  Reported as a harness failure, never under an "oracle" prefix
 - **More than `max(1, changes/10)` membership changes left unresolved.** A
-  change is unresolved when its backing `subscription.list` oracle query
-  errored or timed out, **or** when it was issued but still inside its
+  change is resolved only when **both** oracles answered (§9.3), so it is
+  unresolved when its backing `subscription.list` oracle query errored or
+  timed out, **or** when its authorization probe produced no authorization
+  answer (no reply, or an errcode reply that decided something other than
+  membership — §9.1), **or** when it was issued but still inside its
   settle window as `driveChurn`'s loop ended, so neither oracle ever ran
-  for it. The two are summed against one budget because they say the same
-  thing about the verdict — "this change's outcome is unknown" — and
-  splitting the budget would let a run hide nine of each behind two
-  sub-tolerances. Unlike every other entry on this list this one has a
+  for it. A change blinded by both oracles is charged **once**: the budget
+  counts changes, not queries. The three are summed against one budget
+  because they say the same thing about the verdict — "this change's
+  outcome is unknown" — and splitting the budget would let a run hide
+  most of each behind separate sub-tolerances. The first two share the
+  `oracleErrs` counter (both mean an oracle did not answer); the third is
+  `changesUnobserved`, kept apart in the artifact because widening
+  `--steady` is a different remedy from retrying a flaky oracle. Unlike
+  every other entry on this list this one has a
   budget rather than a latch: an unresolved change is already excluded
   from `Applied`/`Effective`, so a tolerated one costs detection
   sensitivity on that one change, not the correctness of the verdict. The

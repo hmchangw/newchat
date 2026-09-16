@@ -1476,6 +1476,13 @@ Every violation carries `roomId`, and where applicable `msgId` / `users` /
 | `membership_add_ineffective` | After an add, a send from that user is still rejected by the gatekeeper | Gatekeeper authorization state not reflecting the new membership |
 | `membership_remove_ineffective` | After a remove, a send from that user is still accepted by the gatekeeper | Gatekeeper authorization state not reflecting the removal (stale allow) |
 
+The two `*_ineffective` checks only fire on a **definite** authorization
+answer: a success reply, or an errcode reply carrying the gatekeeper's
+`not_subscribed` reason. Any other errcode reply decided something else and
+leaves the change unresolved instead (see `unobserved` below) — treating it
+as "rejected" would have let a transient gatekeeper error satisfy the
+post-remove expectation and hide a real `membership_remove_ineffective`.
+
 ### Reading the output
 
 Console summary:
@@ -1502,14 +1509,25 @@ observed at all:
 membership:  22 changes (12 add, 10 remove) / 21 applied / 21 effective / 1 unobserved
 ```
 
-`unobserved` counts changes whose outcome the run never learned, from
-either of two causes:
+`unobserved` counts changes whose outcome the run never learned. A change
+is **resolved only when both of its oracles answered** — `subscription.list`
+(which feeds `applied`) and the authorization probe (which feeds
+`effective`) ask different questions and fail independently, so one
+answering is not "the change was checked". Three causes land here:
 
-- the backing `subscription.list` oracle query errored or timed out, so the
-  change was never checked either way (JSON: `oracleErrs`);
+- the backing `subscription.list` oracle query errored or timed out, so
+  `applied` was never decided (JSON: `oracleErrs`);
+- the authorization probe produced no authorization answer — no reply from
+  the gatekeeper, or an errcode reply that decided something *other* than
+  membership (an `internal`, a `bad_request`, a large-room refusal) — so
+  `effective` was never decided (JSON: `oracleErrs`). Only the gatekeeper's
+  `not_subscribed` reason is an answer about authorization;
 - the change was issued but still inside its settle window when the steady
   window ended, so it was dropped before either oracle ran (JSON:
   `changesUnobserved`).
+
+A change blinded by both oracles is charged **once**: the count is of
+changes, not of queries.
 
 The console clause shows their **sum**, which is what the verdict is
 computed from, so the line can never disagree with the `VERDICT:` below it.
@@ -1536,10 +1554,11 @@ not met, GC pressure, or cancellation — see `evaluateVerify` in
 Three of those deserve a note:
 
 - **Unresolved membership changes are tolerated up to `max(1, changes/10)`**
-  — one is always forgiven, then 10% of the changes issued. Failed oracle
-  queries and never-observed changes spend the *same* budget: both mean
-  "this change's outcome is unknown", and splitting the budget would let a
-  run hide nine of each behind two sub-tolerances. An unresolved change only
+  — one is always forgiven, then 10% of the changes issued. An oracle that
+  did not answer (either one) and a never-observed change spend the *same*
+  budget: both mean "this change's outcome is unknown", and splitting the
+  budget would let a run hide most of each behind separate
+  sub-tolerances. An unresolved change only
   blinds the one change it was checking, and that change is already excluded
   from `applied`/`effective`; discarding a whole run's clean delivery,
   leakage, exactly-once and persistence results over one transient timeout
@@ -1590,10 +1609,26 @@ Three of those deserve a note:
   The first two are the `no change was issued` wording; the third is the
   `resolved none of them` wording. With `--member-churn=0` a zero change
   count is the expected result and stays PASS-able.
-- **A membership-setup harness failure has no tolerance.** If the
-  `SubscribeRoom` of a just-added churn target fails, churn aborts: loadgen's
-  model and the system have diverged, and every later observation is
-  suspect. This is a loadgen-side fault, so its reason reads
+- **A membership-setup harness failure has no tolerance.** Churn aborts and
+  the run is INCONCLUSIVE when either of these happens, because loadgen's
+  model and the system may have diverged and every later observation is
+  suspect:
+
+  - the `SubscribeRoom` of a just-added churn target fails, so the added
+    user is unobservable;
+  - the `member.add` / `member.remove` RPC gets **no answer** (timeout,
+    lost reply). `room-service` may have committed the change anyway while
+    loadgen's model did not, and every later probe in that room would then
+    be judged against a stale expected set.
+
+  A server *refusal* is the opposite case and does **not** abort: an
+  errcode envelope means `room-service` answered and said no, so nothing
+  happened and nothing diverged. It is logged at Warn
+  (`member add rejected` / `member remove rejected`) and churn continues; a
+  run in which every change was refused is caught by the membership floor,
+  since `changes` stays 0.
+
+  This is a loadgen-side fault, so its reason reads
   `harness failed during membership setup: …` rather than naming the oracle
   — nothing was asked of `user-service` at all.
 

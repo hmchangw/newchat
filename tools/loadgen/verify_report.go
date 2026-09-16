@@ -19,10 +19,13 @@ type VerifyReport struct {
 	MultiplexDrops int64        `json:"multiplexDrops"`
 	Counts         ProbeCounts  `json:"counts"`
 	Changes        ChangeCounts `json:"changes"`
-	// OracleErrs is how many membership changes could not be observed because
-	// their oracle query failed. Reported even when under tolerance and so not
-	// affecting the verdict — otherwise a run's Applied count silently reads
-	// short of Total and looks like a membership bug that escaped its violation.
+	// OracleErrs is how many membership changes could not be resolved because
+	// an oracle did not answer — subscription.list failing, or the
+	// authorization probe returning no usable decision (a change is resolved
+	// only when both answered). Reported even when under tolerance and so not
+	// affecting the verdict — otherwise a run's Applied/Effective counts
+	// silently read short of Total and look like a membership bug that escaped
+	// its violation.
 	OracleErrs int `json:"oracleErrs"`
 	// ChangesUnobserved is how many changes were issued but still inside their
 	// settle window when the steady window ended, so neither oracle ran. Kept
