@@ -376,7 +376,7 @@ func main() {
 	// rollback-asymmetry note above. The one tolerated failure is the stream
 	// simply not being provisioned while the lane is off: phase 1 ships dark,
 	// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
-	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, cfg.Retry)
+	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, &cfg.Retry)
 	retryConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
 		Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
@@ -500,18 +500,18 @@ func main() {
 	// in which case nothing can be parked there to drain.
 	var retryIter o11ynats.MessagesContext
 	if retryCons != nil {
-		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.Retry.Consumer.MaxWorkers))
 		if err != nil {
 			slog.Error("retry messages failed", "error", err)
 			os.Exit(1)
 		}
 		retryConsumerMetrics.LoopStarted(ctx)
-		// The retry-lane worker budget deliberately mirrors the hot lane's MaxWorkers rather
-		// than getting its own knob: by the time a message reaches RETRY it has already spent
-		// its low-latency fast budget (~6s across the default 3 fast rungs), so the retry
-		// lane's job is no longer to stay sub-second — it's to keep draining without a second,
-		// independently-tuned concurrency budget to reason about at 3am.
-		natsmetrics.Start(ctx, retryIter, retryConsumerMetrics, cfg.MaxWorkers, retryConsumerCfg.MaxDeliver, &wg,
+		// Sized off RETRY_CONSUMER_MAX_WORKERS (default 10), not the hot loop's
+		// MAX_WORKERS: both loops run in this process, so reusing MaxWorkers would make
+		// the in-flight cap 2×MaxWorkers exactly during the incident that fills the retry
+		// lane. natsmetrics.Start gives it its own semaphore, never shared with the hot
+		// loop — sharing one would let a retry backlog starve live deliveries of slots.
+		natsmetrics.Start(ctx, retryIter, retryConsumerMetrics, cfg.Retry.Consumer.MaxWorkers, retryConsumerCfg.MaxDeliver, &wg,
 			func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 			guardedProcessor(retryProcessor(handler, slowBackoff)))
 	}

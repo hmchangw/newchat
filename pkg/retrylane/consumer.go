@@ -44,8 +44,16 @@ type Settings struct {
 // MaxAckPending defaults high: this lane deliberately holds the long waits,
 // sized for ~5 escalations/s against ~720s of slow-rung occupancy.
 // MaxDeliver counts retry-lane attempts only.
+//
+// MaxWorkers is the mirror image, and deliberately small. The retry loop runs
+// in the SAME process as the hot loop, so sizing it off the hot lane's
+// MAX_WORKERS would make the process-wide in-flight cap 2×MaxWorkers — reached
+// precisely during the incident that fills the retry lane. It also doubles as
+// the recovery-herd damper: when a dependency comes back, the parked backlog
+// drains at a bounded rate instead of stampeding it.
 type ConsumerSettings struct {
 	AckWait       time.Duration `env:"ACK_WAIT"        envDefault:"30s"`
+	MaxWorkers    int           `env:"MAX_WORKERS"     envDefault:"10"`
 	MaxDeliver    int           `env:"MAX_DELIVER"     envDefault:"3"`
 	MaxWaiting    int           `env:"MAX_WAITING"     envDefault:"512"`
 	MaxAckPending int           `env:"MAX_ACK_PENDING" envDefault:"4000"`
@@ -102,8 +110,9 @@ func jsretryFallback() []time.Duration {
 // ConsumerConfig is the retry lane's durable consumer for one service, filtered
 // to its own escalations. Built through stream.DurableConsumerDefaults so the
 // derived BackOff and AckWait cannot disagree (a hardcoded cc.BackOff is a
-// blocking semgrep finding).
-func ConsumerConfig(siteID, consumer string, s Settings) jetstream.ConsumerConfig {
+// blocking semgrep finding). s is read-only, taken by pointer only because
+// Settings is large enough to copy needlessly.
+func ConsumerConfig(siteID, consumer string, s *Settings) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s.Consumer.streamSettings())
 	cc.Durable = DurableName(consumer)
 	cc.FilterSubjects = []string{subject.RetryConsumerWildcard(siteID, consumer)}

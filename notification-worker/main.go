@@ -250,7 +250,7 @@ func main() {
 	// rollback-asymmetry note above. The one tolerated failure is the stream
 	// simply not being provisioned while the lane is off: phase 1 ships dark,
 	// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
-	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, cfg.Retry)
+	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, &cfg.Retry)
 	retryConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
 		Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
@@ -451,14 +451,19 @@ func main() {
 	// the lane is off and the stream is unprovisioned — nothing can be parked there.
 	var retryIter o11ynats.MessagesContext
 	if retryCons != nil {
-		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.Retry.Consumer.MaxWorkers))
 		if err != nil {
 			slog.Error("retry messages failed", "error", err)
 			os.Exit(1)
 		}
 		retryConsumerMetrics.LoopStarted(ctx)
 
-		retrySem := make(chan struct{}, cfg.MaxWorkers)
+		// Sized off RETRY_CONSUMER_MAX_WORKERS (default 10), not the hot loop's
+		// MAX_WORKERS: both loops run in this process, so reusing MaxWorkers would make
+		// the in-flight cap 2×MaxWorkers exactly during the incident that fills the retry
+		// lane. Its own semaphore, never shared with the hot loop — sharing one would let
+		// a retry backlog starve live deliveries of slots.
+		retrySem := make(chan struct{}, cfg.Retry.Consumer.MaxWorkers)
 
 		wg.Add(1)
 		go func() {

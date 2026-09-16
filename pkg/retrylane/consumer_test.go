@@ -64,7 +64,7 @@ func TestConsumerConfigFiltersToItsOwnConsumer(t *testing.T) {
 			MaxAckPending: 4000, BackOffSteps: 3, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
 		},
 	}
-	cfg := retrylane.ConsumerConfig("site1", "message-worker", s)
+	cfg := retrylane.ConsumerConfig("site1", "message-worker", &s)
 
 	assert.Equal(t, "message-worker-retry", cfg.Durable)
 	assert.Equal(t, []string{"chat.retry.site1.message-worker.>"}, cfg.FilterSubjects,
@@ -121,4 +121,31 @@ func TestSkipMissingStream(t *testing.T) {
 				retrylane.SkipMissingStream(context.Background(), "RETRY-site1", tt.enabled, tt.err))
 		})
 	}
+}
+
+func TestSettingsConsumerMaxWorkersDefaultsThroughEnvParse(t *testing.T) {
+	cfg, err := env.ParseAs[wrapperConfig]()
+	require.NoError(t, err)
+
+	assert.Equal(t, 10, cfg.Retry.Consumer.MaxWorkers,
+		"spec §4: deliberately small — it doubles as the recovery-herd damper, "+
+			"and the retry loop runs in the same process as the hot loop")
+}
+
+func TestSettingsConsumerMaxWorkersOverrideSurvivesEnvParse(t *testing.T) {
+	t.Setenv("RETRY_CONSUMER_MAX_WORKERS", "42")
+
+	cfg, err := env.ParseAs[wrapperConfig]()
+	require.NoError(t, err)
+
+	assert.Equal(t, 42, cfg.Retry.Consumer.MaxWorkers, "an operator override must survive")
+}
+
+func TestSettingsConsumerMaxWorkersIsNotTheHotLaneDefault(t *testing.T) {
+	cfg, err := env.ParseAs[wrapperConfig]()
+	require.NoError(t, err)
+
+	assert.NotEqual(t, 100, cfg.Retry.Consumer.MaxWorkers,
+		"reusing the hot loop's MAX_WORKERS default would make the process-wide "+
+			"in-flight cap 2×MaxWorkers, reached precisely during an incident")
 }

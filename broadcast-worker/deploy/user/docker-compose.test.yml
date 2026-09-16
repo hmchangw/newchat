@@ -43,6 +43,10 @@ services:
       - RETRY_LANE_ENABLED=${RETRY_LANE_ENABLED:-false}
       - RETRY_CONSUMER_MAX_ACK_PENDING=${RETRY_CONSUMER_MAX_ACK_PENDING:-4000}
       - RETRY_CONSUMER_MAX_DELIVER=${RETRY_CONSUMER_MAX_DELIVER:-3}
+      # Deliberately small, and separate from MAX_WORKERS: the retry loop runs in the
+      # same process as the hot loop, so reusing MAX_WORKERS would double the in-flight
+      # cap during an incident. It also damps the recovery herd when a dependency returns.
+      - RETRY_CONSUMER_MAX_WORKERS=${RETRY_CONSUMER_MAX_WORKERS:-10}
       # No ATREST_ENABLED here, unlike deploy/{user,bot}/docker-compose.yml: this
       # harness runs no Vault, and the worker exits on startup if it cannot reach one.
       # Previews are therefore off for these scenarios, which is what we want — they

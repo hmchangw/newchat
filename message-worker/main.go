@@ -374,7 +374,7 @@ func main() {
 	)
 	if cfg.Mode == "default" {
 		retryStreamCfg := stream.Retry(cfg.SiteID)
-		retryConsumerCfg = retrylane.ConsumerConfig(cfg.SiteID, defaultConsumerDurable, cfg.Retry)
+		retryConsumerCfg = retrylane.ConsumerConfig(cfg.SiteID, defaultConsumerDurable, &cfg.Retry)
 		retryConsumerMetrics = sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 			Site:   cfg.SiteID,
 			Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
@@ -398,14 +398,19 @@ func main() {
 		// plain jsretry.Settle on the slow-rung schedule relocated off the hot consumer.
 		slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)
 
-		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.Retry.Consumer.MaxWorkers))
 		if err != nil {
 			slog.Error("retry messages failed", "error", err)
 			os.Exit(1)
 		}
 		retryConsumerMetrics.LoopStarted(ctx)
 
-		retrySem := make(chan struct{}, cfg.MaxWorkers)
+		// Sized off RETRY_CONSUMER_MAX_WORKERS (default 10), not the hot loop's
+		// MAX_WORKERS: both loops run in this process, so reusing MaxWorkers would make
+		// the in-flight cap 2×MaxWorkers exactly during the incident that fills the retry
+		// lane. Its own semaphore, never shared with the hot loop — sharing one would let
+		// a retry backlog starve live deliveries of slots.
+		retrySem := make(chan struct{}, cfg.Retry.Consumer.MaxWorkers)
 
 		wg.Add(1)
 		go func() {

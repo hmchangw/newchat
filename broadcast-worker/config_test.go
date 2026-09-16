@@ -202,6 +202,10 @@ func TestConfigRetryLaneDefaultsOff(t *testing.T) {
 	assert.Equal(t, 3, cfg.Retry.FastSteps)
 	assert.Equal(t, 4000, cfg.Retry.Consumer.MaxAckPending,
 		"the retry lane holds the long waits and needs its own large budget")
+	assert.Equal(t, 10, cfg.Retry.Consumer.MaxWorkers,
+		"spec §4: RETRY_CONSUMER_MAX_WORKERS is deliberately small — it doubles as the recovery-herd damper")
+	assert.NotEqual(t, cfg.MaxWorkers, cfg.Retry.Consumer.MaxWorkers,
+		"the two loops run in one process: reusing the hot lane's budget would double the in-flight cap")
 }
 
 // TestRetryLaneUsesLowLatencyScheduleNotDefault pins broadcast-worker's fast/slow
