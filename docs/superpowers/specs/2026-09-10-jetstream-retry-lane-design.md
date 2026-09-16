@@ -38,13 +38,14 @@ strictly worse: every added second is occupancy multiplied by the failure rate.
 Keep the retry budget exactly as it is (12.6 minutes, five spaced attempts) but **move the
 long waits off the hot lane**:
 
-- fast rungs stay in place — `DefaultBackoff[:3]` = `{1s, 5s, 30s}` = **36s occupancy**
+- fast rungs stay in place — `DefaultBackoff[:3]` = `{1s, 5s, 30s}` = **36s occupancy** (schedule-specific: on `LowLatencyBackoff`, `[:3]` = `{200ms, 1s, 5s}` = **6.2s**)
 - slow rungs move to a retry lane — `DefaultBackoff[3:]` = `{2m, 10m}` = 12 minutes
 - terminal failures land in a dead-letter stream instead of vanishing
 
-Hot-lane occupancy drops 756s → 36s, so the sustainable failure rate rises from ~1.3/s to
-**~27/s** (`1000/36`). The total patience per message is unchanged, which makes the change
-easy to reason about and to roll back.
+On `DefaultBackoff` hot-lane occupancy drops 756s → 36s, so the sustainable failure rate
+rises from ~1.3/s to **~27/s** (`1000/36`). On `LowLatencyBackoff` the same 3-step split
+drops 66.2s → 6.2s (~15/s → ~161/s). The total patience per message is unchanged, which
+makes the change easy to reason about and to roll back.
 
 ## 3. Design
 
@@ -155,7 +156,10 @@ The lane is therefore opt-in, and excluded from:
 
 These keep their current semantics unchanged. First adopters are the concurrent hot-path
 workers where order is already not guaranteed: `message-worker`, `broadcast-worker`,
-`notification-worker`.
+`notification-worker`. The three are not equivalent adopters, though: `broadcast-worker`
+runs `LowLatencyBackoff`, so its occupancy was 66.2s rather than 756s (~15 failures/s
+sustainable) and it never had the stall this spec describes — the lane still buys it ~10×
+headroom, but as insurance rather than as a fix for a live problem.
 
 ### 3.7 The content rule
 
@@ -370,7 +374,7 @@ Three alerts, with distinct meanings:
 
 | Signal | Means | Fires at |
 |---|---|---|
-| Escalation rate | An incident is in progress | **~36s** |
+| Escalation rate | An incident is in progress | **~36s** (`DefaultBackoff`) / **~6s** (`LowLatencyBackoff`) |
 | Untriaged count in Mongo | Real dead letters awaiting a human | ~13 min |
 | DLQ **stream** depth / oldest age | The drain worker is broken, or Mongo is down | drain-dependent |
 

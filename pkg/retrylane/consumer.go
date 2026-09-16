@@ -23,8 +23,11 @@ type Settings struct {
 	// escalations; the retry consumer keeps draining what is already parked.
 	Enabled bool `env:"LANE_ENABLED" envDefault:"false"`
 
-	// FastSteps is how many deliveries stay on the hot lane. 3 leaves
-	// {1s,5s,30s} = 36s of ack-pending occupancy instead of 756s.
+	// FastSteps is how many deliveries stay on the hot lane. The occupancy it
+	// leaves in place is schedule-specific, not a universal 36s: on
+	// jsretry.DefaultBackoff ({1s,5s,30s,2m,10m}) 3 steps leave 36s instead of
+	// 756s; on jsretry.LowLatencyBackoff ({200ms,1s,5s,30s}) — which
+	// broadcast-worker runs — they leave 6.2s instead of 66.2s.
 	FastSteps int `env:"LANE_FAST_STEPS" envDefault:"3"`
 
 	// Consumer tunes the retry lane's own durable, envPrefix RETRY_CONSUMER_.

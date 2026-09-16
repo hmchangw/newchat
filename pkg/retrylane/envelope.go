@@ -7,10 +7,15 @@
 // ~200s and the consumer stops delivering anything, healthy messages included
 // — the stall arrives long before the MaxDeliver drop does.
 //
-// This package keeps the fast rungs in place (~36s) and republishes the
-// message onto RETRY-{siteID} when they are spent, where a second per-service
-// consumer runs the same handler on the slow rungs. The total retry budget is
-// unchanged; only the ack-pending occupancy moves.
+// This package keeps the fast rungs in place and republishes the message onto
+// RETRY-{siteID} when they are spent, where a second per-service consumer runs
+// the same handler on the slow rungs. The total retry budget is unchanged; only
+// the ack-pending occupancy moves.
+//
+// How much occupancy stays behind depends on the schedule, so the "~36s" figure
+// is DefaultBackoff's, not a universal one: the fast rungs are 36s on
+// jsretry.DefaultBackoff ({1s,5s,30s}) and 6.2s on jsretry.LowLatencyBackoff
+// ({200ms,1s,5s}), which broadcast-worker runs.
 package retrylane
 
 import (
