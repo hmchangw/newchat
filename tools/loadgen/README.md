@@ -1368,6 +1368,384 @@ run:
 - `docs/superpowers/plans/2026-05-27-daily-im-load-scenario.md` — implementation plan (file structure, task decomposition).
 - `tools/loadgen/daily.go`, `daily_pool.go`, `daily_actions.go`, `daily_verdict.go`, `daily_report.go`, `preset.go` — implementation.
 
+## Verify scenario (correctness check)
+
+Runs the daily-IM fixture set as a correctness probe instead of a capacity
+ramp: it samples a fraction of sends into a fixed set of "probe rooms",
+tracks each probe's expected recipient set, and asserts on delivery
+completeness, leakage, persistence, and membership-change effectiveness. The
+output answers:
+
+> *Does the system deliver every message to every expected recipient,
+> nowhere else, persist it correctly, and apply membership changes
+> effectively?*
+
+Single-site only. Not a CI gate — invoked manually as a correctness check
+against a running stack.
+
+**This feature has not been run end-to-end.** See
+[Not yet validated end-to-end](#not-yet-validated-end-to-end) before you rely
+on any FAIL it reports.
+
+### Table of contents
+
+1. [Quick start](#quick-start-8)
+2. [Prerequisites](#prerequisites-1)
+3. [CLI flags](#cli-flags-1)
+4. [Violation classes](#violation-classes)
+5. [Reading the output](#reading-the-output-2)
+6. [Not yet validated end-to-end](#not-yet-validated-end-to-end)
+7. [Known limitations](#known-limitations-1)
+8. [Design references](#design-references-1)
+
+### Quick start
+
+```bash
+# 1. Bring up the docker-local stack (NATS, Mongo, Valkey, Cassandra, all services).
+make -C tools/loadgen/deploy up
+
+# 2. Seed Mongo for your preset — verify reuses daily's fixtures and preflight.
+make -C tools/loadgen/deploy seed PRESET=daily-heavy
+
+# 3. Run the correctness check.
+make -C tools/loadgen/deploy run-verify PRESET=daily-heavy
+```
+
+### Prerequisites
+
+| Requirement | Why | How to get it |
+|---|---|---|
+| Docker-local stack running | `verify` talks to the same services `daily` does (gatekeeper, room-service, broadcast-worker, message-worker, history-service) | `make -C tools/loadgen/deploy up` |
+| Mongo seeded for the exact preset | `verify` runs the same seeded-database preflight `daily` does (`verifyDailySeeded`) — there is **no NATS-only smoke-test mode**; an unseeded or wrong-preset DB fails preflight in seconds rather than producing a confident FAIL | `loadgen seed --workload=messages --preset=<preset>` (or `make -C tools/loadgen/deploy seed PRESET=<preset>`) |
+| `--large-room-threshold` matching the gatekeeper's `LARGE_ROOM_THRESHOLD` | **Nothing queries the gatekeeper to check this.** The flag is trusted, not verified — preflight only checks the flag's value against fixture room sizes, not against the running gatekeeper's actual config | Read the gatekeeper's real `LARGE_ROOM_THRESHOLD` and pass it explicitly if it differs from the default `500` |
+| Same environment variables as `daily` (`NATS_URL`, `NATS_CREDS_FILE`, `MONGO_URI`/`MONGO_DB`, `SITE_ID`) | Same connections, same preflight | See [daily's Environment variables](#environment-variables) |
+
+Three things worth repeating because they will bite an operator immediately:
+
+- **`--large-room-threshold` is trusted, not checked.** If it doesn't match the gatekeeper's actual `LARGE_ROOM_THRESHOLD`, probe rooms near the boundary will produce phantom `total_loss`/`missing_recipient` violations that have nothing to do with a real bug.
+- **There is no NATS-only smoke-test mode.** `MONGO_URI` must be reachable — `verify` runs the identical seeded-database preflight `daily` uses before it will start.
+- **Fixtures are pinned to seed 42 regardless of `--seed`.** `--seed` only drives probe-room and probe selection (so a run is reproducible), not fixture generation — that's hard-coded to the same seed `loadgen seed` uses. If you seeded the database with `loadgen seed --seed=<something else>`, the probe rooms `verify` selects and the ones actually in Mongo will disagree, producing a confident FAIL on a healthy system.
+
+### CLI flags
+
+`loadgen verify -h` prints the same:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--preset` | `daily-heavy` | `daily-light` \| `daily-heavy` \| `daily-power` |
+| `--users` | `0` | Overrides `preset.Users` (`0` = preset default). **Must match `loadgen seed --users` if you used it** — it changes the generated fixture population, not just how many users are activated. A mismatch is caught by preflight with a user-count error rather than producing phantom violations |
+| `--probe-rooms` | `50` | Number of probe rooms selected deterministically from `--seed` |
+| `--reserve-users` | `200` | Direct-connected floaters used as membership-change targets |
+| `--member-churn` | `0.2` | Membership changes per probe room per minute (`0` disables churn). Above `0`, a run that issues **no** change is INCONCLUSIVE — see the membership floor below |
+| `--settle` | `5s` | Post-change quiet window per room before probes resume counting toward that room. A per-room mutation barrier already suppresses probes from before the membership RPC until the change is applied, so this window covers only the interval after it. Also sets the churn tailroom, `max(10s, --settle + 10s)`, which `--steady` must exceed |
+| `--warmup` | `30s` | Pre-measurement settle before probes start being tracked |
+| `--steady` | `120s` | Probe-generating window. Must exceed the churn tailroom or no membership change is ever issued (INCONCLUSIVE) |
+| `--drain` | `30s` | Post-quiesce wait for in-flight probes to resolve |
+| `--probe-rate` | `0.01` | Fraction of probe-room sends tracked for full per-recipient accounting |
+| `--min-probes` | `50` | Below this tracked-probe count, the verdict is INCONCLUSIVE instead of PASS/FAIL |
+| `--large-room-threshold` | `500` | Must match the gatekeeper's `LARGE_ROOM_THRESHOLD` — see [Prerequisites](#prerequisites-1); **not verified against the running gatekeeper** |
+| `--lane` | `both` | `global` \| `local` \| `both` — which room-broadcast lane(s) the direct pool subscribes |
+| `--direct-only` | `false` | Disable multiplex; every activated user gets a dedicated connection. Unlike `daily`, `verify` **fails preflight** rather than silently skipping users past `--max-direct-users`, since a silently-absent recipient corrupts the completeness verdict |
+| `--seed` | `42` | Drives probe-room choice and probe selection — same seed ⇒ same probe set. Does **not** reseed fixtures (see [Prerequisites](#prerequisites-1)) |
+| `--json` | `""` | Path to write the full, uncapped violation report as JSON |
+
+Example:
+
+```bash
+loadgen verify \
+  --preset=daily-heavy \
+  --probe-rooms=50 --member-churn=0.2 \
+  --warmup=30s --steady=120s --drain=30s \
+  --json=/results/verify.json
+```
+
+### Violation classes
+
+Every violation carries `roomId`, and where applicable `msgId` / `users` /
+`epoch` / a `detail` string — IDs only, never message content.
+
+| Kind | What it means | Points at |
+|---|---|---|
+| `missing_recipient` | Some, but not all, expected recipients of a probe received it (a full miss is `total_loss` instead) — `Users` lists exactly which expected recipients were missed | `broadcast-worker` fan-out, or an affected member's own connection |
+| `total_loss` | Zero recipients received the probe at all | The publish→broadcast pipeline end-to-end (gatekeeper, MESSAGES-CANONICAL, `broadcast-worker`), or a room with no live receivers |
+| `duplicate_delivery` | A recipient received the same probe more than once **on a single lane**. Checked on every lane (global, local, per-user): one arrival per subscribed lane is expected — rooms are subscribed on both room lanes to stay `ROOM_SUBJECT_MODE`-agnostic — but two arrivals on the same lane are not | `broadcast-worker`/JetStream redelivery, or a duplicate publish |
+| `unexpected_recipient` | A non-member received the probe on the per-user lane (leakage) — see [Known limitations](#known-limitations-1), this check only runs on that lane | Authorization/routing sending a message to a user it shouldn't have addressed |
+| `persistence_miss` | The sent message ID was not found on readback from history-service after the retry budget | `message-worker` failing to persist to Cassandra, or the history-service read path |
+| `persistence_mismatch` | The message was found on readback but a field (e.g. sender, thread parent) doesn't match what was sent | `message-worker` corrupting a field on write |
+| `membership_not_applied` | After an add/remove and its settle window, the `subscription.list` oracle still reports the pre-change membership state | `room-service`/`room-worker` failing to durably apply the membership change |
+| `membership_add_ineffective` | After an add, a send from that user is still rejected by the gatekeeper | Gatekeeper authorization state not reflecting the new membership |
+| `membership_remove_ineffective` | After a remove, a send from that user is still accepted by the gatekeeper | Gatekeeper authorization state not reflecting the removal (stale allow) |
+
+A delivery is credited to a probe only when the room named in the event
+payload is the room the probe was published into. A broadcast carrying a
+probe's message ID but encoded for a **different** room is refused credit
+and counted as `crossRoom` — it raises no violation kind of its own (the
+nine above are the whole set), and the probe then reports
+`missing_recipient` for the room it was actually sent to, which is the
+honest observation. See `N cross-room (credit refused)` below.
+
+The two `*_ineffective` checks only fire on a **definite** authorization
+answer: a success reply, or an errcode reply carrying the gatekeeper's
+`not_subscribed` reason. Any other errcode reply decided something else and
+leaves the change unresolved instead (see `unobserved` below) — treating it
+as "rejected" would have let a transient gatekeeper error satisfy the
+post-remove expectation and hide a real `membership_remove_ineffective`.
+
+### Reading the output
+
+Console summary:
+
+```
+probe rooms: 50 / 1200 members / direct pool 1400 (200 reserve)
+background:  8600 users on multiplex (1204 dropped — inbox full, not a probe signal)
+probes:      612 tracked / 8 suppressed (churn)
+delivery:    608 complete / 3 partial / 1 total-loss
+leakage:     0 unexpected recipients (user lane)
+membership:  24 changes (14 add, 10 remove) / 24 applied / 24 effective
+
+VIOLATIONS (showing 4 of 4)
+  missing_recipient              room=room-medium-000042 msg=m-abc123 users=u-000091
+  total_loss                     room=room-small-000017 msg=m-def456
+
+VERDICT: FAIL
+```
+
+The `delivery:` line grows a clause when a delivery carried a tracked
+message ID but named some other room:
+
+```
+delivery:    605 complete / 6 partial / 1 total-loss / 2 cross-room (credit refused)
+```
+
+Those two deliveries were **not** counted toward their probes — crediting a
+cross-room delivery would let a run PASS despite a misrouted broadcast
+wherever the two rooms' member sets overlap. The probe's own outcome stays
+honest (`missing_recipient` for the room it was really sent to), and this
+clause is the only place the refusal is visible, so it is omitted entirely
+at zero. JSON: `counts.crossRoom`.
+
+The `membership:` line grows a fourth clause when some changes could not be
+observed at all:
+
+```
+membership:  22 changes (12 add, 10 remove) / 21 applied / 21 effective / 1 unobserved
+```
+
+`unobserved` counts changes whose outcome the run never learned. A change
+is **resolved only when both of its oracles answered** — `subscription.list`
+(which feeds `applied`) and the authorization probe (which feeds
+`effective`) ask different questions and fail independently, so one
+answering is not "the change was checked". Three causes land here:
+
+- the backing `subscription.list` oracle query errored or timed out, so
+  `applied` was never decided (JSON: `oracleErrs`);
+- the authorization probe produced no authorization answer — no reply from
+  the gatekeeper, or an errcode reply that decided something *other* than
+  membership (an `internal`, a `bad_request`, a large-room refusal) — so
+  `effective` was never decided (JSON: `oracleErrs`). Only the gatekeeper's
+  `not_subscribed` reason is an answer about authorization;
+- the change was issued but still inside its settle window when the steady
+  window ended, so it was dropped before either oracle ran (JSON:
+  `changesUnobserved`).
+
+A change blinded by both oracles is charged **once**: the count is of
+changes, not of queries.
+
+The console clause shows their **sum**, which is what the verdict is
+computed from, so the line can never disagree with the `VERDICT:` below it.
+The JSON report keeps the two apart, because the fixes differ — a flaky
+oracle means retry the run, a truncated one means widen `--steady`. Either
+way those changes are excluded from `applied` and `effective`, which is why
+those two read short of `changes`; without this clause the same line is
+indistinguishable from a real `membership_not_applied` that escaped its
+violation. The clause is omitted entirely when both counts are zero.
+
+Changes still pending when the window closes are counted, never harvested
+late: their settle window genuinely has not elapsed, so observing them would
+judge a change the system is still allowed to be applying. The tool records
+that it could not judge them rather than guessing.
+
+An INCONCLUSIVE run prints a `REASONS` block instead of (or in addition to)
+`VIOLATIONS`, naming which signal made the run untrustworthy (dropped
+recipient connection, slow consumer on a recipient connection, readback
+error, membership-setup harness failure, too many unresolved membership
+changes, membership never exercised, probe floor not met, GC pressure, or
+cancellation — see `evaluateVerify` in
+`tools/loadgen/verify_verdict.go`). The console violation list is capped at
+10; pass `--json=<path>` for the full, uncapped report.
+
+Four of those deserve a note:
+
+- **A slow consumer on a recipient connection is a harness fault, and the
+  run says so.** Each verify recipient holds its own NATS connection with a
+  bounded pending queue per subscription; when one overflows, nats.go drops
+  deliveries and reports `ErrSlowConsumer`. A dropped delivery is
+  indistinguishable from one the system never sent, so without this signal
+  the run would report `missing_recipient` (or `total_loss`) against the
+  system for load the harness itself could not keep up with. It is a latch,
+  not a budget: one slow consumer means at least one delivery was lost to
+  the load box. Drops during the end-of-run drain do not count, and neither
+  do drops on a connection that never finished joining the pool. If it
+  fires, give the load box more headroom or lower `--users` / the preset's
+  send rate. `daily` is unaffected — it never reads the counter.
+- **Unresolved membership changes are tolerated up to `max(1, changes/10)`**
+  — one is always forgiven, then 10% of the changes issued. An oracle that
+  did not answer (either one) and a never-observed change spend the *same*
+  budget: both mean "this change's outcome is unknown", and splitting the
+  budget would let a run hide most of each behind separate
+  sub-tolerances. An unresolved change only
+  blinds the one change it was checking, and that change is already excluded
+  from `applied`/`effective`; discarding a whole run's clean delivery,
+  leakage, exactly-once and persistence results over one transient timeout
+  confused "we could not check this change" with "we cannot trust this run".
+  Past the budget the reason names the sum, the total, the tolerance and the
+  breakdown — `7 of 22 membership changes unresolved (tolerance 2): 3 oracle
+  queries failed, 4 never observed: …` — so a single blip is distinguishable
+  from a service that was down for the whole run, and a flaky oracle from a
+  truncated run. Every individual oracle failure is also logged (`membership
+  oracle query failed`, with room and user), and a truncated window logs
+  `membership changes left unobserved when churn stopped`. The tolerance is
+  a constant, not a flag.
+- **`--member-churn > 0` with no change *resolved* is INCONCLUSIVE.** This
+  is the membership analogue of the `--min-probes` floor: if the run never
+  learned the outcome of a single add or remove, it has nothing to say
+  about membership and must not report that dimension as clean. It fires
+  regardless of violations, like every other trust signal.
+
+  Note it asks about resolution, not issuance — a change whose outcome
+  nobody learned teaches exactly as much as one never issued. That is also
+  why the floor is not redundant with the tolerance: at `changes = 1` the
+  tolerance is `max(1, 0) = 1`, so one unresolved change sits inside the
+  budget and emits no reason, and only the floor catches that the run
+  resolved nothing. Conversely one resolved change out of twenty clears the
+  floor — a thin signal is still a signal, and judging thinness is the
+  tolerance's job. Three causes reach it, and the reason distinguishes
+  them, because the fixes differ:
+  - `--steady` did not exceed the **churn tailroom**, `max(10s, --settle +
+    10s observation budget)`. The tailroom is reserved so the last change
+    issued still gets its full settle window plus its two observations
+    inside the run; when it equals or exceeds `--steady`, the issue window
+    is empty and nothing is ever issued. `--steady=30s --settle=20s` is
+    exactly this case (tailroom 30s). A `steady window too short for
+    membership churn` warning is logged at startup, but a warning nobody
+    reads is not a verdict — hence the floor. Fix by raising `--steady`
+    (the `120s` default clears a `5s` default `--settle` comfortably) or
+    lowering `--settle`.
+  - every add/remove was rejected server-side. `applyChange` logs each at
+    Warn (`member add rejected` / `member remove rejected`) and counts
+    nothing.
+  - changes *were* issued, but every one of them was unresolved — its
+    oracle query failed, or it was still inside its settle window when the
+    steady window closed. This one reads differently in the report
+    (`issued N changes and resolved none of them`), because nothing here is
+    a flag problem: look at `user-service` and at whether the run was cut
+    short, not at `--steady`.
+
+  The first two are the `no change was issued` wording; the third is the
+  `resolved none of them` wording. With `--member-churn=0` a zero change
+  count is the expected result and stays PASS-able.
+- **A membership-setup harness failure has no tolerance.** Churn aborts and
+  the run is INCONCLUSIVE when either of these happens, because loadgen's
+  model and the system may have diverged and every later observation is
+  suspect:
+
+  - the `SubscribeRoom` of a just-added churn target fails, so the added
+    user is unobservable;
+  - the `member.add` / `member.remove` RPC gets **no answer** (timeout,
+    lost reply). `room-service` may have committed the change anyway while
+    loadgen's model did not, and every later probe in that room would then
+    be judged against a stale expected set.
+
+  A server *refusal* is the opposite case and does **not** abort: an
+  errcode envelope means `room-service` answered and said no, so nothing
+  happened and nothing diverged. It is logged at Warn
+  (`member add rejected` / `member remove rejected`) and churn continues; a
+  run in which every change was refused is caught by the membership floor,
+  since `changes` stays 0.
+
+  This is a loadgen-side fault, so its reason reads
+  `harness failed during membership setup: …` rather than naming the oracle
+  — nothing was asked of `user-service` at all.
+
+The multiplex drop count on the `background:` line is **load context, not a
+trust signal** — it never makes a run INCONCLUSIVE. The multiplex pool's
+per-user inbox channels are write-only: nothing consumes them, so a full
+inbox is their normal steady state under load (`daily` has always behaved
+this way). Preflight refuses to start unless every probe-room member is in
+the *direct* pool, so a multiplex user is never an expected probe recipient
+and a drop there cannot touch probe accounting. A default run with
+thousands of background drops still reports PASS when no violations were
+recorded; `--direct-only` is not needed to reach PASS.
+
+**Exit codes** (so the run can be scripted without parsing stdout):
+
+| Verdict | Exit code |
+|---|---|
+| PASS | `0` |
+| FAIL | `1` |
+| INCONCLUSIVE | `2` |
+
+INCONCLUSIVE takes precedence over FAIL: if any trust signal fired, the
+verdict is INCONCLUSIVE even when violations were also recorded (they're
+still listed, but the run's own reliability is the reported problem).
+
+### Not yet validated end-to-end
+
+Every component behind `loadgen verify` is unit-tested — the `tools/loadgen`
+package suite passes under `-race` — but **the assembled command has never
+been run against a live docker-compose stack.** Ten tasks of independently
+reviewed, unit-tested components were wired together in the final task and
+have not yet executed end-to-end, because Docker was unavailable in the
+environment that built them.
+
+Practical consequences for the first operator to run this:
+
+- Expect setup friction — a flag interaction, an env var, or a timing
+  assumption that unit tests couldn't exercise.
+- Treat an unexpected FAIL as suspect until a known-healthy run has produced
+  a PASS at least once. Check the [Prerequisites](#prerequisites-1) footguns
+  above first — a seed mismatch or a wrong `--large-room-threshold` produces
+  a FAIL that looks exactly like a real bug.
+- The resource estimates in the design spec (§6.3) are unmeasured — treat
+  `--probe-rooms`, `--reserve-users`, and direct-pool sizing as starting
+  points, not validated numbers.
+
+### Known limitations
+
+- **Probe sampling means most traffic is unverified.** At the default
+  `--probe-rate=0.01`, roughly 99% of sends get no per-recipient accounting
+  at all — only the sampled 1% get full delivery/leakage/persistence
+  checking. This bounds tracking cost (§5 of the design spec); it also means
+  a real defect that only affects unsampled traffic will not be caught.
+- **Message ordering is not checked**, for regular sends or for membership
+  changes. Membership asserts final state after the settle window, not that
+  changes applied in the order issued.
+- **Leakage (`unexpected_recipient`) is checked on the per-user lane only.**
+  On the room (channel) lane, loadgen's own `backend.creds` can always stay
+  subscribed regardless of membership, so a room-lane leakage check would
+  fail on every run and test NATS ACLs rather than the chat system. Channel
+  rooms are exempt.
+- **Only the payload room is matched, not the subscribed one.** A delivery
+  must name the probe's room to be credited, but the room is read from the
+  event payload — the subject the delivery actually arrived on is not
+  compared against it, so a broadcast published to the wrong subject with a
+  correct payload is not detected as misrouting. Threading the subscribed
+  room through would widen the delivery sink for a signal the per-user lane
+  cannot supply at all (it is addressed per account, not per room).
+- **Single-site only.** Cross-site federation (INBOX/OUTBOX) is out of
+  scope, same as `daily`.
+- **`--lane=global` against a `ROOM_SUBJECT_MODE=local` stack yields zero
+  deliveries.** The direct pool only subscribes the lane(s) requested;
+  pointing `verify` at the wrong lane for your stack's configured mode
+  produces a confident FAIL — every probe reports `total_loss` — that looks
+  like a real bug. Leave `--lane=both` (the default) unless you know your
+  stack's `ROOM_SUBJECT_MODE`.
+
+### Design references
+
+- `docs/superpowers/specs/2026-08-08-loadgen-verify-correctness-design.md` — full spec (goal, scope, correctness definition, probe sampling, probe-room selection, receiver attribution, persistence readback, membership correctness, verdict, output).
+- `tools/loadgen/verify.go`, `verify_rooms.go`, `verify_probe.go`, `verify_membership.go`, `verify_readback.go`, `verify_verdict.go`, `verify_report.go` — implementation.
+
 ## Large-room bot scenario (max-room-size)
 
 Finds the largest room a bot can blast at a fixed send rate before an SLO
