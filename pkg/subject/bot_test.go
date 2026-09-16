@@ -36,6 +36,8 @@ func TestBotSubjectBuilders(t *testing.T) {
 			"chat.bot.canonical.site-a.created"},
 		{"BotCanonicalWildcard", BotCanonicalWildcard("site-a"),
 			"chat.bot.canonical.site-a.>"},
+		{"BotCanonicalMessageWildcard", BotCanonicalMessageWildcard("site-a"),
+			"chat.bot.canonical.site-a.*"},
 		{"BotPushNotification", BotPushNotification("site-a", "message"),
 			"chat.bot.notification.push.site-a.message"},
 		{"BotPushNotificationWildcard", BotPushNotificationWildcard("site-a"),

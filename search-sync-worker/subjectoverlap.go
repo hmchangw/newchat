@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // subjectsIntersect reports whether two NATS subject patterns share at least one
@@ -35,9 +39,10 @@ func subjectsIntersect(a, b string) bool {
 			return false
 		}
 		ta, tb := at[i], bt[i]
-		if ta == ">" || tb == ">" {
-			// Legal only as the final token, and the other side still has at
-			// least this one token for it to absorb.
+		// `>` absorbs the rest only where it is legal — as the final token. A `>`
+		// anywhere else is a malformed subject the server would reject at create
+		// time, so it matches nothing here rather than swallowing the comparison.
+		if (ta == ">" && i == len(at)-1) || (tb == ">" && i == len(bt)-1) {
 			return true
 		}
 		if ta == "*" || tb == "*" {
@@ -59,8 +64,8 @@ func anySubjectIntersects(patterns []string, filter string) bool {
 	return false
 }
 
-// checkFilterSubjects reports a consumer filter that selects nothing on the
-// stream it binds.
+// checkFilterSubjects returns an error if a consumer filter selects nothing on
+// the stream it binds.
 //
 // JetStream accepts such a consumer without complaint: it is created, reports
 // healthy, and delivers nothing — forever. The only symptom is an index quietly
@@ -79,4 +84,56 @@ func checkFilterSubjects(streamName string, streamSubjects, filters []string, co
 		}
 	}
 	return nil
+}
+
+// streamSubjectsFunc reads a stream's deployed subjects. A func rather than the
+// jetstream.Stream interface so the preflight is exercisable without a live server.
+type streamSubjectsFunc func(ctx context.Context, name string) ([]string, error)
+
+// cachedStreamInfo is the one method the plain and o11y-wrapped stream handles
+// share; each returns its own Stream type, so the adapter is generic over it.
+type cachedStreamInfo interface {
+	CachedInfo() *jetstream.StreamInfo
+}
+
+// liveStreamSubjects adapts a JetStream handle's Stream method to
+// streamSubjectsFunc. Pass the method value: liveStreamSubjects(js.Stream).
+func liveStreamSubjects[S cachedStreamInfo](lookup func(context.Context, string) (S, error)) streamSubjectsFunc {
+	return func(ctx context.Context, name string) ([]string, error) {
+		s, err := lookup(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("look up stream %s: %w", name, err)
+		}
+		info := s.CachedInfo()
+		if info == nil {
+			return nil, fmt.Errorf("look up stream %s: no cached info", name)
+		}
+		return info.Config.Subjects, nil
+	}
+}
+
+// preflightFilters checks a consumer's filters against the stream's DEPLOYED
+// subjects rather than this service's declaration of them.
+//
+// The distinction is the whole point: for streams another service owns (INBOX,
+// HR) the local StreamConfig is a belief that nothing reconciles, so checking it
+// against filters built from the same constants can only restate a compile-time
+// fact. Ops narrowing the real subjects is the one drift that happens in
+// production, and only a live read can see it.
+//
+// Falls back to the declared subjects when the stream cannot be read — it may not
+// exist yet, and consumer creation reports that far better than this check can.
+// Refusing to start there would turn a silent-indexing bug into an outage.
+func preflightFilters(ctx context.Context, lookup streamSubjectsFunc, streamName string, declared, filters []string, consumerName string) error {
+	subjects, err := lookup(ctx, streamName)
+	if err != nil || len(subjects) == 0 {
+		slog.WarnContext(ctx, "could not read deployed stream subjects; checking filters against the local declaration",
+			"stream", streamName,
+			"consumer", consumerName,
+			"declared", declared,
+			"error", err,
+		)
+		subjects = declared
+	}
+	return checkFilterSubjects(streamName, subjects, filters, consumerName)
 }

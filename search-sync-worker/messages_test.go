@@ -802,7 +802,7 @@ func TestMessageCollection_BuildAction_RejectsWrongShapePerMode(t *testing.T) {
 // state in JetStream: creation succeeds, the consumer sits with an empty
 // interest set, and it reports healthy forever while indexing nothing. Nothing
 // in the wiring couples a collection's stream to its filter, so the only guard
-// is asserting the pairing here — and at startup, see assertFiltersMatchStream.
+// is asserting the pairing here — and at startup, see checkFilterSubjects.
 func TestCollections_FilterSubjectsAreCapturedByTheirStream(t *testing.T) {
 	const site = "site-a"
 

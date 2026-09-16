@@ -69,9 +69,11 @@ func BotCanonicalCreated(siteID string) string {
 	return fmt.Sprintf("chat.bot.canonical.%s.created", siteID)
 }
 
-// BotCanonicalMessageWildcard matches the single-token bot message events
-// (created/updated/deleted/...) on BOT-MESSAGES-CANONICAL. This is the consumer
-// filter; BotCanonicalWildcard (`.>`) is the stream pattern.
+// BotCanonicalMessageWildcard matches any single-token bot message event on
+// BOT-MESSAGES-CANONICAL. Today only `.created` is published; the wildcard is
+// deliberate so a later edit or delete reaches the search index instead of
+// leaving a stale document behind. This is the consumer filter;
+// BotCanonicalWildcard (`.>`) is the stream pattern.
 func BotCanonicalMessageWildcard(siteID string) string {
 	return fmt.Sprintf("chat.bot.canonical.%s.*", siteID)
 }

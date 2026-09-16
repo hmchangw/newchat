@@ -53,7 +53,7 @@ type messageCollection struct {
 	// filterSubjects sits beside streamCfg deliberately: the two must describe
 	// the same subject tree, and a consumer whose filter matches nothing on its
 	// stream is silently inert rather than an error. Set both, together, or the
-	// collection indexes nothing. assertFiltersMatchStream enforces it at
+	// collection indexes nothing. checkFilterSubjects enforces it at
 	// startup; TestCollections_FilterSubjectsAreCapturedByTheirStream in CI.
 	filterSubjects func(siteID string) []string
 	consumerName   string
