@@ -109,4 +109,6 @@ func TestEscalationRoundTrip(t *testing.T) {
 	assert.Equal(t, consumerName, got.Header.Get(retrylane.HeaderConsumer))
 	assert.Equal(t, hot.Name, got.Header.Get(retrylane.HeaderOriginStream))
 	assert.NotEmpty(t, got.Header.Get(retrylane.HeaderFirstFailedAt))
+	assert.Equal(t, "3", got.Header.Get(retrylane.HeaderAttempt),
+		"escalation must happen only once the fast budget (FastSteps=2) is spent, not on an earlier delivery")
 }
