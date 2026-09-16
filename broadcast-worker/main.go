@@ -512,7 +512,12 @@ func main() {
 		// lane. natsmetrics.Start gives it its own semaphore, never shared with the hot
 		// loop — sharing one would let a retry backlog starve live deliveries of slots.
 		natsmetrics.Start(ctx, retryIter, retryConsumerMetrics, cfg.Retry.Consumer.MaxWorkers, retryConsumerCfg.MaxDeliver, &wg,
-			func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+			// Classified from X-Retry-Origin-Subject: a retry subject's tail is "slow", so
+			// classifying from msg.Subject() would label every retry-lane delivery
+			// event_type="unknown".
+			func(msg jetstream.Msg) natsmetrics.EventType {
+				return natsmetrics.EventTypeFromSubject(retrylane.OriginSubject(msg.Headers(), msg.Subject()))
+			},
 			guardedProcessor(retryProcessor(handler, slowBackoff)))
 	}
 

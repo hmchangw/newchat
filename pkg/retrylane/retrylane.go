@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -76,13 +77,24 @@ func (l *Lane) Settle(ctx context.Context, msg Msg, backoff []time.Duration, err
 		jsretry.Settle(ctx, msg, backoff, err)
 		return
 	}
-	if escErr := l.escalate(ctx, msg, err); escErr != nil {
+	hdr, escErr := l.escalate(ctx, msg, err)
+	if escErr != nil {
 		slog.ErrorContext(ctx, "retry-lane escalation failed — falling back to in-place redelivery",
 			"consumer", l.Consumer, "error", escErr,
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		jsretry.Nak(ctx, msg, backoff, "escalation publish failed")
 		return
 	}
+	// On-call reaches this line from the escalated consumer outcome, so it has to
+	// carry enough to act on and nothing more: bounded fields only, never the
+	// message body and never the error text (ReasonFor is a category label).
+	attempt, _ := strconv.ParseUint(hdr.Get(HeaderAttempt), 10, 64)
+	slog.WarnContext(ctx, "escalated to the retry lane — fast rungs spent",
+		"consumer", l.Consumer,
+		"origin_subject", OriginSubject(msg.Headers(), msg.Subject()),
+		"attempt", attempt,
+		"reason", hdr.Get(HeaderReason),
+		"request_id", natsutil.RequestIDFromContext(ctx))
 	if l.OnEscalate != nil {
 		l.OnEscalate()
 	}
@@ -109,20 +121,21 @@ func (l *Lane) shouldEscalate(msg Msg, err error) bool {
 	return meta.NumDelivered > uint64(l.FastSteps)
 }
 
-// escalate republishes the message onto the RETRY stream. The body is passed
-// through untouched — re-marshalling could change bytes that dedup keys and
-// wire-compat tests pin.
-func (l *Lane) escalate(ctx context.Context, msg Msg, err error) error {
+// escalate republishes the message onto the RETRY stream and returns the headers
+// it published with, so the caller can log the escalation from the same bounded
+// values that went on the wire. The body is passed through untouched —
+// re-marshalling could change bytes that dedup keys and wire-compat tests pin.
+func (l *Lane) escalate(ctx context.Context, msg Msg, err error) (nats.Header, error) {
 	meta, metaErr := msg.Metadata()
 	if metaErr != nil {
-		return fmt.Errorf("read message metadata: %w", metaErr)
+		return nil, fmt.Errorf("read message metadata: %w", metaErr)
 	}
 	hdr := BuildHeaders(msg.Headers(), meta, msg.Subject(), l.Consumer, ReasonFor(err), time.Now())
 	subj := subject.Retry(l.SiteID, l.Consumer, subject.RetryTierSlow)
 	msgID := DedupID(meta.Stream, meta.Sequence.Stream, l.Consumer)
 
 	if pubErr := l.Publish(ctx, subj, msg.Data(), hdr, msgID); pubErr != nil {
-		return fmt.Errorf("publish to retry lane %s: %w", subj, pubErr)
+		return nil, fmt.Errorf("publish to retry lane %s: %w", subj, pubErr)
 	}
-	return nil
+	return hdr, nil
 }

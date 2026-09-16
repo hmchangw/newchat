@@ -124,3 +124,18 @@ func BuildHeaders(in nats.Header, meta *jetstream.MsgMetadata,
 
 	return out
 }
+
+// OriginSubject returns the subject a message was first delivered on:
+// X-Retry-Origin-Subject when the message arrived via the retry lane, and
+// fallback (the caller's own msg.Subject()) otherwise.
+//
+// A retry-lane subject's tail is "slow", so classifying a retry delivery from
+// its own subject yields EventUnknown on every metric and log line — exactly
+// the deliveries an operator is looking at. The origin subject is written for
+// this purpose; this is what reads it.
+func OriginSubject(h nats.Header, fallback string) string {
+	if v := h.Get(HeaderOriginSubject); v != "" {
+		return v
+	}
+	return fallback
+}

@@ -1,8 +1,11 @@
 package retrylane_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/retrylane"
 )
 
@@ -217,4 +221,97 @@ func TestWithEscalationHookDoesNotMutateTheOriginal(t *testing.T) {
 	assert.NotNil(t, derived.OnEscalate)
 	assert.Equal(t, base.Consumer, derived.Consumer)
 	assert.Equal(t, base.FastSteps, derived.FastSteps)
+}
+
+// captureLogs swaps the default logger for a JSON handler writing to a buffer,
+// restoring it on cleanup. The retry lane logs through slog's default.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func TestSettleLogsASuccessfulEscalation(t *testing.T) {
+	buf := captureLogs(t)
+	pub := &capturedPublish{}
+	lane := newLane(pub.fn())
+	msg := newMsg(4)
+	msg.headers.Set(natsutil.RequestIDHeader, "01970a4f-8c2d-7c9a-abcd-e0123456789f")
+
+	ctx := natsutil.WithRequestID(context.Background(), "01970a4f-8c2d-7c9a-abcd-e0123456789f")
+	lane.Settle(ctx, msg, testBackoff, errcode.NotFound("room not found"))
+
+	require.True(t, msg.acked, "precondition: the escalation succeeded")
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec),
+		"on-call greps the logs for context on outcome=\"escalated\"; there must be a line to find")
+	assert.Equal(t, "WARN", rec["level"])
+	assert.Equal(t, "message-worker", rec["consumer"])
+	assert.Equal(t, "chat.msg.canonical.site1.created", rec["origin_subject"])
+	assert.Equal(t, float64(4), rec["attempt"])
+	assert.Equal(t, "not_found", rec["reason"])
+	assert.Equal(t, "01970a4f-8c2d-7c9a-abcd-e0123456789f", rec["request_id"])
+}
+
+func TestSettleEscalationLogNeverCarriesTheBody(t *testing.T) {
+	buf := captureLogs(t)
+	pub := &capturedPublish{}
+	lane := newLane(pub.fn())
+	msg := newMsg(4)
+	msg.data = []byte(`{"text":"my bank password is hunter2"}`)
+
+	lane.Settle(context.Background(), msg, testBackoff, errors.New("mongo down"))
+
+	require.True(t, msg.acked)
+	assert.NotContains(t, buf.String(), "hunter2", "the escalation log is bounded fields only")
+	assert.NotContains(t, buf.String(), "mongo down", "the reason is a category, never the error text")
+}
+
+func TestSettleLogsNothingOnTheNonEscalatingPath(t *testing.T) {
+	buf := captureLogs(t)
+	pub := &capturedPublish{}
+	lane := newLane(pub.fn())
+
+	lane.Settle(context.Background(), newMsg(4), testBackoff, nil)
+
+	assert.NotContains(t, buf.String(), "escalat", "an Ack is not an escalation")
+}
+
+func TestOriginSubject(t *testing.T) {
+	withOrigin := nats.Header{}
+	withOrigin.Set(retrylane.HeaderOriginSubject, "chat.msg.canonical.site1.created")
+
+	tests := []struct {
+		name     string
+		headers  nats.Header
+		fallback string
+		want     string
+	}{
+		{
+			name:     "retry-lane delivery classifies from the origin subject",
+			headers:  withOrigin,
+			fallback: "chat.retry.site1.message-worker.slow",
+			want:     "chat.msg.canonical.site1.created",
+		},
+		{
+			name:     "hot-lane delivery falls back to its own subject",
+			headers:  nats.Header{},
+			fallback: "chat.msg.canonical.site1.created",
+			want:     "chat.msg.canonical.site1.created",
+		},
+		{
+			name:     "nil headers fall back",
+			headers:  nil,
+			fallback: "chat.msg.canonical.site1.created",
+			want:     "chat.msg.canonical.site1.created",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, retrylane.OriginSubject(tt.headers, tt.fallback))
+		})
+	}
 }

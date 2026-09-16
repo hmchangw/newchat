@@ -426,7 +426,12 @@ func main() {
 				retrySem <- struct{}{}
 				wg.Add(1)
 				go func(msgCtx context.Context, msg jetstream.Msg) {
-					tracked := retryConsumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), retryConsumerCfg.MaxDeliver)
+					// Classified from X-Retry-Origin-Subject: a retry subject's tail is
+					// "slow", so classifying from msg.Subject() would label every
+					// retry-lane delivery event_type="unknown".
+					tracked := retryConsumerMetrics.Track(msgCtx, msg,
+						natsmetrics.EventTypeFromSubject(retrylane.OriginSubject(msg.Headers(), msg.Subject())),
+						retryConsumerCfg.MaxDeliver)
 					msg = tracked
 					msgCtx = tracked.Context(msgCtx)
 					defer func() {
