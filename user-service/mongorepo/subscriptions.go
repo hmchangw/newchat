@@ -838,11 +838,17 @@ func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int)
 }
 
 // activeRoomsEnrichStages is the badge path's rooms join. It deliberately does NOT
-// reuse roomsEnrichStages: the badge count reads exactly one room field, so joining
-// the list path's eleven (the encKey blob among them) would materialize ten per
+// reuse roomsEnrichStages: the badge count reads two room fields, so joining the
+// list path's twelve (the encKey blob among them) would materialize ten more per
 // joined room for the terminal $project to discard — once per account in a
 // notification batch. A cross-site subscription has no local room document and,
-// as in the list path, simply yields no lastMsgAt.
+// as in the list path, simply yields neither timestamp.
+//
+// Both fields are load-bearing: unreadRooms tests lastSeenAt against
+// lastUserMsgAt ?? lastMsgAt, and the subscription document stores neither (the
+// baseline is read-time only — see model.EnrichedSubscription). Dropping
+// lastUserMsgAt here would not fail the decode; it would silently fall through to
+// lastMsgAt, which counts the system messages the unread definition excludes.
 func activeRoomsEnrichStages() bson.A {
 	return bson.A{
 		// $lookup justification: the unread test compares the room's lastMsgAt
@@ -858,12 +864,15 @@ func activeRoomsEnrichStages() bson.A {
 			"let":  bson.M{"rid": "$roomId"},
 			"pipeline": bson.A{
 				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}}}},
-				bson.M{"$project": bson.M{"_id": 0, "lastMsgAt": 1}},
+				bson.M{"$project": bson.M{"_id": 0, "lastMsgAt": 1, "lastUserMsgAt": 1}},
 			},
 			"as": "room",
 		}},
 		bson.M{"$unwind": bson.M{"path": "$room", "preserveNullAndEmptyArrays": true}},
-		bson.M{"$addFields": bson.M{"lastMsgAt": "$room.lastMsgAt"}},
+		bson.M{"$addFields": bson.M{
+			"lastMsgAt":     "$room.lastMsgAt",
+			"lastUserMsgAt": "$room.lastUserMsgAt",
+		}},
 	}
 }
 

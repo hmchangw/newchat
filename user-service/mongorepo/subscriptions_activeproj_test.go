@@ -169,17 +169,64 @@ func projectedKeys(t *testing.T, pipeline bson.A) []string {
 	return nil
 }
 
-// The badge pipeline keeps exactly one room field (lastMsgAt), so its rooms join
-// must fetch exactly that. Reusing the list path's 11-field enrichment
-// materializes ten fields per joined room — including the encKey blob — that the
+// addFieldsKeys returns the keys the first $addFields stage creates, sorted.
+func addFieldsKeys(t *testing.T, pipeline bson.A) []string {
+	t.Helper()
+	for _, stage := range pipeline {
+		m, ok := stage.(bson.M)
+		if !ok {
+			continue
+		}
+		add, ok := m["$addFields"].(bson.M)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(add))
+		for k := range add {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	t.Fatal("no $addFields stage in pipeline")
+	return nil
+}
+
+// roomDerivedBadgeFields are the two fields the terminal $project keeps that the
+// subscription document does not store — models.ActiveSubscription documents both
+// as joined from the room. The unread reference is lastUserMsgAt ?? lastMsgAt, so
+// dropping lastUserMsgAt silently reads unread off lastMsgAt, which counts SYSTEM
+// messages the design deliberately excludes (see the system-message-unread spec).
+var roomDerivedBadgeFields = []string{"lastMsgAt", "lastUserMsgAt"}
+
+// The badge pipeline keeps exactly the two room fields above, so its rooms join
+// must fetch exactly those. Reusing the list path's 12-field enrichment
+// materializes ten more per joined room — including the encKey blob — that the
 // terminal $project then discards, once per account in a notification batch.
-func TestActiveSubscriptionPipeline_JoinsOnlyLastMsgAt(t *testing.T) {
+func TestActiveSubscriptionPipeline_JoinsOnlyBadgeRoomFields(t *testing.T) {
 	r := &SubscriptionRepo{}
 
 	sub := lookupSubPipeline(t, r.activeSubscriptionPipeline("alice", 100))
 
-	assert.Equal(t, []string{"lastMsgAt"}, projectedKeys(t, sub),
-		"the badge join must project only the room field the terminal $project keeps")
+	assert.Equal(t, roomDerivedBadgeFields, projectedKeys(t, sub),
+		"the badge join must project exactly the room fields the terminal $project keeps")
+}
+
+// A field the terminal $project includes but nothing upstream produces decodes as
+// a silent nil, not an error — so the join and the projection must be pinned
+// together. This is the guard that a narrowed join cannot quietly drop an input
+// the unread test depends on.
+func TestActiveSubscriptionPipeline_LiftsEveryRoomDerivedField(t *testing.T) {
+	r := &SubscriptionRepo{}
+	pipeline := r.activeSubscriptionPipeline("alice", 100)
+
+	assert.Equal(t, roomDerivedBadgeFields, addFieldsKeys(t, pipeline),
+		"$addFields must lift every room-derived field the terminal $project keeps")
+
+	projected := projectedKeys(t, bson.A{pipeline[len(pipeline)-1]})
+	for _, f := range roomDerivedBadgeFields {
+		assert.Contains(t, projected, f, "the terminal $project must keep every room-derived field")
+	}
 }
 
 // The join must not carry the E2E key into the working set: it is the largest
