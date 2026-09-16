@@ -48,3 +48,9 @@ func TestInboxConfig(t *testing.T) {
 		"chat.inbox.site-a.external.>",
 	}, cfg.Subjects)
 }
+
+func TestRetry(t *testing.T) {
+	got := stream.Retry("site1")
+	assert.Equal(t, "RETRY-site1", got.Name)
+	assert.Equal(t, []string{"chat.retry.site1.>"}, got.Subjects)
+}
