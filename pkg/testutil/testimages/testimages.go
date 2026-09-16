@@ -52,7 +52,13 @@ const (
 	Valkey = "valkey/valkey:8.1.7-alpine"
 
 	// MinIO is the image for every MinIO-backed integration test.
-	MinIO = "minio/minio:RELEASE.2025-07-18T21-56-31Z"
+	//
+	// minio/minio was deleted from Docker Hub (minio/minio#21647), which
+	// broke every pull with "repository does not exist". pgsty/minio is a
+	// community-maintained fork, multi-arch (amd64 + arm64) and still
+	// cutting releases; its oldest tag postdates our old pin, so the
+	// version moved forward with the registry.
+	MinIO = "pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
 
 	// Vault is the HashiCorp Vault image for pkg/atrest's KeyWrapper
 	// integration tests (transit secrets engine).
