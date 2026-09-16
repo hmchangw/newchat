@@ -694,35 +694,54 @@ func (r *verifyRun) pickSender(roomID string, rnd *rand.Rand) *userState {
 }
 
 func (r *verifyRun) emitOneProbe(ctx context.Context, u *userState, roomID string, seqNo uint64) {
-	now := time.Now()
-	// Gate on Has: MembershipModel.Epoch returns 0 for a room it never
-	// registered, which is indistinguishable from a genuine never-churned
-	// room and would hand the tracker a nil expected set (scored total_loss).
+	// Gate on Has: a room the MembershipModel never registered has no member
+	// set to judge against, which is indistinguishable from a genuine
+	// never-churned room and would hand the tracker a nil expected set (scored
+	// total_loss).
 	track := r.prs.Has(roomID) && shouldProbe(r.vc.Seed, r.idxByID[u.ID], seqNo, r.vc.ProbeRate)
-	if track && r.mm.InSettle(roomID, now) {
-		// Inside a settle window either delivery outcome is legitimate, so the
-		// send still goes out as load but is never adjudicated. Counting it
-		// keeps a churn-starved run honest: suppressed probes do not count
-		// toward --min-probes, so the run reports INCONCLUSIVE (spec §9.2).
-		r.tracker.RecordSuppressed()
-		track = false
+	if !track {
+		r.sendUntracked(ctx, u, roomID)
+		return
 	}
+	if r.mm.WithStableRoom(roomID, time.Now(), func(epoch int, members []string) {
+		r.publishTracked(ctx, u, roomID, epoch, members)
+	}) {
+		return
+	}
+	// The room is either inside a settle window or has a membership change in
+	// flight. Both make either delivery outcome legitimate, so the send still
+	// goes out as load but is never adjudicated. Counting it keeps a
+	// churn-starved run honest: suppressed probes do not count toward
+	// --min-probes, so the run reports INCONCLUSIVE (spec §9.2).
+	r.tracker.RecordSuppressed()
+	r.sendUntracked(ctx, u, roomID)
+}
 
+// sendUntracked issues a probe-room send that carries no expectation — ordinary
+// load, so suppressing a probe never changes the traffic the system sees.
+func (r *verifyRun) sendUntracked(ctx context.Context, u *userState, roomID string) {
+	if _, err := r.publishSend(ctx, u.Account, roomID); err != nil {
+		slog.Warn("probe send failed", "user", u.ID, "room", roomID, "err", err)
+	}
+}
+
+// publishTracked publishes one adjudicated probe. It runs inside
+// WithStableRoom, so epoch and members are the pair in force for this send and
+// the room cannot change under it before the publish returns.
+//
+// Registration still follows the publish: a failed publish would otherwise
+// leave a registered probe nothing could ever deliver, i.e. a manufactured
+// total_loss. That argument is about the *registration* only — the epoch and
+// member set are snapshotted beforehand, because a change landing between the
+// publish and a later read would register the probe against an epoch that did
+// not exist when it was sent.
+func (r *verifyRun) publishTracked(ctx context.Context, u *userState, roomID string, epoch int, members []string) {
 	msgID, err := r.publishSend(ctx, u.Account, roomID)
 	if err != nil {
 		slog.Warn("probe send failed", "user", u.ID, "room", roomID, "err", err)
 		return
 	}
-	if !track {
-		return
-	}
-	// Registered after the publish returns, not before: a failed publish would
-	// otherwise leave a registered probe nothing could ever deliver, i.e. a
-	// manufactured total_loss. The reverse race is not reachable — a delivery
-	// has to traverse MESSAGES → gatekeeper → canonical → broadcast-worker →
-	// back, which no map insert loses to.
-	epoch := r.mm.Epoch(roomID)
-	r.tracker.RegisterProbe(msgID, roomID, epoch, r.mm.MembersAtEpoch(roomID, epoch))
+	r.tracker.RegisterProbe(msgID, roomID, epoch, members)
 	r.mu.Lock()
 	r.targets = append(r.targets, ReadbackTarget{MsgID: msgID, RoomID: roomID, SenderID: u.ID})
 	r.mu.Unlock()
@@ -859,6 +878,15 @@ func (r *verifyRun) applyChange(ctx context.Context, roomID string, rnd *rand.Ra
 	if !r.prs.Has(roomID) {
 		return pendingChange{}, false, nil
 	}
+	// Mark the room in flux before reading its membership or issuing the RPC,
+	// and hold it until the model write lands (or the change is abandoned). The
+	// settle window alone opens too late: it starts at ApplyAdd/ApplyRemove,
+	// which is after room-service has answered, so without this a probe can
+	// publish while the backend is already applying the change and be judged
+	// against the pre-change set (spec §9.2).
+	release := r.mm.BeginChange(roomID)
+	defer release()
+
 	current := make(map[string]struct{})
 	for _, id := range r.mm.Members(roomID) {
 		current[id] = struct{}{}

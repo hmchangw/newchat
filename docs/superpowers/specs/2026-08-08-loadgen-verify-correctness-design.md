@@ -110,7 +110,7 @@ command can be scripted without parsing stdout.
 | `--probe-rooms` | `50` | Number of probe rooms; their members are forced into the direct pool (§6) |
 | `--reserve-users` | `200` | Direct-connected floaters, initially in no probe room, used as membership-change targets (§6.0 step 3) |
 | `--member-churn` | `0.2` | Membership changes per probe room per minute. `0` disables §9 entirely |
-| `--settle` | `5s` | Post-change quiet window per room; probes suspended, then E recomputed (§9.2) |
+| `--settle` | `5s` | Post-change quiet window per room, on top of the mutation barrier that covers the membership RPC itself; probes suspended, then E recomputed (§9.2) |
 | `--warmup` | `30s` | Pre-measurement settle |
 | `--steady` | `120s` | Probe-generating window |
 | `--drain` | `30s` | Post-quiesce wait for in-flight probes |
@@ -135,6 +135,12 @@ else — including all sends into non-probe rooms — is ordinary load.
 - Probe selection happens at publish time in `sendMessage`, derived from
   the run seed and a per-user counter. Never `rand` on the hot path, never
   wall-clock. Same seed ⇒ same probe set.
+- A selected send is only *adjudicated* if its room is stable. The epoch,
+  the expected-recipient set and the publish itself are taken together
+  under the room's mutation barrier (§9.2), so a tracked send can never
+  straddle a membership change. A send the barrier turns away still goes
+  out as ordinary load and is counted as `suppressed`, so the probe floor
+  stays honest rather than the send disappearing.
 - `--probe-rate` (default `0.01`) tunes the fraction.
 - Tracked state stays bounded and predictable: at ~200 sends/sec and a 1%
   rate, ~2 probes/sec times average room size.
@@ -515,10 +521,34 @@ adjudicated.
 
 Each probe room therefore carries a **membership epoch**:
 
-1. A change bumps the room's epoch and opens a `--settle` quiet window.
-2. During settle, **no probes are sent into that room**. Ordinary
+1. Before churn issues the membership RPC, the room is closed to
+   adjudication by a per-room **mutation barrier**.
+2. The RPC completes (and for an add, the new member subscribes); the
+   change bumps the room's epoch and opens a `--settle` quiet window; the
+   barrier is then released.
+3. During settle, **no probes are adjudicated in that room**. Ordinary
    (untracked) load continues, so the system stays under churn.
-3. After settle, E is recomputed and probing resumes at the new epoch.
+4. After settle, E is recomputed and probing resumes at the new epoch.
+
+The barrier and the settle window cover two different halves of the same
+ambiguous interval, and both are needed. **The settle window opens only at
+step 2** — after room-service has answered — so on its own it leaves the
+whole RPC uncovered: membership and message operations travel independent
+subjects and workers, so the backend may apply a change before fan-out
+reads the member list while a probe has already captured the pre-change E.
+That is a false `missing_recipient` (and the mirror case on an add) against
+a system that did nothing wrong. The barrier covers the interval from
+*before* the RPC to the model write; the settle window covers the interval
+after it, where the write has landed but fan-out may not have seen it yet.
+
+The barrier is per room — churn in one room never stalls probing in the
+other 49 — and probes never wait on it: a room with a change in flight is
+skipped, not blocked, so a churn RPC that takes seconds costs that room its
+probes rather than stalling the single probe emitter. A skipped send is
+still published as ordinary load and counted as `suppressed` (§5). Within
+the barrier, the epoch snapshot, the E snapshot and the publish are one
+atomic unit; snapshotting the epoch *after* the publish returns would
+register the probe against an epoch that did not exist when it was sent.
 
 Messages in flight across a change are simply never probed. Probes carry
 their epoch, so a late delivery is matched against the E in force when it
@@ -636,9 +666,10 @@ from §3 surviving retries, **or** any membership change shows a
   `--member-churn=0` a zero count is the expected result and stays
   PASS-able
 - Fewer than `--min-probes` (default `50`) probes were tracked — probes
-  suppressed inside a settle window (§9.2) do not count toward this floor,
-  so aggressive `--member-churn` with a long `--settle` can starve the run
-  into INCONCLUSIVE rather than silently thinning coverage
+  suppressed by the mutation barrier or a settle window (§9.2) do not count
+  toward this floor, so aggressive `--member-churn` with a long `--settle`
+  can starve the run into INCONCLUSIVE rather than silently thinning
+  coverage
 - `ctx` cancelled mid-run
 - Loadgen GC pause p99 above the existing self-metric threshold — the load
   box was saturated, so the measurement is not trustworthy
@@ -659,7 +690,7 @@ Console summary, styled after `daily_report.go`:
 ```
 probe rooms: 50 (32 small, 18 medium) / 2417 members / direct pool 2617
 background:  7383 users on multiplex / 200 reserve floaters
-probes:      412 tracked / 18 suppressed (settle window)
+probes:      412 tracked / 18 suppressed (churn)
 delivery:    410 complete / 2 partial / 0 total-loss
 leakage:     0 unexpected recipients (user lane)
 duplicates:  0
@@ -731,7 +762,8 @@ Unit-testable with no infrastructure — which is most of it:
 - Probe selection determinism — same seed ⇒ same probe rooms and probe set
 - Membership epochs — a probe published at epoch N is judged against
   epoch N's expected set even when it lands after epoch N+1 begins; probes
-  inside a settle window are suppressed, not failed
+  suppressed by the mutation barrier or a settle window are suppressed,
+  not failed
 - Dual-oracle divergence — loadgen's model and a stubbed
   `subscription.list` disagree ⇒ `membership_not_applied`
 - `verify_verdict` — table-driven over every trigger and the override
@@ -776,7 +808,7 @@ test will be added.
 | Truncation-style fan-out bug hidden by index-correlated sampling | Full room membership tracked, never a subset (§6.0) |
 | Direct-pool resource limits unknown | Budget estimates flagged unmeasured; benchmarking is a plan task (§6.3) |
 | Room-lane leakage check would always fire (loadgen holds full-permission creds) | `O ⊆ E` asserted on the per-user lane only; room-lane membership verified via authorization instead (§7.3) |
-| Membership change races a concurrent send ⇒ ambiguous expectation | Epoch + settle window; probes suppressed during settle, never adjudicated (§9.2) |
+| Membership change races a concurrent send ⇒ ambiguous expectation | Epoch + per-room mutation barrier + settle window; probes suppressed from before the membership RPC until the window closes, never adjudicated (§9.2) |
 | Membership write lost ⇒ system and its self-report agree | Dual oracle; delivery judged against loadgen's model, not `subscription.list` (§9.3) |
 | Added member unobservable (no dedicated conn) | Reserve floaters pre-connected; `SubscribeRoom` on add (§6.0 step 3) |
 

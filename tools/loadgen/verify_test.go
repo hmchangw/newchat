@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -818,4 +820,183 @@ func TestLaneFlags(t *testing.T) {
 			assert.Equal(t, tt.want, laneFlags(tt.lane))
 		})
 	}
+}
+
+// TestVerifyRun_EmitOneProbe_NeverRegistersAcrossAChangeBoundary is the
+// regression test for the mutation barrier. A probe registered against an epoch
+// other than the one in force when it was published is judged against the wrong
+// expected-recipient set, which manufactures a missing_recipient (or an
+// unexpected_recipient) on a system that did nothing wrong.
+//
+// The publish stub records the epoch in force at publish time; afterwards every
+// tracked probe's registered epoch must equal it. Settle is zeroed so the only
+// thing that can hold the boundary is the barrier itself: with it removed, the
+// churn goroutine bumps the epoch between the snapshot and the publish (race 1)
+// or between the RPC and the model write (race 2) and the assertion fires.
+func TestVerifyRun_EmitOneProbe_NeverRegistersAcrossAChangeBoundary(t *testing.T) {
+	const roomID = "room-small-000001"
+	prs := probeRoomSetForTest(map[string][]string{roomID: {"u-1", "u-2"}}, roomID)
+	mm := NewMembershipModel(prs)
+	mm.SetSettle(0)
+	tracker := NewProbeTracker()
+
+	var mu sync.Mutex
+	epochAtPublish := make(map[string]int)
+
+	r := &verifyRun{
+		vc:      &verifyConfig{ProbeRate: 1, Seed: 7},
+		prs:     prs,
+		mm:      mm,
+		tracker: tracker,
+		siteID:  "site-a",
+		idxByID: map[string]int{"u-1": 0},
+		env: &stepEnv{
+			publish: func(_ context.Context, _ string, data []byte) error {
+				var req model.SendMessageRequest
+				if err := json.Unmarshal(data, &req); err != nil {
+					return err
+				}
+				// Widen the window a lost barrier would let churn through.
+				runtime.Gosched()
+				mu.Lock()
+				epochAtPublish[req.ID] = mm.Epoch(roomID)
+				mu.Unlock()
+				return nil
+			},
+		},
+	}
+
+	churnDone := make(chan struct{})
+	go func() {
+		defer close(churnDone)
+		for i := range 400 {
+			release := mm.BeginChange(roomID)
+			// Stands in for the membership RPC: the model write lands only
+			// after it, which is the window race 2 is about.
+			runtime.Gosched()
+			if i%2 == 0 {
+				mm.ApplyAdd(roomID, "u-9", time.Now())
+			} else {
+				mm.ApplyRemove(roomID, "u-9", time.Now())
+			}
+			release()
+		}
+	}()
+
+	sender := &userState{ID: "u-1", Account: "user-1"}
+	var seq uint64
+	for done := false; !done; {
+		select {
+		case <-churnDone:
+			done = true
+		default:
+		}
+		seq++
+		r.emitOneProbe(t.Context(), sender, roomID, seq)
+	}
+	<-churnDone
+
+	counts := tracker.Counts()
+	mu.Lock()
+	defer mu.Unlock()
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	require.NotEmpty(t, tracker.probes, "the run must track probes, or it proves nothing")
+	for msgID, rec := range tracker.probes {
+		want, ok := epochAtPublish[msgID]
+		require.True(t, ok, "every registered probe must have been published")
+		require.Equal(t, want, rec.epoch,
+			"probe %s was registered against epoch %d but published at epoch %d",
+			msgID, rec.epoch, want)
+		expected := make([]string, 0, len(rec.expected))
+		for u := range rec.expected {
+			expected = append(expected, u)
+		}
+		sort.Strings(expected)
+		require.Equal(t, mm.MembersAtEpoch(roomID, want), expected,
+			"the expected-recipient set must be the one in force at publish")
+	}
+	assert.Equal(t, len(epochAtPublish), counts.Tracked+counts.Suppressed,
+		"every send is either adjudicated or counted as suppressed — a probe blocked by "+
+			"the barrier must not vanish from the probe floor's accounting")
+}
+
+// churnRandForTest mirrors driveChurn's RNG derivation, so a test seed selects
+// the same add/remove branch the real churn driver would take for it.
+func churnRandForTest(seed int64) *rand.Rand {
+	return rand.New(rand.NewSource(seed ^ 0x0C0FFEE0)) // #nosec G404 -- test fixture randomness // nosemgrep: math-random-used
+}
+
+// TestVerifyRun_ApplyChange_ClosesTheRoomBeforeTheMembershipRPC pins *when* the
+// barrier goes up. The settle window opens at ApplyAdd/ApplyRemove, which is
+// after room-service has answered; if churn only closed the room then, a probe
+// published while the RPC was in flight would be adjudicated against the
+// pre-change member set while the backend may already have applied the change.
+// The assertion runs inside the RPC stub, i.e. exactly in that gap.
+func TestVerifyRun_ApplyChange_ClosesTheRoomBeforeTheMembershipRPC(t *testing.T) {
+	const roomID = "room-small-000001"
+	prs := probeRoomSetForTest(map[string][]string{roomID: {"u-1", "u-2"}}, roomID)
+	mm := NewMembershipModel(prs)
+	mm.SetSettle(0)
+
+	r := &verifyRun{
+		// Seed 1 makes the first coin flip pick the remove branch, which needs
+		// no directPool subscription and so no live NATS connection.
+		vc:      &verifyConfig{Seed: 1, Settle: 0},
+		prs:     prs,
+		mm:      mm,
+		siteID:  "site-a",
+		byID:    map[string]*userState{"u-2": {ID: "u-2", Account: "user-2"}},
+		reserve: []string{"u-2"},
+	}
+	probedDuringRPC := true
+	r.env = &stepEnv{
+		request: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+			probedDuringRPC = mm.WithStableRoom(roomID, time.Now(), func(int, []string) {})
+			return []byte(`{}`), nil
+		},
+	}
+
+	require.True(t, mm.WithStableRoom(roomID, time.Now(), func(int, []string) {}),
+		"an idle room is probeable")
+
+	_, ok, err := r.applyChange(t.Context(), roomID, churnRandForTest(1))
+
+	require.NoError(t, err)
+	require.True(t, ok, "the change must have been issued, or the stub never ran")
+	assert.False(t, probedDuringRPC,
+		"the room must already be closed to probes while the membership RPC is in flight")
+	assert.True(t, mm.WithStableRoom(roomID, time.Now(), func(int, []string) {}),
+		"and reopened once the change has been applied")
+}
+
+// TestVerifyRun_ApplyChange_ReopensTheRoomWhenTheRPCIsRejected pins the other
+// exit: a rejected change must not leave the room permanently unprobeable, and
+// must not bump the epoch.
+func TestVerifyRun_ApplyChange_ReopensTheRoomWhenTheRPCIsRejected(t *testing.T) {
+	const roomID = "room-small-000001"
+	prs := probeRoomSetForTest(map[string][]string{roomID: {"u-1", "u-2"}}, roomID)
+	mm := NewMembershipModel(prs)
+
+	r := &verifyRun{
+		vc:      &verifyConfig{Seed: 1},
+		prs:     prs,
+		mm:      mm,
+		siteID:  "site-a",
+		byID:    map[string]*userState{"u-2": {ID: "u-2", Account: "user-2"}},
+		reserve: []string{"u-2"},
+		env: &stepEnv{
+			request: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+				return nil, errors.New("room-service timeout")
+			},
+		},
+	}
+
+	_, ok, err := r.applyChange(t.Context(), roomID, churnRandForTest(1))
+
+	require.NoError(t, err)
+	assert.False(t, ok, "a rejected change is not applied")
+	assert.Equal(t, 0, mm.Epoch(roomID), "and never moves the epoch")
+	assert.True(t, mm.WithStableRoom(roomID, time.Now(), func(int, []string) {}),
+		"the room reopens to probes immediately")
 }

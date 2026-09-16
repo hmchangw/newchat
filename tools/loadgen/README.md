@@ -1437,7 +1437,7 @@ Three things worth repeating because they will bite an operator immediately:
 | `--probe-rooms` | `50` | Number of probe rooms selected deterministically from `--seed` |
 | `--reserve-users` | `200` | Direct-connected floaters used as membership-change targets |
 | `--member-churn` | `0.2` | Membership changes per probe room per minute (`0` disables churn). Above `0`, a run that issues **no** change is INCONCLUSIVE — see the membership floor below |
-| `--settle` | `5s` | Post-change quiet window per room before probes resume counting toward that room. Also sets the churn tailroom, `max(10s, --settle + 10s)`, which `--steady` must exceed |
+| `--settle` | `5s` | Post-change quiet window per room before probes resume counting toward that room. A per-room mutation barrier already suppresses probes from before the membership RPC until the change is applied, so this window covers only the interval after it. Also sets the churn tailroom, `max(10s, --settle + 10s)`, which `--steady` must exceed |
 | `--warmup` | `30s` | Pre-measurement settle before probes start being tracked |
 | `--steady` | `120s` | Probe-generating window. Must exceed the churn tailroom or no membership change is ever issued (INCONCLUSIVE) |
 | `--drain` | `30s` | Post-quiesce wait for in-flight probes to resolve |
@@ -1483,7 +1483,7 @@ Console summary:
 ```
 probe rooms: 50 / 1200 members / direct pool 1400 (200 reserve)
 background:  8600 users on multiplex (1204 dropped — inbox full, not a probe signal)
-probes:      612 tracked / 8 suppressed (settle window)
+probes:      612 tracked / 8 suppressed (churn)
 delivery:    608 complete / 3 partial / 1 total-loss
 leakage:     0 unexpected recipients (user lane)
 membership:  24 changes (14 add, 10 remove) / 24 applied / 24 effective

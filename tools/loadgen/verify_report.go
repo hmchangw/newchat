@@ -44,7 +44,7 @@ func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugePar
 	// accounting (see evaluateVerify).
 	fmt.Fprintf(&b, "background:  %d users on multiplex (%d dropped — inbox full, not a probe signal)\n",
 		rep.BackgroundSize, rep.MultiplexDrops)
-	fmt.Fprintf(&b, "probes:      %d tracked / %d suppressed (settle window)\n",
+	fmt.Fprintf(&b, "probes:      %d tracked / %d suppressed (churn)\n",
 		rep.Counts.Tracked, rep.Counts.Suppressed)
 	fmt.Fprintf(&b, "delivery:    %d complete / %d partial / %d total-loss\n",
 		rep.Counts.Complete, rep.Counts.Partial, rep.Counts.TotalLoss)

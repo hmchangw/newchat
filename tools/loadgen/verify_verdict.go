@@ -190,7 +190,7 @@ func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugePar
 	}
 	if in.Counts.Tracked < in.MinProbes {
 		reasons = append(reasons, fmt.Sprintf(
-			"only %d probes tracked, below --min-probes=%d (%d suppressed by settle windows)",
+			"only %d probes tracked, below --min-probes=%d (%d suppressed by membership churn)",
 			in.Counts.Tracked, in.MinProbes, in.Counts.Suppressed))
 	}
 	if in.Cancelled {
