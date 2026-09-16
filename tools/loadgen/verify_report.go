@@ -49,8 +49,16 @@ func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugePar
 		rep.BackgroundSize, rep.MultiplexDrops)
 	fmt.Fprintf(&b, "probes:      %d tracked / %d suppressed (churn)\n",
 		rep.Counts.Tracked, rep.Counts.Suppressed)
-	fmt.Fprintf(&b, "delivery:    %d complete / %d partial / %d total-loss\n",
+	fmt.Fprintf(&b, "delivery:    %d complete / %d partial / %d total-loss",
 		rep.Counts.Complete, rep.Counts.Partial, rep.Counts.TotalLoss)
+	// Only when non-zero: a refused cross-room credit raises no violation of its
+	// own, so this clause is the only place a delivery that named the wrong room
+	// is explained — without it the probe's missing_recipient reads as plain
+	// fan-out loss. Omitted otherwise so the normal line stays uncluttered.
+	if rep.Counts.CrossRoom > 0 {
+		fmt.Fprintf(&b, " / %d cross-room (credit refused)", rep.Counts.CrossRoom)
+	}
+	b.WriteString("\n")
 	fmt.Fprintf(&b, "leakage:     %d unexpected recipients (user lane)\n", rep.Counts.Leaked)
 	fmt.Fprintf(&b, "membership:  %d changes (%d add, %d remove) / %d applied / %d effective",
 		rep.Changes.Total, rep.Changes.Adds, rep.Changes.Removes,

@@ -446,6 +446,9 @@ func executeVerify(
 		// A recipient whose connection went away mid-run cannot have its
 		// non-delivery attributed to the system under test (spec §10).
 		DroppedRecipients: int(env.direct.DroppedRecipients()),
+		// A delivery nats.go dropped on a full pending queue never reached the
+		// tracker, and looks exactly like one the system never sent (spec §10).
+		SlowConsumers:     int(env.direct.SlowConsumers()),
 		ReadbackErr:       readbackErr,
 		OracleErrs:        oracleErrs,
 		OracleErrSample:   oracleErrSample,

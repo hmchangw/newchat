@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -287,4 +290,90 @@ func TestDirectPool_Deliver_DoesNotTakePoolLock(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDirectPool_RecordSlowConsumer_CountsMidRunDrop(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	p.recordSlowConsumer()
+	p.recordSlowConsumer()
+	assert.Equal(t, int64(2), p.SlowConsumers())
+}
+
+// TestDirectPool_RecordSlowConsumer_IgnoresOrderlyShutdown mirrors the
+// disconnect gate: Close drains every recipient connection at end of run and a
+// drop reported while draining is not a lost delivery the run depended on.
+func TestDirectPool_RecordSlowConsumer_IgnoresOrderlyShutdown(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	p.Close()
+	p.recordSlowConsumer()
+	assert.Zero(t, p.SlowConsumers())
+}
+
+func TestDirectPool_RecordSlowConsumerFor_IgnoresUnregisteredUser(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	du := &directUser{id: "u-1"} // never reached p.users
+
+	p.recordSlowConsumerFor(du)
+
+	assert.Zero(t, p.SlowConsumers(),
+		"a connection Add abandoned was never a tracked recipient")
+}
+
+func TestDirectPool_RecordSlowConsumerFor_CountsRegisteredUser(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	du := &directUser{id: "u-1"}
+	du.registered.Store(true)
+
+	p.recordSlowConsumerFor(du)
+
+	assert.Equal(t, int64(1), p.SlowConsumers(),
+		"a tracked recipient whose pending queue overflowed lost deliveries the run is judging")
+}
+
+// TestNATSErrorHandler_SlowConsumer_ComposesHealthAndHook pins that the hook is
+// composed with, not substituted for, health's own handling:
+// nats.ErrorHandler overwrites rather than chains, so a caller that attached its
+// own would silently disable pool health tracking.
+func TestNATSErrorHandler_SlowConsumer_ComposesHealthAndHook(t *testing.T) {
+	metrics := NewMetrics()
+	t.Cleanup(metrics.stopNATSHealth)
+	health := newLoadgenNATSHealth("daily", metrics, time.Now)
+	var hooked int
+
+	natsErrorHandler(health, func() { hooked++ })(nil, nil, nats.ErrSlowConsumer)
+
+	assert.Equal(t, 1, hooked)
+	assert.Equal(t, float64(1), promtestutil.ToFloat64(
+		metrics.NATSConnectionEvents.WithLabelValues("daily", "buffer_full"),
+	), "health must still see the slow consumer")
+}
+
+// TestNATSErrorHandler_NilHook_StillFeedsHealth is daily's path: no hook is
+// supplied, and the behaviour must be exactly what it was before verify needed
+// the signal.
+func TestNATSErrorHandler_NilHook_StillFeedsHealth(t *testing.T) {
+	metrics := NewMetrics()
+	t.Cleanup(metrics.stopNATSHealth)
+	health := newLoadgenNATSHealth("daily", metrics, time.Now)
+
+	assert.NotPanics(t, func() {
+		natsErrorHandler(health, nil)(nil, nil, nats.ErrSlowConsumer)
+	})
+	assert.Equal(t, float64(1), promtestutil.ToFloat64(
+		metrics.NATSConnectionEvents.WithLabelValues("daily", "buffer_full"),
+	))
+}
+
+func TestNATSErrorHandler_OtherError_IsNotSlowConsumer(t *testing.T) {
+	metrics := NewMetrics()
+	t.Cleanup(metrics.stopNATSHealth)
+	health := newLoadgenNATSHealth("daily", metrics, time.Now)
+	var hooked int
+
+	natsErrorHandler(health, func() { hooked++ })(nil, nil, errors.New("permission violation"))
+
+	assert.Zero(t, hooked, "only a slow consumer costs the run its deliveries")
+	assert.Equal(t, float64(1), promtestutil.ToFloat64(
+		metrics.NATSConnectionEvents.WithLabelValues("daily", "async_error"),
+	))
 }

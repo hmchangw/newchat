@@ -266,3 +266,40 @@ func TestRenderVerifyJSON_CarriesAllViolations(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &back))
 	assert.Len(t, back.Result.Violations, 25, "JSON must not be capped like the console")
 }
+
+// TestRenderVerifyConsole_ShowsCrossRoomDeliveries pins that a rejected
+// cross-room credit is visible to the operator. Without it, the probe reports
+// missing_recipient with nothing on the summary saying a delivery for another
+// room carried the same message ID.
+func TestRenderVerifyConsole_ShowsCrossRoomDeliveries(t *testing.T) {
+	rep := reportForTest()
+	rep.Counts.CrossRoom = 3
+
+	out := renderVerifyConsole(rep)
+	assert.Contains(t, out, "3 cross-room")
+}
+
+func TestRenderVerifyConsole_OmitsCrossRoomAtZero(t *testing.T) {
+	out := renderVerifyConsole(reportForTest())
+	assert.NotContains(t, out, "cross-room",
+		"the clause must not clutter the normal case")
+}
+
+func TestRenderVerifyJSON_CarriesCrossRoomCount(t *testing.T) {
+	rep := reportForTest()
+	rep.Counts.CrossRoom = 3
+
+	raw, err := renderVerifyJSON(rep)
+	require.NoError(t, err)
+
+	var doc struct {
+		Counts map[string]json.RawMessage `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	assert.Contains(t, doc.Counts, "crossRoom")
+	assert.NotContains(t, doc.Counts, "CrossRoom")
+
+	var back VerifyReport
+	require.NoError(t, json.Unmarshal(raw, &back))
+	assert.Equal(t, 3, back.Counts.CrossRoom)
+}

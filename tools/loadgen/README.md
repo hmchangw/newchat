@@ -1476,6 +1476,14 @@ Every violation carries `roomId`, and where applicable `msgId` / `users` /
 | `membership_add_ineffective` | After an add, a send from that user is still rejected by the gatekeeper | Gatekeeper authorization state not reflecting the new membership |
 | `membership_remove_ineffective` | After a remove, a send from that user is still accepted by the gatekeeper | Gatekeeper authorization state not reflecting the removal (stale allow) |
 
+A delivery is credited to a probe only when the room named in the event
+payload is the room the probe was published into. A broadcast carrying a
+probe's message ID but encoded for a **different** room is refused credit
+and counted as `crossRoom` — it raises no violation kind of its own (the
+nine above are the whole set), and the probe then reports
+`missing_recipient` for the room it was actually sent to, which is the
+honest observation. See `N cross-room (credit refused)` below.
+
 The two `*_ineffective` checks only fire on a **definite** authorization
 answer: a success reply, or an errcode reply carrying the gatekeeper's
 `not_subscribed` reason. Any other errcode reply decided something else and
@@ -1501,6 +1509,20 @@ VIOLATIONS (showing 4 of 4)
 
 VERDICT: FAIL
 ```
+
+The `delivery:` line grows a clause when a delivery carried a tracked
+message ID but named some other room:
+
+```
+delivery:    605 complete / 6 partial / 1 total-loss / 2 cross-room (credit refused)
+```
+
+Those two deliveries were **not** counted toward their probes — crediting a
+cross-room delivery would let a run PASS despite a misrouted broadcast
+wherever the two rooms' member sets overlap. The probe's own outcome stays
+honest (`missing_recipient` for the room it was really sent to), and this
+clause is the only place the refusal is visible, so it is omitted entirely
+at zero. JSON: `counts.crossRoom`.
 
 The `membership:` line grows a fourth clause when some changes could not be
 observed at all:
@@ -1545,14 +1567,27 @@ that it could not judge them rather than guessing.
 
 An INCONCLUSIVE run prints a `REASONS` block instead of (or in addition to)
 `VIOLATIONS`, naming which signal made the run untrustworthy (dropped
-recipient connection, readback error, membership-setup harness failure, too
-many unresolved membership changes, membership never exercised, probe floor
-not met, GC pressure, or cancellation — see `evaluateVerify` in
+recipient connection, slow consumer on a recipient connection, readback
+error, membership-setup harness failure, too many unresolved membership
+changes, membership never exercised, probe floor not met, GC pressure, or
+cancellation — see `evaluateVerify` in
 `tools/loadgen/verify_verdict.go`). The console violation list is capped at
 10; pass `--json=<path>` for the full, uncapped report.
 
-Three of those deserve a note:
+Four of those deserve a note:
 
+- **A slow consumer on a recipient connection is a harness fault, and the
+  run says so.** Each verify recipient holds its own NATS connection with a
+  bounded pending queue per subscription; when one overflows, nats.go drops
+  deliveries and reports `ErrSlowConsumer`. A dropped delivery is
+  indistinguishable from one the system never sent, so without this signal
+  the run would report `missing_recipient` (or `total_loss`) against the
+  system for load the harness itself could not keep up with. It is a latch,
+  not a budget: one slow consumer means at least one delivery was lost to
+  the load box. Drops during the end-of-run drain do not count, and neither
+  do drops on a connection that never finished joining the pool. If it
+  fires, give the load box more headroom or lower `--users` / the preset's
+  send rate. `daily` is unaffected — it never reads the counter.
 - **Unresolved membership changes are tolerated up to `max(1, changes/10)`**
   — one is always forgiven, then 10% of the changes issued. An oracle that
   did not answer (either one) and a never-observed change spend the *same*
@@ -1690,6 +1725,13 @@ Practical consequences for the first operator to run this:
   subscribed regardless of membership, so a room-lane leakage check would
   fail on every run and test NATS ACLs rather than the chat system. Channel
   rooms are exempt.
+- **Only the payload room is matched, not the subscribed one.** A delivery
+  must name the probe's room to be credited, but the room is read from the
+  event payload — the subject the delivery actually arrived on is not
+  compared against it, so a broadcast published to the wrong subject with a
+  correct payload is not detected as misrouting. Threading the subscribed
+  room through would widen the delivery sink for a signal the per-user lane
+  cannot supply at all (it is addressed per account, not per room).
 - **Single-site only.** Cross-site federation (INBOX/OUTBOX) is out of
   scope, same as `daily`.
 - **`--lane=global` against a `ROOM_SUBJECT_MODE=local` stack yields zero

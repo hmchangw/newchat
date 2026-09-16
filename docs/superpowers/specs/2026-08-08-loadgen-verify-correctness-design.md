@@ -408,6 +408,35 @@ instead (§9.1), which is what the system actually controls.
 This is why DM rooms are a mandatory share of the probe-room mix (§6.0
 step 1) — without them the leakage check has no lane to run on.
 
+### 7.4 Room matching — a delivery must name the probe's room
+
+A delivery is credited to a probe only when the room it names equals the
+room the probe was published into. `ProbeTracker` looks probes up by
+`messageID`, and a broadcast carrying a probe's `messageID` but encoded for
+a *different* room is not evidence that the probe reached anyone: where the
+two rooms' member sets overlap, crediting it lets a run PASS despite a
+cross-room delivery, and it weakens the completeness check generally.
+
+The room check runs **before** the expected-set check. A delivery naming
+another room says nothing about *this* probe's expected set — the recipient
+may be a perfectly legitimate member of the room the event names — so
+judging it there would report `unexpected_recipient` against a room the
+probe never touched.
+
+A refused credit is **counted, not swallowed**: `counts.crossRoom` in the
+JSON artifact, and a `N cross-room (credit refused)` clause on the console
+`delivery:` line, omitted at zero. It raises **no violation of its own** —
+the violation set in §3 is fixed at nine kinds, and adding a tenth is a
+spec change, not an implementation detail. The intended room's delivery is
+then correctly still absent, so the probe reports `missing_recipient` for
+the room it was actually sent to. That is the true observation.
+
+Only the *payload* room is compared. Comparing the **subscribed** room (the
+subject the delivery arrived on) against the payload room would also catch
+subject-vs-payload misrouting, but the per-user lane has no room to compare
+against and threading it would widen the `deliverySink` interface for a
+signal that exists on two of three lanes. Not done; see the note in §15.
+
 ## 8. Persistence Readback
 
 Runs after drain. O(probes), not O(probes × members) — cheap regardless of
@@ -659,6 +688,19 @@ from §3 surviving retries, **or** any membership change shows a
   cannot be attributed to the system under test. This is distinct from an
   epoch change: a membership change legitimately alters the expected set
   (§9.2) and is never INCONCLUSIVE on its own
+- **A slow consumer was reported on a tracked recipient's connection.** When
+  a subscription's bounded nats.go pending queue overflows, nats.go drops
+  deliveries and raises `ErrSlowConsumer`. A dropped delivery is
+  indistinguishable downstream from a message the system never sent, so
+  §3's `missing_recipient` / `total_loss` would be charged to the system for
+  a harness fault — exactly what this list exists to prevent. Detection is
+  the `nats.ErrorHandler` the pool already installs for connection health;
+  the hook is *composed* with health's own handling rather than replacing it
+  (`nats.ErrorHandler` overwrites rather than chains), and is gated like the
+  dropped-recipient hook: not counted once `Close` has begun, and not
+  counted for a connection that never entered the pool. The counter is
+  per-pool and read only by `verify` — `daily`, which supplies no hook, is
+  unaffected
 - Readback errored or timed out
 - The harness itself failed while setting up a membership change, and the
   pool or the model has diverged from the system. Two causes, both
@@ -898,6 +940,9 @@ test will be added.
 | Membership change races a concurrent send ⇒ ambiguous expectation | Epoch + per-room mutation barrier + settle window; probes suppressed from before the membership RPC until the window closes, never adjudicated (§9.2) |
 | Membership write lost ⇒ system and its self-report agree | Dual oracle; delivery judged against loadgen's model, not `subscription.list` (§9.3) |
 | Added member unobservable (no dedicated conn) | Reserve floaters pre-connected; `SubscribeRoom` on add (§6.0 step 3) |
+| Cross-room delivery credited to a probe ⇒ silent PASS | Credit refused unless the payload room equals the probe's room; refusals counted in `counts.crossRoom` and shown on the `delivery:` line (§7.4) |
+| Subject-vs-payload misrouting undetected | **Accepted, not mitigated.** Only the payload room is compared. The subscribed room would need threading through `deliverySink`, and the per-user lane has no room to compare against, so the interface would widen for a signal that exists on two of three lanes (§7.4) |
+| Harness-side slow-consumer drop ⇒ phantom `missing_recipient` | `ErrSlowConsumer` on a recipient connection counted per pool and gating the verdict as INCONCLUSIVE (§10) |
 
 ## 16. Success Criteria
 

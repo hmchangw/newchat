@@ -30,6 +30,12 @@ type directPool struct {
 	// recipient that went away mid-run cannot have its non-delivery attributed
 	// to the system under test (verify spec §10).
 	dropped atomic.Int64
+	// slow counts nats.go slow-consumer errors on recipient connections. When a
+	// subscription's bounded pending queue overflows, nats.go drops deliveries
+	// and reports ErrSlowConsumer; downstream that gap is indistinguishable from
+	// a message the system never sent, so the probe would report
+	// missing_recipient or total_loss for a harness fault (verify spec §10).
+	slow atomic.Int64
 
 	// sink is read on every received broadcast, so it is deliberately NOT
 	// behind p.mu: in `daily` every direct user's every arrival would then
@@ -136,6 +142,32 @@ func (p *directPool) recordDisconnectFor(du *directUser) {
 	p.recordDisconnect()
 }
 
+// SlowConsumers reports how many slow-consumer errors were raised on recipient
+// connections, i.e. how many times nats.go dropped deliveries on the harness
+// side rather than the system failing to send them.
+func (p *directPool) SlowConsumers() int64 { return p.slow.Load() }
+
+// recordSlowConsumer is the slow-consumer hook, gated like recordDisconnect:
+// Close drains every connection at end of run, and a drop reported while
+// draining is not a delivery the run was still judging.
+func (p *directPool) recordSlowConsumer() {
+	if p.closing.Load() {
+		return
+	}
+	p.slow.Add(1)
+}
+
+// recordSlowConsumerFor is the per-connection hook armed by Add, gated on
+// registration for the same reason as recordDisconnectFor: until a connection
+// is in p.users it is not a tracked recipient, and no probe has been emitted
+// against it, so an activation-time overflow says nothing about the run.
+func (p *directPool) recordSlowConsumerFor(du *directUser) {
+	if !du.registered.Load() {
+		return
+	}
+	p.recordSlowConsumer()
+}
+
 // MissingUsers returns the subset of ids that are not in the pool. Counting
 // pool size is not enough: activateUsers skips a user whose Add failed and the
 // freed slot is backfilled by the next user, so Size() can reach the expected
@@ -175,7 +207,7 @@ func (p *directPool) Add(u *userState) error {
 		metrics = p.collector.m
 	}
 	nc, err := connectWithCredsHealthHook(p.url, "loadgen-daily-"+u.ID, p.credsFile, "daily",
-		metrics, func() { p.recordDisconnectFor(du) })
+		metrics, func() { p.recordDisconnectFor(du) }, func() { p.recordSlowConsumerFor(du) })
 	if err != nil {
 		return fmt.Errorf("connect for %s: %w", u.ID, err)
 	}
@@ -384,18 +416,44 @@ func connectWithCredsHealth(
 	metrics *Metrics,
 	observers ...loadgenNATSObserver,
 ) (*nats.Conn, error) {
-	return connectWithCredsHealthHook(url, name, credsFile, pool, metrics, nil, observers...)
+	return connectWithCredsHealthHook(url, name, credsFile, pool, metrics, nil, nil, observers...)
 }
 
-// connectWithCredsHealthHook is connectWithCredsHealth plus a per-connection
-// disconnect callback, composed with the health handler rather than replacing
-// it: nats.DisconnectErrHandler overwrites rather than chains, so a caller that
-// attached its own would silently disable pool health tracking.
+// natsErrorHandler builds the async-error callback. A slow consumer feeds pool
+// health and, when supplied, the caller's slow-consumer hook; every other async
+// error is health's alone.
 //
-// The hook exists because the health observer is a pool-level state signal
+// Named rather than inlined so the composition is testable without a live
+// server: nats.ErrorHandler overwrites rather than chains, so a caller that
+// attached its own would silently disable health's buffer-full accounting.
+func natsErrorHandler(health *loadgenNATSHealth, onSlowConsumer func()) nats.ErrHandler {
+	return func(_ *nats.Conn, _ *nats.Subscription, err error) {
+		if errors.Is(err, nats.ErrSlowConsumer) {
+			health.bufferFull(err)
+			if onSlowConsumer != nil {
+				onSlowConsumer()
+			}
+			return
+		}
+		health.asyncError(err)
+	}
+}
+
+// connectWithCredsHealthHook is connectWithCredsHealth plus per-connection
+// disconnect and slow-consumer callbacks, composed with the health handlers
+// rather than replacing them: nats.DisconnectErrHandler and nats.ErrorHandler
+// overwrite rather than chain, so a caller that attached its own would silently
+// disable pool health tracking.
+//
+// The hooks exist because the health observer is a pool-level state signal
 // (loadgenNATSPoolState aggregates across connections), while verify's
-// DroppedRecipients has to count individual recipient connections — a lost
-// recipient is what makes a non-delivery unattributable.
+// DroppedRecipients and SlowConsumers have to count individual recipient
+// connections — a lost recipient, or one whose pending queue overflowed, is
+// what makes a non-delivery unattributable.
+//
+// Both hooks are optional; with neither supplied the connection behaves exactly
+// as it did before verify needed the signals, which is daily's path through
+// connectWithCredsHealth.
 func connectWithCredsHealthHook(
 	url,
 	name,
@@ -403,6 +461,7 @@ func connectWithCredsHealthHook(
 	pool string,
 	metrics *Metrics,
 	onDisconnect func(),
+	onSlowConsumer func(),
 	observers ...loadgenNATSObserver,
 ) (*nats.Conn, error) {
 	health := newLoadgenNATSHealth(pool, metrics, nil)
@@ -422,13 +481,7 @@ func connectWithCredsHealthHook(
 		}),
 		nats.ReconnectHandler(func(connection *nats.Conn) { health.reconnected(connection.ConnectedUrlRedacted()) }),
 		nats.ClosedHandler(func(_ *nats.Conn) { health.closed() }),
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-			if errors.Is(err, nats.ErrSlowConsumer) {
-				health.bufferFull(err)
-				return
-			}
-			health.asyncError(err)
-		}),
+		nats.ErrorHandler(natsErrorHandler(health, onSlowConsumer)),
 	}
 	if credsFile != "" {
 		opts = append(opts, nats.UserCredentials(credsFile))

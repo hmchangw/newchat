@@ -235,3 +235,76 @@ func TestShouldProbe_DiffersAcrossSeeds(t *testing.T) {
 	}
 	assert.Positive(t, diff, "different seeds must produce different probe sets")
 }
+
+// TestProbeTracker_DeliveryForWrongRoom_DoesNotCredit pins that a broadcast
+// carrying a probe's message ID but encoded for a different room cannot count
+// toward that probe's completeness. Where two rooms' member sets overlap, a
+// credited cross-room delivery lets a run PASS despite a misrouted broadcast.
+// The intended room's delivery is then still absent, which is the honest
+// observation: missing_recipient for the room the probe was sent to.
+func TestProbeTracker_DeliveryForWrongRoom_DoesNotCredit(t *testing.T) {
+	tr := NewProbeTracker()
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1", "u-2"})
+
+	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
+	tr.RecordDelivery("u-2", "m1", "room-small-000009", laneGlobal, at(2))
+
+	vs := tr.Finalize()
+	require.Len(t, vs, 1)
+	assert.Equal(t, KindMissingRecipient, vs[0].Kind)
+	assert.Equal(t, []string{"u-2"}, vs[0].Users,
+		"the room the probe was actually sent to never delivered to u-2")
+	assert.Equal(t, 1, tr.Counts().CrossRoom,
+		"a rejected credit must stay visible, not vanish")
+}
+
+func TestProbeTracker_RoomMatchGatesCredit(t *testing.T) {
+	tests := []struct {
+		name          string
+		deliveredRoom string
+		wantComplete  int
+		wantCrossRoom int
+	}{
+		{name: "registered room credits", deliveredRoom: "room-small-000001", wantComplete: 1},
+		{name: "another room is rejected", deliveredRoom: "room-small-000002", wantCrossRoom: 1},
+		// An event with no roomId cannot be shown to belong to this probe's
+		// room, so crediting it would re-open the same hole.
+		{name: "absent room id is rejected", deliveredRoom: "", wantCrossRoom: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := NewProbeTracker()
+			tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1"})
+
+			tr.RecordDelivery("u-1", "m1", tt.deliveredRoom, laneGlobal, at(2))
+
+			c := tr.Counts()
+			assert.Equal(t, tt.wantComplete, c.Complete)
+			assert.Equal(t, tt.wantCrossRoom, c.CrossRoom)
+		})
+	}
+}
+
+// TestProbeTracker_CrossRoomOnUserLane_IsNotLeakage pins the ordering of the
+// two checks. A user-lane delivery for some other room says nothing about this
+// probe's expected set — the recipient may be a perfectly legitimate member of
+// the room the event names — so it is counted as cross-room, not reported as a
+// privacy incident against a room it was never sent to.
+func TestProbeTracker_CrossRoomOnUserLane_IsNotLeakage(t *testing.T) {
+	tr := NewProbeTracker()
+	tr.RegisterProbe("m1", "room-dm-000001", 0, []string{"u-1", "u-2"})
+
+	tr.RecordDelivery("u-1", "m1", "room-dm-000001", laneUser, at(2))
+	tr.RecordDelivery("u-2", "m1", "room-dm-000001", laneUser, at(2))
+	tr.RecordDelivery("u-9", "m1", "room-dm-000007", laneUser, at(2))
+
+	assert.Empty(t, tr.Finalize())
+	assert.Equal(t, 1, tr.Counts().CrossRoom)
+}
+
+func TestProbeTracker_CrossRoomForUnknownMsgID_IsNotCounted(t *testing.T) {
+	tr := NewProbeTracker()
+	// Untracked traffic is 99% of the workload and is not a cross-room signal.
+	tr.RecordDelivery("u-9", "not-a-probe", "room-small-000009", laneGlobal, at(2))
+	assert.Zero(t, tr.Counts().CrossRoom)
+}

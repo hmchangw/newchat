@@ -44,6 +44,13 @@ type ProbeCounts struct {
 	Partial    int `json:"partial"`
 	TotalLoss  int `json:"totalLoss"`
 	Leaked     int `json:"leaked"`
+	// CrossRoom counts deliveries that carried a tracked message ID but named a
+	// different room than the probe was published into, and were therefore
+	// refused credit. Reported rather than silently dropped: the refusal is what
+	// keeps the probe's own missing_recipient honest, and a non-zero count is
+	// itself evidence of misrouting even though it raises no violation of its
+	// own (spec §3 fixes the violation set at nine kinds).
+	CrossRoom int `json:"crossRoom"`
 }
 
 // ProbeTracker records per-recipient delivery for sampled messages and reports
@@ -57,6 +64,7 @@ type ProbeTracker struct {
 	probes map[string]*probeRecord
 
 	suppressed int
+	crossRoom  int
 }
 
 // NewProbeTracker returns a ready-to-use tracker.
@@ -83,14 +91,30 @@ func (t *ProbeTracker) RegisterProbe(msgID, roomID string, epoch int, expected [
 	t.mu.Unlock()
 }
 
-// RecordDelivery notes that userID received msgID on the given lane. Deliveries
-// for untracked messages are ignored cheaply — 99% of traffic is untracked.
+// RecordDelivery notes that userID received msgID in roomID on the given lane.
+// Deliveries for untracked messages are ignored cheaply — 99% of traffic is
+// untracked.
+//
+// roomID must match the room the probe was published into. A broadcast carrying
+// a probe's message ID but encoded for another room is not evidence that the
+// probe reached anyone: where two rooms' member sets overlap, crediting it lets
+// a run PASS despite a cross-room delivery. The credit is refused and counted,
+// so the probe still reports missing_recipient for the room it was actually
+// sent to — the true observation — while the refusal stays visible in the
+// report instead of vanishing.
 func (t *ProbeTracker) RecordDelivery(userID, msgID, roomID string, ln lane, _ time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	rec, ok := t.probes[msgID]
 	if !ok {
+		return
+	}
+	// Before the expectation check, not after: a delivery naming another room
+	// says nothing about *this* probe's expected set, so judging the recipient
+	// against it would report leakage from a room the probe never touched.
+	if roomID != rec.roomID {
+		t.crossRoom++
 		return
 	}
 	if _, expected := rec.expected[userID]; !expected {
@@ -118,7 +142,7 @@ func (t *ProbeTracker) Counts() ProbeCounts {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	c := ProbeCounts{Tracked: len(t.probes), Suppressed: t.suppressed}
+	c := ProbeCounts{Tracked: len(t.probes), Suppressed: t.suppressed, CrossRoom: t.crossRoom}
 	for _, rec := range t.probes {
 		got := rec.deliveredUsers()
 		switch {

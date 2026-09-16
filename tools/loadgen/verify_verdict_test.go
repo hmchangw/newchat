@@ -523,3 +523,35 @@ func TestEvaluateVerify_AllReasonsCollected(t *testing.T) {
 	r := evaluateVerify(in)
 	assert.Len(t, r.Reasons, 3, "every failing signal must be reported, not just the first")
 }
+
+// TestEvaluateVerify_SlowConsumer_IsInconclusive pins that a harness-side drop
+// is never reported as a system defect. nats.go drops deliveries on a full
+// pending queue and raises ErrSlowConsumer; downstream that gap is
+// indistinguishable from a message the system never sent, so Finalize would
+// report it as missing_recipient or total_loss.
+func TestEvaluateVerify_SlowConsumer_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.SlowConsumers = 1
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	require.Len(t, r.Reasons, 1)
+	assert.Contains(t, r.Reasons[0], "slow consumer")
+	assert.Equal(t, 2, r.Verdict.ExitCode())
+}
+
+func TestEvaluateVerify_SlowConsumerWithViolations_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.SlowConsumers = 2
+	in.Violations = []Violation{{Kind: KindMissingRecipient, MsgID: "m1"}}
+
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict,
+		"the harness dropped deliveries, so the missing recipient cannot be attributed to the system")
+}
+
+func TestEvaluateVerify_NoSlowConsumer_IsPass(t *testing.T) {
+	in := passingInputs()
+	in.SlowConsumers = 0
+
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict)
+}

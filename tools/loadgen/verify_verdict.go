@@ -34,7 +34,13 @@ type VerifyInputs struct {
 	// verdict. See evaluateVerify.
 	MultiplexDrops    int64
 	DroppedRecipients int
-	ReadbackErr       error
+	// SlowConsumers counts slow-consumer errors raised on recipient connections.
+	// nats.go drops deliveries when a subscription's bounded pending queue
+	// overflows, and a dropped delivery is indistinguishable downstream from one
+	// the system never sent — Finalize would report the gap as
+	// missing_recipient or total_loss, attributing a harness fault to the system.
+	SlowConsumers int
+	ReadbackErr   error
 	// OracleErrs counts changes an oracle failed to resolve — subscription.list
 	// erroring, or the authorization probe answering nothing — and
 	// OracleErrSample carries the first; they are tolerated up to
@@ -153,6 +159,12 @@ func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugePar
 		reasons = append(reasons, fmt.Sprintf(
 			"%d tracked recipient connection dropped mid-run — non-delivery cannot be attributed to the system",
 			in.DroppedRecipients))
+	}
+	if in.SlowConsumers > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"%d slow consumer error on recipient connections — nats.go dropped deliveries harness-side, "+
+				"so a missing delivery cannot be attributed to the system",
+			in.SlowConsumers))
 	}
 	if in.ReadbackErr != nil {
 		reasons = append(reasons, fmt.Sprintf("readback query failed: %v", in.ReadbackErr))
