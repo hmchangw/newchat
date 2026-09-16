@@ -39,6 +39,6 @@ func soakContentDigest(body string) string {
 	return soakcatalog.ContentDigest(body)
 }
 
-func searchProbeTerm(content string) string {
-	return soakcatalog.SearchTerm(content)
+func searchProbeTerm(content, skipPrefix string) string {
+	return soakcatalog.SearchTerm(content, skipPrefix)
 }

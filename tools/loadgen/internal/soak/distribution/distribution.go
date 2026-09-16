@@ -138,6 +138,49 @@ func ContentOfSize(size int) string {
 	return strings.Repeat("x", max(0, size))
 }
 
+// PrefixBudgetBytes reports what a prefix costs inside the at-rest envelope.
+// atrest.Encrypt JSON-marshals the body before sealing it, so a quote,
+// backslash or HTML metacharacter serializes wider than it reads: charging raw
+// length would understate every sample by the difference.
+func PrefixBudgetBytes(prefix string) int {
+	if prefix == "" {
+		return 0
+	}
+	serialized, err := json.Marshal(prefix)
+	if err != nil {
+		return len(prefix)
+	}
+	return len(serialized) - 2 // drop the quotes json.Marshal wraps it in
+}
+
+// ContentOfSizeWithPrefix returns a body that serializes to `size` bytes and
+// begins with prefix. The prefix is absorbed into the sampled budget rather
+// than added on top of it: the percentiles were validated against the
+// gatekeeper's content limit and against the page budget, and widening every
+// body would invalidate both. Filler is always "x", which never escapes, so
+// charging the prefix its serialized cost makes the total exact.
+//
+// The one case that overshoots is a sampled size below that cost, where the
+// prefix is returned whole — a half-written label would be worse than none,
+// and the overshoot is bounded by the prefix.
+func ContentOfSizeWithPrefix(prefix string, size int) string {
+	budget := PrefixBudgetBytes(prefix)
+	if size <= budget {
+		return prefix
+	}
+	return prefix + ContentOfSize(size-budget)
+}
+
+// MaxPrefixBytes reports the longest prefix that still leaves filler at the
+// configured median, so a label cannot quietly turn every body into a constant.
+//
+// A median at or below the encryption overhead fits no prefix at all. It is
+// rejected in its own right when the sizer is built; clamping at zero keeps
+// that config from reporting a negative budget here instead.
+func MaxPrefixBytes(medianEncryptedBytes int) int {
+	return max(0, medianEncryptedBytes-encryptedContentOverhead-1)
+}
+
 // ThreadBudgetSampler samples the number of replies allowed for a thread.
 type ThreadBudgetSampler struct {
 	rng   *rand.Rand

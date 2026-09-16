@@ -258,6 +258,7 @@ type soakRuntimeSelector struct {
 	members map[string][]send.Target
 	picker  *distribution.RoomPicker
 	sizer   *distribution.PayloadSizer
+	prefix  string
 	rng     *rand.Rand
 }
 
@@ -289,6 +290,7 @@ func newSoakRuntimeSelector(
 	}
 	selector := &soakRuntimeSelector{
 		rooms: make([]string, len(shape.Rooms)), picker: picker, sizer: sizer,
+		prefix:  cfg.MessagePrefix,
 		rng:     rand.New(rand.NewSource(seed + 2)),
 		members: make(map[string][]send.Target, len(shape.Rooms)),
 	}
@@ -370,7 +372,13 @@ func (s *soakRuntimeSelector) nextSend() (send.Target, string) {
 	roomID := s.rooms[s.picker.Next()]
 	targets := s.members[roomID]
 	target := targets[s.rng.Intn(len(targets))]
-	return target, distribution.ContentOfSize(s.sizer.NextContentBytes())
+	return target, distribution.ContentOfSizeWithPrefix(s.prefix, s.sizer.NextContentBytes())
+}
+
+// soakEditBody is the replacement body the edit lane writes. It carries the
+// same label as a send so an edited message stays recognisable as load traffic.
+func soakEditBody(prefix string) string {
+	return prefix + "soak-edited"
 }
 
 type soakSendObservation struct {
@@ -788,6 +796,7 @@ func runSoakWorkload(
 		nil,
 	)
 	catalog.RetainSearchTerms(cfg.Soak.SearchObserverEnabled)
+	catalog.SkipSearchTermPrefix(cfg.Soak.MessagePrefix)
 	scheduler := mutation.NewScheduler(
 		cfg.Soak.SoftDeleteRatio,
 		rand.New(rand.NewSource(seed+3)),
@@ -1131,7 +1140,7 @@ func runSoakWorkload(
 			case mutation.KindPinFamily:
 				_, _ = mutator.PinOrUnpin(actionCtx, roomID)
 			default:
-				_, _ = mutator.Edit(actionCtx, roomID, "soak-edited")
+				_, _ = mutator.Edit(actionCtx, roomID, soakEditBody(cfg.Soak.MessagePrefix))
 			}
 			return nil
 		},

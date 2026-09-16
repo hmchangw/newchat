@@ -70,17 +70,17 @@ type Candidate struct {
 // setContent reduces a message body to what the catalogue keeps: the
 // digest the read-back verifiers compare against, its length, and the one term
 // the search-index probe queries with.
-func setContent(candidate *Candidate, body string) {
+func setContent(candidate *Candidate, body, skipPrefix string) {
 	candidate.ContentSHA256 = ContentDigest(body)
 	candidate.ContentLength = len(body)
-	candidate.SearchTerm = SearchTerm(body)
+	candidate.SearchTerm = SearchTerm(body, skipPrefix)
 }
 
 // reduceContentLocked is the single place a body enters the catalogue. Every
 // path that admits a message goes through it, so none of them can forget to
 // record the digest and leave later read-backs comparing against an empty one.
 func (c *Catalog) reduceContentLocked(candidate *Candidate, body string) {
-	setContent(candidate, body)
+	setContent(candidate, body, c.searchTermSkipPrefix)
 	candidate.Content = ""
 	if !c.retainSearchTerms {
 		candidate.SearchTerm = ""
@@ -96,7 +96,15 @@ func ContentDigest(body string) string {
 
 // SearchTerm reduces a payload to a term the analyzer will match. The returned
 // term is cloned so retaining it does not retain the complete message body.
-func SearchTerm(content string) string {
+//
+// A leading skipPrefix is dropped first. Every body carries the same label, so
+// a term taken from it matches every message in the room: the index probe would
+// page through unrelated hits, miss the one it asked about, and report a
+// delivery loss the label invented.
+func SearchTerm(content, skipPrefix string) string {
+	if skipPrefix != "" {
+		content = strings.TrimPrefix(content, skipPrefix)
+	}
 	for field := range strings.FieldsSeq(content) {
 		if len(field) >= 3 {
 			return strings.Clone(field)
@@ -155,10 +163,13 @@ type Catalog struct {
 	// term is the whole body — the thing this catalogue exists not to hold. It
 	// is kept only when the observer that needs it is configured.
 	retainSearchTerms bool
-	perRoomCap        int
-	globalCap         int
-	persistGrace      time.Duration
-	clock             TimeProvider
+	// searchTermSkipPrefix is the constant label every body carries, dropped
+	// before a term is taken so the term still discriminates one message.
+	searchTermSkipPrefix string
+	perRoomCap           int
+	globalCap            int
+	persistGrace         time.Duration
+	clock                TimeProvider
 
 	shards [shardCount]shard
 
@@ -191,6 +202,12 @@ func New(
 // is the only reader that needs the query term.
 func (c *Catalog) RetainSearchTerms(retain bool) {
 	c.retainSearchTerms = retain
+}
+
+// SkipSearchTermPrefix declares the constant prefix every soak body carries, so
+// the probe term is taken from the part that differs between messages.
+func (c *Catalog) SkipSearchTermPrefix(prefix string) {
+	c.searchTermSkipPrefix = prefix
 }
 
 func (c *Catalog) TrackPublished(candidate *Candidate) error {

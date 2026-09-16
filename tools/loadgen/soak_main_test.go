@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,4 +287,67 @@ func TestSoakMaxPages_HoldsTheRowBudgetAcrossPageSizes(t *testing.T) {
 func TestSoakMaxPages_NonPositivePageLimit(t *testing.T) {
 	assert.Equal(t, 1, soakMaxPages(0))
 	assert.Equal(t, 1, soakMaxPages(-5))
+}
+
+func soakSelectorForPrefix(t *testing.T, cfg *soakConfig) *soakRuntimeSelector {
+	t.Helper()
+	selector, err := newSoakRuntimeSelector(&soakTopology{
+		ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
+		Rooms:       []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
+		Subscriptions: []model.Subscription{
+			{
+				RoomID: "room-1", IsSubscribed: true,
+				User: model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+		},
+	}, cfg, 42)
+	require.NoError(t, err)
+	return selector
+}
+
+func TestSoakRuntimeSelector_LabelsEverySendWithTheConfiguredPrefix(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MessagePrefix = "[LoadTest] "
+	selector := soakSelectorForPrefix(t, &cfg)
+
+	for range 200 {
+		_, content := selector.nextSend()
+		assert.True(t, strings.HasPrefix(content, cfg.MessagePrefix), "body was %q", content)
+	}
+}
+
+// The prefix comes out of the sampled budget. Adding it on top would push the
+// largest bodies past the gatekeeper's 20KB limit and past the page budget
+// SOAK_PAYLOAD_MAX_BYTES was validated against.
+func TestSoakRuntimeSelector_PrefixDoesNotWidenThePayloadDistribution(t *testing.T) {
+	labelled := validSoakConfig(t)
+	labelled.MessagePrefix = "[LoadTest] "
+	plain := validSoakConfig(t)
+	plain.MessagePrefix = ""
+
+	withLabel := soakSelectorForPrefix(t, &labelled)
+	withoutLabel := soakSelectorForPrefix(t, &plain)
+
+	for range 200 {
+		_, labelledBody := withLabel.nextSend()
+		_, plainBody := withoutLabel.nextSend()
+		assert.Equal(t, len(plainBody), len(labelledBody),
+			"the same seed must sample the same size either way")
+	}
+}
+
+func TestSoakRuntimeSelector_EmptyPrefixKeepsTheUnlabelledBody(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MessagePrefix = ""
+	selector := soakSelectorForPrefix(t, &cfg)
+
+	_, content := selector.nextSend()
+
+	require.NotEmpty(t, content)
+	assert.Equal(t, strings.Repeat("x", len(content)), content)
+}
+
+func TestSoakEditBody_CarriesTheSamePrefixAsASend(t *testing.T) {
+	assert.Equal(t, "[LoadTest] soak-edited", soakEditBody("[LoadTest] "))
+	assert.Equal(t, "soak-edited", soakEditBody(""))
 }

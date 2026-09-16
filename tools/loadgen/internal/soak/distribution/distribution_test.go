@@ -204,3 +204,97 @@ func percentileInt(sorted []int, quantile float64) int {
 	index := int(float64(len(sorted)-1) * quantile)
 	return sorted[index]
 }
+
+func TestSoakDistribution_ContentOfSizeWithPrefixAbsorbsThePrefix(t *testing.T) {
+	const prefix = "[LoadTest] "
+
+	for _, size := range []int{len(prefix) + 1, 64, 1024, 10240} {
+		body := ContentOfSizeWithPrefix(prefix, size)
+
+		assert.Len(t, body, size,
+			"the prefix must come out of the sampled budget, never on top of it")
+		assert.True(t, strings.HasPrefix(body, prefix))
+		assert.Equal(t, strings.Repeat("x", size-len(prefix)), body[len(prefix):])
+	}
+}
+
+func TestSoakDistribution_ContentOfSizeWithPrefixNeverTruncatesThePrefix(t *testing.T) {
+	const prefix = "[LoadTest] "
+
+	// A sampled size below the prefix is ~8 sigma under the shipped
+	// percentiles, but a half-written "[LoadTe" would be worse than no label
+	// at all, so the prefix wins and the body overshoots by at most its length.
+	for _, size := range []int{-1, 0, 1, len(prefix) - 1, len(prefix)} {
+		assert.Equal(t, prefix, ContentOfSizeWithPrefix(prefix, size))
+	}
+}
+
+func TestSoakDistribution_ContentOfSizeWithEmptyPrefixMatchesContentOfSize(t *testing.T) {
+	for _, size := range []int{0, 1, 64, 1024} {
+		assert.Equal(t, ContentOfSize(size), ContentOfSizeWithPrefix("", size))
+	}
+}
+
+func TestSoakDistribution_MaxPrefixBytesLeavesRoomForFiller(t *testing.T) {
+	const median = 1024
+
+	limit := MaxPrefixBytes(median)
+	require.Positive(t, limit)
+
+	// A prefix at the limit still leaves at least one filler byte at the median.
+	body := ContentOfSizeWithPrefix(strings.Repeat("p", limit), median-encryptedContentOverhead)
+	assert.Greater(t, len(body), limit)
+}
+
+// A median below the encryption overhead fits no prefix. NewPayloadSizer
+// rejects such a median on its own; the budget here must not report a negative
+// one and make an empty prefix look oversized.
+func TestSoakDistribution_MaxPrefixBytesNeverGoesNegative(t *testing.T) {
+	assert.Equal(t, 0, MaxPrefixBytes(encryptedContentOverhead))
+	assert.Equal(t, 0, MaxPrefixBytes(0))
+	assert.Equal(t, 0, MaxPrefixBytes(-100))
+}
+
+// serializedContentCost measures what a body actually contributes to the
+// at-rest JSON envelope, which is what the payload percentiles model.
+func serializedContentCost(t *testing.T, body string) int {
+	t.Helper()
+	serialized, err := json.Marshal(atrest.EncryptedFields{Msg: body})
+	require.NoError(t, err)
+	return len(serialized) - (encryptedContentOverhead - gcmTagBytes)
+}
+
+// atrest.Encrypt JSON-marshals the body before sealing it, so a prefix holding
+// a quote, backslash or HTML metacharacter costs more bytes on the wire than it
+// has. Charging raw length would understate every sample by that difference.
+func TestSoakDistribution_PrefixBudgetChargesTheSerializedCost(t *testing.T) {
+	for _, prefix := range []string{
+		"[LoadTest] ", `"quoted" `, `back\slash `, "<b> ", "a&b ", "line\nbreak ", "\x01",
+	} {
+		assert.Equal(t, serializedContentCost(t, prefix), PrefixBudgetBytes(prefix),
+			"prefix %q", prefix)
+	}
+}
+
+func TestSoakDistribution_PrefixBudgetIsRawLengthWhenNothingEscapes(t *testing.T) {
+	assert.Equal(t, len("[LoadTest] "), PrefixBudgetBytes("[LoadTest] "))
+	assert.Equal(t, 0, PrefixBudgetBytes(""))
+}
+
+// The percentiles are validated against the gatekeeper limit and the page
+// budget, so a labelled body must serialize to exactly the sampled size —
+// whatever characters the label is made of.
+func TestSoakDistribution_LabelledBodySerializesToTheSampledSize(t *testing.T) {
+	for _, prefix := range []string{
+		"", "[LoadTest] ", `"quoted" `, `back\slash `, "<b> ", "a&b ", "line\nbreak ",
+	} {
+		for _, size := range []int{256, 1024, 10240} {
+			body := ContentOfSizeWithPrefix(prefix, size)
+
+			assert.Equal(t, size, serializedContentCost(t, body),
+				"prefix %q at size %d", prefix, size)
+			assert.LessOrEqual(t, len(body), size,
+				"raw body must also stay inside the gatekeeper's plaintext limit")
+		}
+	}
+}

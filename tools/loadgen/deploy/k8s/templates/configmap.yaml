@@ -82,6 +82,7 @@ data:
   SOAK_PAYLOAD_MEDIAN_BYTES: {{ .Values.soak.payloadMedianBytes | quote }}
   SOAK_PAYLOAD_P95_BYTES: {{ .Values.soak.payloadP95Bytes | quote }}
   SOAK_PAYLOAD_MAX_BYTES: {{ .Values.soak.payloadMaxBytes | quote }}
+  SOAK_MESSAGE_PREFIX: {{ .Values.soak.messagePrefix | quote }}
   SOAK_PERSIST_GRACE: {{ .Values.soak.persistGrace | quote }}
   SOAK_MUTATION_RETRIES: {{ .Values.soak.mutationRetries | quote }}
   SOAK_RETRY_MIN_BACKOFF: {{ .Values.soak.retryMinBackoff | quote }}

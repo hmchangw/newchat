@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"log/slog"
 	"math"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -735,4 +737,96 @@ func TestValidateSoakConfig_SearchSettleMustFitTheDeadline(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SOAK_SEARCH_SETTLE")
+}
+
+func TestSoakConfig_MessagePrefixDefaultsToALabelRealUsersCanRecognise(t *testing.T) {
+	cfg := mustDefaultSoakConfig(t)
+
+	assert.Equal(t, "[LoadTest] ", cfg.MessagePrefix)
+	assert.True(t, strings.HasSuffix(cfg.MessagePrefix, " "),
+		"the trailing space keeps the label off the first content token")
+}
+
+// caarlos0/env applies envDefault to a variable that is set but empty, and
+// cannot tell that apart from an absent one — a pointer field reads nil for
+// both. So "off" needs a value of its own, and the empty string cannot be it.
+// These parse the environment rather than assigning the field afterwards,
+// which is what let the earlier version claim an escape hatch it did not have.
+func TestSoakConfig_MessagePrefixResolvesFromTheEnvironment(t *testing.T) {
+	tests := []struct {
+		name string
+		envs map[string]string
+		want string
+	}{
+		{name: "absent takes the default", envs: map[string]string{}, want: "[LoadTest] "},
+		{
+			name: "sentinel turns the label off",
+			envs: map[string]string{"SOAK_MESSAGE_PREFIX": soakMessagePrefixNone},
+			want: "",
+		},
+		{
+			name: "explicit value overrides",
+			envs: map[string]string{"SOAK_MESSAGE_PREFIX": "[Bench] "},
+			want: "[Bench] ",
+		},
+		{
+			name: "empty is not the escape hatch; it takes the default",
+			envs: map[string]string{"SOAK_MESSAGE_PREFIX": ""},
+			want: "[LoadTest] ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := env.ParseAsWithOptions[soakConfig](env.Options{
+				Prefix:      "SOAK_",
+				Environment: tt.envs,
+			})
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, resolveSoakMessagePrefix(parsed.MessagePrefix))
+		})
+	}
+}
+
+func TestValidateSoakConfig_MessagePrefixBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{name: "empty is the opt-out", prefix: ""},
+		{name: "default", prefix: "[LoadTest] "},
+		{
+			name:   "longer than the median leaves no filler",
+			prefix: strings.Repeat("p", 1024),
+			want:   "SOAK_MESSAGE_PREFIX",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			cfg.MessagePrefix = tt.prefix
+
+			err := validateSoakConfig(&cfg, "")
+
+			if tt.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+// Compose must pass the sentinel through untouched. ${VAR:-default} would
+// only substitute on empty, which the sentinel never is, but ${VAR-default}
+// says what is meant: the default applies when the operator set nothing.
+func TestSoakCompose_MessagePrefixPassesTheSentinelThrough(t *testing.T) {
+	source, err := os.ReadFile("deploy/docker-compose.yml")
+	require.NoError(t, err)
+
+	assert.Contains(t, string(source), "${SOAK_MESSAGE_PREFIX-[LoadTest] }")
 }

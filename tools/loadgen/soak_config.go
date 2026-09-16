@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
 	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
@@ -75,6 +76,7 @@ type soakConfig struct {
 	PayloadMedianBytes          int           `env:"PAYLOAD_MEDIAN_BYTES"             envDefault:"1024"`
 	PayloadP95Bytes             int           `env:"PAYLOAD_P95_BYTES"                envDefault:"2048"`
 	PayloadMaxBytes             int           `env:"PAYLOAD_MAX_BYTES"                envDefault:"10240"`
+	MessagePrefix               string        `env:"MESSAGE_PREFIX"                   envDefault:"[LoadTest] "`
 	PersistGrace                time.Duration `env:"PERSIST_GRACE"                    envDefault:"10s"`
 	MutationRetries             int           `env:"MUTATION_RETRIES"                 envDefault:"3"`
 	RetryMinBackoff             time.Duration `env:"RETRY_MIN_BACKOFF"                envDefault:"100ms"`
@@ -378,6 +380,16 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if cfg.PayloadMaxBytes < cfg.PayloadP95Bytes {
 		return fmt.Errorf("SOAK_PAYLOAD_MAX_BYTES must be at least SOAK_PAYLOAD_P95_BYTES")
 	}
+	// Charged at its serialized cost, not its raw length: the body is
+	// JSON-marshalled before it is sealed, so an escaping character is wider on
+	// the wire than it reads here.
+	if limit, cost := distribution.MaxPrefixBytes(cfg.PayloadMedianBytes),
+		distribution.PrefixBudgetBytes(cfg.MessagePrefix); cost > limit {
+		return fmt.Errorf(
+			"SOAK_MESSAGE_PREFIX must serialize to at most %d bytes at the configured median, got %d",
+			limit, cost,
+		)
+	}
 
 	switch cfg.ReactionMessageScope {
 	case "hot_only", "all_messages":
@@ -394,6 +406,26 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 
 	return nil
+}
+
+// soakMessagePrefixNone turns the message label off.
+//
+// The label needs a word for "off" because caarlos0/env cannot express one:
+// it applies envDefault to a variable that is set but empty and cannot tell
+// that apart from an absent variable — a pointer field reads nil for both —
+// so an empty SOAK_MESSAGE_PREFIX takes the default rather than clearing it.
+// It matches SOAK_CASSANDRA_CLEANUP, which spells its own off state the same
+// way. An operator wanting the literal word as a label can write "none ".
+const soakMessagePrefixNone = "none"
+
+// resolveSoakMessagePrefix turns the configured value into the prefix bodies
+// actually carry. Call it once, before validation: everything downstream
+// measures and stamps the resolved value.
+func resolveSoakMessagePrefix(configured string) string {
+	if configured == soakMessagePrefixNone {
+		return ""
+	}
+	return configured
 }
 
 // soakRoomCreateBudgetMax bounds the rooms one run may create, and with them

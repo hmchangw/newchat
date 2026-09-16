@@ -189,12 +189,19 @@ func TestSoakSearchReader_IndexProbeRejectsIncompleteTargets(t *testing.T) {
 // soak never produces. Bodies are a single run of one character with no
 // whitespace, so the "term" is the whole body — which is why the observer is
 // refused at startup until payloads carry a per-message marker.
+//
+// SOAK_MESSAGE_PREFIX is not that marker: it is the same on every message. It
+// is skipped so it cannot become the term and make the shape worse than the
+// refusal already assumes.
 func TestSearchProbeTerm_ReflectsTheRealPayloadShape(t *testing.T) {
+	const prefix = "[LoadTest] "
 	body := distribution.ContentOfSize(64)
 
-	assert.Equal(t, body, searchProbeTerm(body),
+	assert.Equal(t, body, searchProbeTerm(body, ""),
 		"a body with no whitespace yields itself, not a distinguishing term")
-	assert.Equal(t, "soak", searchProbeTerm(""))
+	assert.Equal(t, "soak", searchProbeTerm("", ""))
+	assert.Equal(t, body, searchProbeTerm(prefix+body, prefix),
+		"the label must not displace the only term the body has")
 }
 
 // A recovered operation has no catalog entry, so the probe reports unknown
