@@ -43,6 +43,13 @@ services:
       # here would be absent in production); this is here to tune it locally.
       - CONSUMER_MAX_DELIVER=${CONSUMER_MAX_DELIVER:-40}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Tiered-redelivery lane (phase 3, last adopter); disabled by default. The retry
+      # consumer still binds and drains regardless of this flag — see pkg/retrylane.
+      # Base schedule is LowLatencyBackoff (not DefaultBackoff): this is the
+      # user-visible fan-out path and its first retry is deliberately sub-second.
+      - RETRY_LANE_ENABLED=${RETRY_LANE_ENABLED:-false}
+      - RETRY_CONSUMER_MAX_ACK_PENDING=${RETRY_CONSUMER_MAX_ACK_PENDING:-4000}
+      - RETRY_CONSUMER_MAX_DELIVER=${RETRY_CONSUMER_MAX_DELIVER:-3}
       - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-false}
       # Room-list preview persistence. Must match history-service's ATREST_ENABLED and
       # PREVIEW_KEY_EPOCH: the writer off with the reader on puts every room in a
