@@ -188,7 +188,7 @@ func TestHandleJetStreamMsg_FlowBreadcrumbs(t *testing.T) {
 	}
 	// Simulate the consumer-entry admission main.go performs.
 	ctx := logctx.Admit(context.Background(), msg.Headers())
-	h.HandleJetStreamMsg(ctx, msg)
+	h.HandleJetStreamMsg(ctx, msg, nil)
 
 	assert.True(t, msg.acked, "message must be acked on success")
 	assert.True(t, rec.has(logctx.LevelFlow, "message-worker received"), "received breadcrumb present")

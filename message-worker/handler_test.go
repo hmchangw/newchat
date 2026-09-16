@@ -18,9 +18,11 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -2579,7 +2581,7 @@ func TestHandler_HandleJetStreamMsg(t *testing.T) {
 			})
 
 			fakeMsg := &fakeJSMsg{data: tt.msgData}
-			h.HandleJetStreamMsg(context.Background(), fakeMsg)
+			h.HandleJetStreamMsg(context.Background(), fakeMsg, nil)
 
 			assert.Equal(t, tt.wantAck, fakeMsg.acked, "acked")
 			assert.Equal(t, tt.wantNak, fakeMsg.naked, "naked")
@@ -3361,4 +3363,86 @@ func TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery(t *test
 		assert.Nil(t, saved.ThreadParentMessageCreatedAt, "no parent coords are available to stamp")
 		assert.Equal(t, "msg-parent", saved.ThreadParentMessageID, "thread linkage on the reply is preserved")
 	})
+}
+
+// retryFakeMsg is a retrylane.Msg double for the escalation tests.
+type retryFakeMsg struct {
+	data         []byte
+	subject      string
+	headers      nats.Header
+	stream       string
+	seq          uint64
+	numDelivered uint64
+	acked        bool
+	naked        bool
+}
+
+func (m *retryFakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{
+		Stream:       m.stream,
+		NumDelivered: m.numDelivered,
+		Sequence:     jetstream.SequencePair{Stream: m.seq},
+	}, nil
+}
+func (m *retryFakeMsg) Ack() error                         { m.acked = true; return nil }
+func (m *retryFakeMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
+func (m *retryFakeMsg) Data() []byte                       { return m.data }
+func (m *retryFakeMsg) Subject() string                    { return m.subject }
+func (m *retryFakeMsg) Headers() nats.Header               { return m.headers }
+
+func TestHandlerEscalatesWhenFastBudgetSpent(t *testing.T) {
+	var (
+		published bool
+		gotSubj   string
+		gotData   []byte
+	)
+	lane := &retrylane.Lane{
+		Consumer:  "message-worker",
+		SiteID:    "site1",
+		Enabled:   true,
+		FastSteps: 3,
+		Publish: func(_ context.Context, subj string, data []byte, _ nats.Header, _ string) error {
+			published = true
+			gotSubj = subj
+			gotData = data
+			return nil
+		},
+	}
+
+	body := []byte(`{"messageId":"abc"}`)
+	msg := &retryFakeMsg{
+		data:         body,
+		subject:      "chat.msg.canonical.site1.created",
+		headers:      nats.Header{},
+		stream:       "MESSAGES-CANONICAL-site1",
+		seq:          7,
+		numDelivered: 4, // past FastSteps=3
+	}
+
+	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff[:3], errors.New("cassandra unavailable"))
+
+	require.True(t, published, "delivery 4 must escalate rather than park another 12 minutes")
+	assert.Equal(t, "chat.retry.site1.message-worker.slow", gotSubj)
+	assert.Equal(t, body, gotData, "the body must reach Cassandra byte-identical after a replay")
+	assert.True(t, msg.acked)
+	assert.False(t, msg.naked)
+}
+
+func TestHandlerStillNaksWithinFastBudget(t *testing.T) {
+	lane := &retrylane.Lane{
+		Consumer: "message-worker", SiteID: "site1", Enabled: true, FastSteps: 3,
+		Publish: func(_ context.Context, _ string, _ []byte, _ nats.Header, _ string) error {
+			t.Fatal("must not escalate within the fast budget")
+			return nil
+		},
+	}
+	msg := &retryFakeMsg{
+		data: []byte(`{}`), subject: "s", headers: nats.Header{},
+		stream: "MESSAGES-CANONICAL-site1", seq: 1, numDelivered: 2,
+	}
+
+	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff[:3], errors.New("cassandra unavailable"))
+
+	assert.True(t, msg.naked)
+	assert.False(t, msg.acked)
 }

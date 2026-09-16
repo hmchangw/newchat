@@ -61,11 +61,11 @@ func TestBootstrapStreams(t *testing.T) {
 			wantErrSub: "verify MESSAGES-CANONICAL-test stream",
 		},
 		{
-			name:        "enabled - creates MESSAGES-CANONICAL",
+			name:        "enabled - creates MESSAGES-CANONICAL + RETRY",
 			mode:        "default",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"MESSAGES-CANONICAL-test"},
+			wantCreated: []string{"MESSAGES-CANONICAL-test", "RETRY-test"},
 		},
 		{
 			name:       "enabled - wraps MESSAGES-CANONICAL creator error",
@@ -75,6 +75,15 @@ func TestBootstrapStreams(t *testing.T) {
 			failOn:     "MESSAGES-CANONICAL-test",
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create MESSAGES-CANONICAL-test stream",
+		},
+		{
+			name:       "enabled - wraps RETRY creator error",
+			mode:       "default",
+			enabled:    true,
+			existing:   map[string]bool{},
+			failOn:     "RETRY-test",
+			failErr:    errors.New("nats down"),
+			wantErrSub: "create RETRY-test stream",
 		},
 		{
 			name:        "teams mode disabled - verifies MESSAGES-TEAMS",

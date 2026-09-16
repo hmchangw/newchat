@@ -38,6 +38,11 @@ type streamManager interface {
 // it doesn't — fail-fast so a misprovisioned deploy surfaces at startup rather than
 // at first publish.
 //
+// Default mode also creates RETRY-{siteID} (dev-only, like the input stream) — it
+// backs the tiered-redelivery lane (pkg/retrylane) that main.go wires for the live
+// .created feed only. Teams mode skips it: teamsbatch.go's migration path settles
+// with plain jsretry.Settle and never touches RETRY.
+//
 // Ownership rule: this helper sets only the stream schema (Name + Subjects) from
 // pkg/stream. Federation config belongs to ops/IaC and is layered on in production.
 // App code never sets it.
@@ -53,11 +58,22 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID, mode string
 		}); err != nil {
 			return fmt.Errorf("create %s stream: %w", cfg.Name, err)
 		}
+		if mode != "teams" {
+			retryCfg := stream.Retry(siteID)
+			if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+				Name:     retryCfg.Name,
+				Subjects: retryCfg.Subjects,
+			}); err != nil {
+				return fmt.Errorf("create %s stream: %w", retryCfg.Name, err)
+			}
+		}
 		return nil
 	}
 	// Production path: verify the stream exists. Fail fast if it doesn't —
 	// ops/IaC owns provisioning, and a missing stream means the deploy is
-	// broken before the first publish or consume.
+	// broken before the first publish or consume. RETRY absence here is
+	// non-fatal: the retry consumer's own bind (default mode only) surfaces a
+	// genuinely missing RETRY stream at startup.
 	if _, err := js.Stream(ctx, cfg.Name); err != nil {
 		return fmt.Errorf("verify %s stream: %w", cfg.Name, err)
 	}
