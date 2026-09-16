@@ -479,6 +479,34 @@ A readback query that errors or times out yields INCONCLUSIVE for the
 affected probes, never FAIL: an unreachable `history-service` tells us
 nothing about whether the write happened.
 
+**Aggregate deadline, not a per-group retry budget.** Probes are grouped
+by (sender account, room) and the groups are walked sequentially; each
+group pays the bounded backoff above (a few attempts over ~15s) only while
+it still has something unresolved. Without a ceiling on the phase as a
+whole, a real persistence outage means every group serially exhausts its
+own retry budget — at ~150 tracked probes spread across many distinct
+sender accounts, that is roughly 150 × 3 × 4s ≈ 30 minutes of sequential
+backoff after a run that otherwise took 2 minutes, long past the point an
+operator would have killed it. `Readback` therefore carries one aggregate
+deadline (`verifyReadbackDeadline`, 2 minutes) spanning the *entire*
+readback phase — every group, not each group's own budget. Healthy
+readback resolves each group on its first attempt, so the deadline only
+ever bites during an outage; its job is to fail the phase fast rather than
+to accommodate a slow-but-working `history-service`.
+
+A deadline that fires mid-walk surfaces as an error from `Readback.Verify`
+(routing to `ReadbackErr` → INCONCLUSIVE, same as any other readback query
+failure) and **never** as a violation: every probe still unresolved when
+the deadline fires is dropped from consideration, not reported as
+`persistence_miss` — a harness timeout must never fabricate a data-loss
+finding. This also means a deadline expiring partway through a group
+discards that group's already-found violations too, and every group not
+yet reached is left unchecked; the phase's result is all-or-nothing per
+run, not a partial verdict. The error names how much of the phase was
+actually checked before the deadline fired, e.g. `"readback deadline
+exceeded after 2m0s: verified 38 of 150 tracked probes"`, so the operator
+can tell a total outage from one that was most of the way through.
+
 ## 9. Membership Correctness
 
 Membership churn runs throughout the steady window at `--member-churn`
