@@ -3446,3 +3446,73 @@ func TestHandlerStillNaksWithinFastBudget(t *testing.T) {
 	assert.True(t, msg.naked)
 	assert.False(t, msg.acked)
 }
+
+// TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane drives the real
+// wiring — NewHandler(…, withRetryLane(…)) then HandleJetStreamMsg — rather than
+// calling retrylane.Lane.Settle directly. Without it, deleting the withRetryLane
+// option from main.go's NewHandler call would break no test in this package.
+func TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Message:   model.Message{ID: "msg-1", RoomID: "r1", UserAccount: "alice", Content: "hello", CreatedAt: now},
+		SiteID:    "site-a",
+		Timestamp: now.UnixMilli(),
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	ctrl := gomock.NewController(t)
+	mockUserStore := NewMockUserStore(ctrl)
+	// Transient failure: process returns a plain wrapped error, so the lane may escalate
+	// (a permanent errcode would Ack-drop instead).
+	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").
+		Return(nil, errors.New("mongo down"))
+
+	var gotSubject string
+	lane := &retrylane.Lane{
+		Consumer: "message-worker", SiteID: "site1", Enabled: true, FastSteps: 3,
+		Publish: func(_ context.Context, subj string, _ []byte, _ nats.Header, _ string) error {
+			gotSubject = subj
+			return nil
+		},
+	}
+
+	var escalated bool
+	h := NewHandler(NewMockStore(ctrl), mockUserStore, NewMockThreadStore(ctrl), "site-a",
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		withRetryLane(lane, jsretry.DefaultBackoff[:3]))
+
+	msg := &fakeJSMsg{data: data, numDelivered: 4} // past FastSteps=3
+	h.HandleJetStreamMsg(context.Background(), msg, func() { escalated = true })
+
+	assert.Equal(t, "chat.retry.site1.message-worker.slow", gotSubject,
+		"the injected lane must be the one HandleJetStreamMsg settles through")
+	assert.True(t, escalated, "the per-delivery onEscalate hook must reach the injected lane")
+	assert.True(t, msg.acked, "an escalated message is Acked once it is safely on RETRY")
+	assert.False(t, msg.naked)
+}
+
+func TestHandler_HandleJetStreamMsg_NaksWhenNoLaneIsInjected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Message:   model.Message{ID: "msg-1", RoomID: "r1", UserAccount: "alice", Content: "hello", CreatedAt: now},
+		SiteID:    "site-a",
+		Timestamp: now.UnixMilli(),
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	ctrl := gomock.NewController(t)
+	mockUserStore := NewMockUserStore(ctrl)
+	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").
+		Return(nil, errors.New("mongo down"))
+
+	h := NewHandler(NewMockStore(ctrl), mockUserStore, NewMockThreadStore(ctrl), "site-a",
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+
+	msg := &fakeJSMsg{data: data, numDelivered: 4}
+	h.HandleJetStreamMsg(context.Background(), msg, nil)
+
+	assert.True(t, msg.naked, "with no lane injected the default is in-place redelivery")
+	assert.False(t, msg.acked)
+}
