@@ -1552,12 +1552,21 @@ Three of those deserve a note:
   oracle query failed`, with room and user), and a truncated window logs
   `membership changes left unobserved when churn stopped`. The tolerance is
   a constant, not a flag.
-- **`--member-churn > 0` with zero changes issued is INCONCLUSIVE.** This is
-  the membership analogue of the `--min-probes` floor: if the run never
-  added or removed a single member, it has nothing to say about membership
-  and must not report that dimension as clean. It fires regardless of
-  violations, like every other trust signal. Two causes reach it, and the
-  reason names both:
+- **`--member-churn > 0` with no change *resolved* is INCONCLUSIVE.** This
+  is the membership analogue of the `--min-probes` floor: if the run never
+  learned the outcome of a single add or remove, it has nothing to say
+  about membership and must not report that dimension as clean. It fires
+  regardless of violations, like every other trust signal.
+
+  Note it asks about resolution, not issuance — a change whose outcome
+  nobody learned teaches exactly as much as one never issued. That is also
+  why the floor is not redundant with the tolerance: at `changes = 1` the
+  tolerance is `max(1, 0) = 1`, so one unresolved change sits inside the
+  budget and emits no reason, and only the floor catches that the run
+  resolved nothing. Conversely one resolved change out of twenty clears the
+  floor — a thin signal is still a signal, and judging thinness is the
+  tolerance's job. Three causes reach it, and the reason distinguishes
+  them, because the fixes differ:
   - `--steady` did not exceed the **churn tailroom**, `max(10s, --settle +
     10s observation budget)`. The tailroom is reserved so the last change
     issued still gets its full settle window plus its two observations
@@ -1571,9 +1580,16 @@ Three of those deserve a note:
   - every add/remove was rejected server-side. `applyChange` logs each at
     Warn (`member add rejected` / `member remove rejected`) and counts
     nothing.
+  - changes *were* issued, but every one of them was unresolved — its
+    oracle query failed, or it was still inside its settle window when the
+    steady window closed. This one reads differently in the report
+    (`issued N changes and resolved none of them`), because nothing here is
+    a flag problem: look at `user-service` and at whether the run was cut
+    short, not at `--steady`.
 
-  With `--member-churn=0` a zero change count is the expected result and
-  stays PASS-able.
+  The first two are the `no change was issued` wording; the third is the
+  `resolved none of them` wording. With `--member-churn=0` a zero change
+  count is the expected result and stays PASS-able.
 - **A membership-setup harness failure has no tolerance.** If the
   `SubscribeRoom` of a just-added churn target fails, churn aborts: loadgen's
   model and the system have diverged, and every later observation is

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -275,13 +276,95 @@ func TestEvaluateVerify_ChurnNotRequestedNoChanges_IsPass(t *testing.T) {
 	assert.Empty(t, r.Reasons)
 }
 
-func TestEvaluateVerify_ChurnRequestedAndIssued_NoFloorReason(t *testing.T) {
+func TestEvaluateVerify_ChurnRequestedAndResolved_NoFloorReason(t *testing.T) {
 	in := passingInputs()
 	in.ChurnRequested = true
 	in.Changes = ChangeCounts{Total: 1, Adds: 1, Applied: 1, Effective: 1}
 
 	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict,
-		"a single issued change clears the floor — the floor asks whether the dimension ran at all")
+		"a single resolved change clears the floor — the floor asks whether the dimension produced any signal")
+}
+
+// TestEvaluateVerify_ChurnIssuedButNoneResolved_IsInconclusive pins the floor's
+// real question: not "was a change issued?" but "was a change *resolved*?".
+// Issuing a change whose outcome nobody learned teaches exactly as much as
+// issuing none, so it must reach the same verdict.
+func TestEvaluateVerify_ChurnIssuedButNoneResolved_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 5, Adds: 3, Removes: 2}
+	in.ChangesUnobserved = 5
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	joined := strings.Join(r.Reasons, "\n")
+	assert.Contains(t, joined, "membership dimension was not exercised")
+	assert.Contains(t, joined, "resolved none",
+		"the reason must point at the unknown outcomes, not at --steady: nothing here is a flag problem")
+	assert.NotContains(t, joined, "--settle",
+		"the tailroom advice belongs to the zero-issued case only")
+}
+
+// TestEvaluateVerify_SingleUnresolvedChange_IsInconclusive pins the exact hole
+// the weaker floor left. Total=1 makes the tolerance max(1, 0) = 1, so a single
+// unresolved change sits inside the budget and the tolerance rule stays silent —
+// yet the run resolved nothing at all. Only the floor catches this.
+func TestEvaluateVerify_SingleUnresolvedChange_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 1, Adds: 1}
+	in.ChangesUnobserved = 1
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict,
+		"one change, unresolved, is exactly as much membership signal as no change at all")
+	require.Len(t, r.Reasons, 1,
+		"the tolerance rule must stay silent here — 1 is inside max(1, 1/10), which is why the floor is needed")
+	assert.Contains(t, r.Reasons[0], "resolved none")
+}
+
+func TestEvaluateVerify_SingleUnresolvedOracleQuery_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 1, Adds: 1}
+	in.OracleErrs = 1
+	in.OracleErrSample = errors.New("subscription.list timeout")
+
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict,
+		"the floor counts resolution, so it must not care which of the two spenders consumed it")
+}
+
+// TestEvaluateVerify_PartiallyResolvedChurn_ClearsFloor pins the boundary: one
+// resolved change out of many is a thin signal, but it is a signal, and the
+// tolerance rule is what judges thinness. The floor only asks for non-zero.
+func TestEvaluateVerify_PartiallyResolvedChurn_ClearsFloor(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 1, Effective: 1}
+	in.ChangesUnobserved = 21
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	require.Len(t, r.Reasons, 1,
+		"21 of 22 unresolved trips the tolerance; the floor stays silent because one change was resolved")
+	assert.Contains(t, r.Reasons[0], "unresolved (tolerance 2)")
+	assert.NotContains(t, r.Reasons[0], "not exercised")
+}
+
+// TestEvaluateVerify_MembershipFloor_ClampsDisagreeingCounters pins the guard on
+// the subtraction. Total and the unresolved counters are produced by different
+// code paths (MembershipModel vs verifyRun); if they ever disagree, an unsigned
+// reading of a negative resolved count must not turn the floor off.
+func TestEvaluateVerify_MembershipFloor_ClampsDisagreeingCounters(t *testing.T) {
+	in := passingInputs()
+	in.ChurnRequested = true
+	in.Changes = ChangeCounts{Total: 2, Adds: 2}
+	in.ChangesUnobserved = 3
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	assert.Contains(t, strings.Join(r.Reasons, "\n"), "not exercised",
+		"more unresolved than issued still means nothing was resolved")
 }
 
 // TestEvaluateVerify_UnobservedChangesBelowTolerance_IsPass pins that an

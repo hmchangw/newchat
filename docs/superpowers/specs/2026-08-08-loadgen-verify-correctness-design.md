@@ -600,16 +600,39 @@ from §3 surviving retries, **or** any membership change shows a
   elapsed, so observing them would judge a change the system is still
   allowed to be applying. The point is to record that we could not judge
   them, not to guess
-- **Churn was requested (`--member-churn > 0`) and `Changes.Total` is
-  zero** — the membership dimension was never exercised, so the run has
-  nothing to say about it and must not report a clean PASS. This is the
-  membership analogue of the `--min-probes` floor and fires regardless of
-  violations, like every other trust signal. Two causes reach it: the
-  churn tailroom (`max(10s, --settle + 10s observation budget)`) equalled
-  or exceeded `--steady`, so `issueUntil` was already in the past and
-  `driveChurn` never issued anything (at `--steady=30s --settle=20s` it
-  is); or every add/remove was rejected server-side, which `applyChange`
-  logs at Warn and reports as "not applied". The reason names both. With
+- **Churn was requested (`--member-churn > 0`) and not a single change was
+  resolved** — `max(0, Changes.Total - unresolved) == 0`. The membership
+  dimension produced no signal at all, so the run has nothing to say about
+  it and must not report a clean PASS. This is the membership analogue of
+  the `--min-probes` floor and fires regardless of violations, like every
+  other trust signal.
+
+  It asks about *resolution*, not issuance, and is a strictly stronger
+  statement than the tolerance rule above rather than a special case of
+  it. A change whose outcome nobody learned teaches exactly as much as a
+  change never issued, so the two must reach the same verdict. Phrasing
+  the floor as `Total == 0` left a hole the tolerance cannot cover: at
+  `Total == 1` the tolerance is `max(1, 0) == 1`, so a single unresolved
+  change sits inside the budget, no reason is emitted, and the run reports
+  PASS having resolved nothing. `resolved` is clamped at zero rather than
+  trusted — `Total` comes from `MembershipModel` and the unresolved
+  counters from `verifyRun`, so a future divergence must not let a
+  negative difference read as "resolved something" and switch the floor
+  off.
+
+  Three causes reach it, and the reason distinguishes them because the
+  remedies differ. When nothing was issued: the churn tailroom
+  (`max(10s, --settle + 10s observation budget)`) equalled or exceeded
+  `--steady`, so `issueUntil` was already in the past and `driveChurn`
+  never issued anything (at `--steady=30s --settle=20s` it is); or every
+  add/remove was rejected server-side, which `applyChange` logs at Warn.
+  That text names `--steady` and `--settle`. When changes *were* issued
+  but none resolved, the text instead says every outcome was unknown and
+  points at the oracle or a truncated window — nothing there is a flag
+  problem, so repeating the tailroom advice would misdirect.
+
+  One resolved change clears the floor: a thin signal is still a signal,
+  and judging thinness is the tolerance rule's job. With
   `--member-churn=0` a zero count is the expected result and stays
   PASS-able
 - Fewer than `--min-probes` (default `50`) probes were tracked — probes
