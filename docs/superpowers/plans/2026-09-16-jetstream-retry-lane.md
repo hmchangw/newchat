@@ -1923,8 +1923,11 @@ The section documents two levers. Add the third, after the `pkg/jsretry` bullet:
 
 - [ ] **Step 3: Verify no client-facing doc change is needed**
 
-Run: `git diff --name-only main -- docs/client-api.md docs/client-api/`
-Expected: empty. Nothing client-facing moves — no handler registration, no `pkg/model` request/reply or event struct changed. If this command returns files, stop and reconcile: a client-facing change would require updating `docs/client-api.md` and its derived views in the same PR.
+Run: `git log --oneline <plan-base>..HEAD -- docs/client-api.md docs/client-api/ pkg/model/`
+
+where `<plan-base>` is the commit this plan's own work started from (`0887bf1` for the original run), **not** `main`. Expected: empty. Nothing client-facing moves — no handler registration, no `pkg/model` request/reply or event struct changed. If it returns commits, stop and reconcile: a client-facing change requires updating `docs/client-api.md` and its derived views in the same PR.
+
+> Do **not** diff against `main` here. This is a long-lived integration branch — during the original run it sat 42 commits ahead of `main`, ~40 of them unrelated pre-existing feature work that had already touched `docs/client-api.md`, `events.md` and `request-reply.md`. Diffing against `main` measures that drift rather than this plan's work and produces a false positive that blocks the task.
 
 - [ ] **Step 4: Commit**
 
