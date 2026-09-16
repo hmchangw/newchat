@@ -237,3 +237,105 @@ func TestRunConsumer_FlushesBufferedWorkOnShutdownAfterFetchErrors(t *testing.T)
 // Depth is what lets a collection keep more than one bulk request in flight. It is
 // bounded: unbounded concurrency would let batches queue up against ES without limit
 // and blow past the consumer's ack-pending budget.
+
+// batchErrFetcher models what a deleted consumer leaves behind: Fetch keeps
+// succeeding and batches keep arriving, but they carry no messages and the only
+// report of the death is batch.Error(). first, when set, is delivered by fetch
+// #1 so a test can buffer work before the failure lands.
+type batchErrFetcher struct {
+	first []byte
+	err   error
+
+	mu sync.Mutex
+	n  int
+}
+
+func (f *batchErrFetcher) Fetch(ctx context.Context, _ int, _ ...jetstream.FetchOpt) (msgBatch, error) {
+	f.mu.Lock()
+	f.n++
+	n := f.n
+	f.mu.Unlock()
+	if n == 1 && f.first != nil {
+		return errBatch{msgs: []o11ynats.FetchedMessage{{Ctx: ctx, Msg: &stubMsg{data: f.first}}}}, nil
+	}
+	return errBatch{err: f.err}, nil
+}
+
+func (f *batchErrFetcher) fetches() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
+}
+
+// errBatch reports err the way a real batch does: Error() is meaningful only
+// once Messages() has been drained.
+type errBatch struct {
+	msgs []o11ynats.FetchedMessage
+	err  error
+}
+
+func (b errBatch) Messages() <-chan o11ynats.FetchedMessage {
+	ch := make(chan o11ynats.FetchedMessage, len(b.msgs))
+	for _, m := range b.msgs {
+		ch <- m
+	}
+	close(ch)
+	return ch
+}
+
+func (b errBatch) Error() error { return b.err }
+
+func newPipelineHandler(store Store) *Handler {
+	// Bulk size 10 with a one-hour interval keeps a single buffered message below
+	// both flush triggers, so only a drain can get it to ES.
+	return NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 10)
+}
+
+// The loop must end itself here. Fetch reports nothing when the server drops the
+// consumer — it keeps handing back empty batches and a nil error — so without
+// reading batch.Error() the loop spins forever indexing nothing.
+func TestRunConsumer_StopsWhenBatchReportsTheConsumerIsGone(t *testing.T) {
+	fetcher := &batchErrFetcher{err: jetstream.ErrConsumerDeleted}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	defer close(stopCh)
+
+	go runConsumer(context.Background(), fetcher, newPipelineHandler(&recordingStore{}), consumerTuning{
+		fetchBatchSize: 10, bulkFlushInterval: time.Hour, pipelineDepth: 1,
+	}, stopCh, doneCh)
+
+	requireClosed(t, doneCh, "consumer kept looping after the server dropped its consumer")
+}
+
+func TestRunConsumer_FlushesBufferedWorkWhenTheConsumerIsGone(t *testing.T) {
+	store := &recordingStore{}
+	fetcher := &batchErrFetcher{first: pipelineMsgData(t), err: jetstream.ErrConsumerDeleted}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	defer close(stopCh)
+
+	go runConsumer(context.Background(), fetcher, newPipelineHandler(store), consumerTuning{
+		fetchBatchSize: 10, bulkFlushInterval: time.Hour, pipelineDepth: 1,
+	}, stopCh, doneCh)
+
+	requireClosed(t, doneCh, "consumer kept looping after the server dropped its consumer")
+	assert.Equal(t, []int{1}, store.batches(), "work buffered before the failure must still reach ES")
+}
+
+// A missed heartbeat leaves the consumer live — the next Fetch opens its own
+// pull request and subscription — so it must not be read as a death.
+func TestRunConsumer_KeepsFetchingWhenBatchReportsAMissedHeartbeat(t *testing.T) {
+	fetcher := &batchErrFetcher{err: jetstream.ErrNoHeartbeat}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+
+	go runConsumer(context.Background(), fetcher, newPipelineHandler(&recordingStore{}), consumerTuning{
+		fetchBatchSize: 10, bulkFlushInterval: time.Hour, pipelineDepth: 1,
+	}, stopCh, doneCh)
+
+	require.Eventually(t, func() bool { return fetcher.fetches() > 3 }, 5*time.Second, 5*time.Millisecond,
+		"a missed heartbeat leaves the consumer live; the loop must keep pulling")
+
+	close(stopCh)
+	requireClosed(t, doneCh, "consumer did not shut down")
+}
