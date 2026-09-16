@@ -243,6 +243,19 @@ const (
 	// often lag rather than loss (spec §8).
 	verifyReadbackAttempts = 4
 	verifyReadbackBackoff  = 4 * time.Second
+	// verifyReadbackDeadline bounds the ENTIRE readback phase — every
+	// sender-account group, not each group's own retry budget (spec §8).
+	// Healthy readback resolves a group on its first attempt, so this budget
+	// only ever bites during a real persistence outage; its job is to fail
+	// the phase fast (as INCONCLUSIVE, never a fabricated persistence_miss)
+	// rather than to accommodate a slow-but-working history-service. With
+	// ~150 tracked probes spread across many distinct sender accounts, each
+	// paying its own verifyReadbackAttempts x verifyReadbackBackoff budget
+	// serially could run to roughly 30 minutes of sequential backoff; two
+	// minutes is comfortably above any healthy walk (each group settles on
+	// attempt one) and comfortably below the point an operator would have
+	// already killed the run.
+	verifyReadbackDeadline = 2 * time.Minute
 	// verifyOracleMaxPages bounds subscription.list paging so a runaway HasMore
 	// can't spin the churn driver.
 	verifyOracleMaxPages = 20
@@ -1173,12 +1186,17 @@ func (r *verifyRun) readback(ctx context.Context) ([]Violation, error) {
 	}
 	sort.Strings(accounts)
 
-	rb := NewReadback(r.env.request, r.siteID, verifyReadbackAttempts, verifyReadbackBackoff)
+	rb := NewReadback(r.env.request, r.siteID, verifyReadbackAttempts, verifyReadbackBackoff,
+		verifyReadbackDeadline, len(targets))
 	var out []Violation
 	for _, account := range accounts {
 		vs, err := rb.Verify(ctx, account, byAccount[account])
 		if err != nil {
-			return out, fmt.Errorf("readback as %s: %w", account, err)
+			// A truncated readback must never surface as a violation (spec §8):
+			// discard everything gathered this call, including violations
+			// already found for accounts fully verified earlier in this same
+			// loop, and let ReadbackErr alone carry the INCONCLUSIVE signal.
+			return nil, fmt.Errorf("readback as %s: %w", account, err)
 		}
 		out = append(out, vs...)
 	}

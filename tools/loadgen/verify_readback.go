@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -55,25 +56,52 @@ const maxBatchIDs = 100
 // coupling the test to MESSAGE_BUCKET_HOURS -- a hand-rolled bucket
 // computation that ever drifted from what the services run with would target
 // the wrong Cassandra partition and report phantom data loss.
+//
+// A caller that walks multiple sender-account groups (verifyRun.readback
+// calls Verify once per account) constructs exactly one Readback for the
+// whole phase and reuses it across every group: deadlineAt is computed once,
+// at construction, and every subsequent Verify call shares it -- an aggregate
+// budget for the whole phase, never reset per group. checked accumulates
+// across those same calls so a deadline that fires partway through account 5
+// of 20 can still report how much of the *entire* phase was resolved, not
+// just that one account's slice.
 type Readback struct {
-	req      requestFn
-	siteID   string
-	attempts int
-	backoff  time.Duration
+	req        requestFn
+	siteID     string
+	attempts   int
+	backoff    time.Duration
+	deadline   time.Duration
+	deadlineAt time.Time // zero => unbounded
+	total      int
+	checked    int
 }
 
-// NewReadback returns a Readback with a bounded retry budget.
-func NewReadback(req requestFn, siteID string, attempts int, backoff time.Duration) *Readback {
+// NewReadback returns a Readback with a bounded per-group retry budget and a
+// single aggregate deadline for the whole phase. deadline<=0 leaves the phase
+// unbounded. total is the number of probes tracked across every group this
+// Readback will ever be asked to Verify -- used only to phrase the
+// deadline-exceeded error ("verified X of total"); it does not affect
+// behavior.
+func NewReadback(req requestFn, siteID string, attempts int, backoff, deadline time.Duration, total int) *Readback {
 	if attempts < 1 {
 		attempts = 1
 	}
-	return &Readback{req: req, siteID: siteID, attempts: attempts, backoff: backoff}
+	rb := &Readback{req: req, siteID: siteID, attempts: attempts, backoff: backoff, deadline: deadline, total: total}
+	if deadline > 0 {
+		rb.deadlineAt = time.Now().Add(deadline)
+	}
+	return rb
 }
 
 // Verify checks every target, batched per room. Returns violations for probes
 // that are genuinely absent or stored wrong. Returns an error -- never a
-// violation -- when the query itself fails, since an unreachable service says
-// nothing about whether the write happened.
+// violation -- when the query itself fails or the phase's aggregate deadline
+// expires, since neither says anything about whether the write happened.
+// A deadline in particular must never surface a still-pending probe as
+// persistence_miss: that would turn a harness timeout into a fabricated
+// data-loss finding, so on any error every violation found so far by this
+// call (including probes already matched in a room processed before the one
+// that failed) is discarded, not just the ones for the room in flight.
 func (r *Readback) Verify(ctx context.Context, account string, targets []ReadbackTarget) ([]Violation, error) {
 	byRoom := map[string][]ReadbackTarget{}
 	for _, t := range targets {
@@ -86,12 +114,24 @@ func (r *Readback) Verify(ctx context.Context, account string, targets []Readbac
 	}
 	sort.Strings(roomIDs)
 
+	if !r.deadlineAt.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, r.deadlineAt)
+		defer cancel()
+	}
+
 	var out []Violation
 	for _, roomID := range roomIDs {
 		vs, err := r.verifyRoom(ctx, account, roomID, byRoom[roomID])
 		if err != nil {
+			if !r.deadlineAt.IsZero() && errors.Is(err, context.DeadlineExceeded) {
+				return nil, fmt.Errorf(
+					"readback deadline exceeded after %s: verified %d of %d tracked probes: %w",
+					r.deadline, r.checked, r.total, err)
+			}
 			return nil, fmt.Errorf("readback room %s: %w", roomID, err)
 		}
+		r.checked += len(byRoom[roomID])
 		out = append(out, vs...)
 	}
 	return out, nil

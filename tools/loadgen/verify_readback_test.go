@@ -50,7 +50,7 @@ func TestReadback_AllPresent_NoViolations(t *testing.T) {
 	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
 		return historyReply(t, msg("m1", "r1", "u-1", "")), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -65,7 +65,7 @@ func TestReadback_Missing_AfterRetries_IsPersistenceMiss(t *testing.T) {
 		calls++
 		return historyReply(t), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -85,7 +85,7 @@ func TestReadback_LateArrival_IsNotAViolation(t *testing.T) {
 		}
 		return historyReply(t, msg("m1", "r1", "u-1", "")), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -105,7 +105,7 @@ func TestReadback_RoomFieldNotCompared_NoViolation(t *testing.T) {
 	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
 		return historyReply(t, msg("m1", "WRONG", "u-1", "")), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -118,7 +118,7 @@ func TestReadback_WrongSender_IsMismatch(t *testing.T) {
 	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
 		return historyReply(t, msg("m1", "r1", "SOMEONE-ELSE", "")), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -132,7 +132,7 @@ func TestReadback_WrongThreadParent_IsMismatch(t *testing.T) {
 	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
 		return historyReply(t, msg("m1", "r1", "u-1", "OTHER-PARENT")), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1", ThreadParentID: "p1"},
@@ -146,7 +146,7 @@ func TestReadback_QueryError_ReturnsErrorNotViolation(t *testing.T) {
 	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
 		return nil, errors.New("timeout")
 	}
-	rb := NewReadback(req, "site-test", 2, time.Millisecond)
+	rb := NewReadback(req, "site-test", 2, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -168,7 +168,7 @@ func TestReadback_ErrcodeEnvelopeReply_ReturnsErrorNotViolation(t *testing.T) {
 		require.NoError(t, err)
 		return b, nil // NATS-level success; the failure is in the payload
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -184,7 +184,7 @@ func TestReadback_MalformedReply_ReturnsErrorNotViolation(t *testing.T) {
 	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
 		return []byte("not-json"), nil
 	}
-	rb := NewReadback(req, "site-test", 2, time.Millisecond)
+	rb := NewReadback(req, "site-test", 2, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -208,7 +208,7 @@ func TestReadback_ContextCancelledMidRetry_AbortsWithoutBurningBudget(t *testing
 		}
 		return historyReply(t), nil
 	}
-	rb := NewReadback(req, "site-test", 5, time.Hour)
+	rb := NewReadback(req, "site-test", 5, time.Hour, 0, 0)
 
 	vs, err := rb.Verify(ctx, "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -228,7 +228,7 @@ func TestReadback_BatchesByRoom(t *testing.T) {
 			msg("m3", "r1", "u-1", ""),
 		), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
 		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
@@ -264,7 +264,7 @@ func TestReadback_ChunksAt100(t *testing.T) {
 		}
 		return historyReply(t, msgs...), nil
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	vs, err := rb.Verify(context.Background(), "user-1", targets)
 	require.NoError(t, err)
@@ -280,8 +280,59 @@ func TestReadback_ContextCancelled_Aborts(t *testing.T) {
 	req := func(c context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
 		return nil, c.Err()
 	}
-	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, 0, 0)
 
 	_, err := rb.Verify(ctx, "user-1", []ReadbackTarget{{MsgID: "m1", RoomID: "r1", SenderID: "u-1"}})
 	require.Error(t, err)
+}
+
+// TestReadback_DeadlineExceeded_ReturnsErrorNoViolations pins the
+// anti-fabrication guarantee (spec §8): when the phase's aggregate deadline
+// fires mid-walk, every probe not yet resolved -- even one sitting in a room
+// whose retries simply have not finished -- must come back as an error, never
+// as a persistence_miss violation. Room "r1" resolves on its very first
+// attempt; room "r2" never resolves, so it would burn the full
+// attempts x backoff retry budget if the deadline did not cut it off first.
+// The error must also name how much of the phase was actually checked.
+func TestReadback_DeadlineExceeded_ReturnsErrorNoViolations(t *testing.T) {
+	req := func(_ context.Context, _ string, data []byte, _ time.Duration) ([]byte, error) {
+		ids := requestIDs(t, data)
+		if len(ids) == 1 && ids[0] == "m-r1" {
+			return historyReply(t, msg("m-r1", "r1", "u-1", "")), nil
+		}
+		return historyReply(t), nil // r2's probe is never found
+	}
+	// attempts x backoff (50 x 15ms = 750ms) would burn far past the 20ms
+	// deadline if the deadline did not cut the walk off first.
+	rb := NewReadback(req, "site-test", 50, 15*time.Millisecond, 20*time.Millisecond, 2)
+
+	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
+		{MsgID: "m-r1", RoomID: "r1", SenderID: "u-1"},
+		{MsgID: "m-r2", RoomID: "r2", SenderID: "u-1"},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Empty(t, vs, "a truncated readback must never report persistence_miss")
+	assert.Contains(t, err.Error(), "readback deadline exceeded after 20ms: verified 1 of 2 tracked probes")
+}
+
+// TestReadback_HealthyWithinDeadline_Unaffected confirms a readback that
+// resolves well inside its budget is unaffected: it still returns its
+// violations, returns no error, and -- proven by the wall-clock bound below
+// -- never pays any part of the deadline.
+func TestReadback_HealthyWithinDeadline_Unaffected(t *testing.T) {
+	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+		return historyReply(t, msg("m1", "r1", "SOMEONE-ELSE", "")), nil // a real mismatch
+	}
+	rb := NewReadback(req, "site-test", 3, time.Millisecond, time.Minute, 1)
+
+	start := time.Now()
+	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
+		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
+	})
+	require.NoError(t, err)
+	require.Len(t, vs, 1)
+	assert.Equal(t, KindPersistenceMismatch, vs[0].Kind)
+	assert.Less(t, time.Since(start), 500*time.Millisecond,
+		"a healthy readback resolving on its first attempt must not pay any part of a minute-long deadline")
 }
