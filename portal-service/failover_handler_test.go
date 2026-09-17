@@ -15,6 +15,8 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
+// Fixture ops token for the control-surface tests, not a live credential.
+// nosemgrep: hardcoded-credential-literal
 const testOpsToken = "s3cr3t"
 
 // newFailoverTestServer wires the handler + routes with a mocked store and a
