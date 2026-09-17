@@ -122,3 +122,121 @@ func TestActiveSubscription_DecodesFromFullSubscriptionDocument(t *testing.T) {
 	assert.Equal(t, sub.ThreadUnread, row.ThreadUnread)
 	assert.Nil(t, row.LastMsgAt, "lastMsgAt is added by the rooms join, never stored on the subscription")
 }
+
+// lookupSubPipeline returns the sub-pipeline of the single $lookup in pipeline.
+func lookupSubPipeline(t *testing.T, pipeline bson.A) bson.A {
+	t.Helper()
+	for _, stage := range pipeline {
+		m, ok := stage.(bson.M)
+		if !ok {
+			continue
+		}
+		spec, ok := m["$lookup"].(bson.M)
+		if !ok {
+			continue
+		}
+		sub, ok := spec["pipeline"].(bson.A)
+		require.True(t, ok, "$lookup must use a sub-pipeline, not a plain foreignField join")
+		return sub
+	}
+	t.Fatal("no $lookup stage in pipeline")
+	return nil
+}
+
+// projectedKeys returns the inclusion keys of the first $project in pipeline, sorted.
+func projectedKeys(t *testing.T, pipeline bson.A) []string {
+	t.Helper()
+	for _, stage := range pipeline {
+		m, ok := stage.(bson.M)
+		if !ok {
+			continue
+		}
+		proj, ok := m["$project"].(bson.M)
+		if !ok {
+			continue
+		}
+		keys := []string{}
+		for k, v := range proj {
+			if k == "_id" && v == 0 {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	t.Fatal("no $project stage in pipeline")
+	return nil
+}
+
+// addFieldsKeys returns the keys the first $addFields stage creates, sorted.
+func addFieldsKeys(t *testing.T, pipeline bson.A) []string {
+	t.Helper()
+	for _, stage := range pipeline {
+		m, ok := stage.(bson.M)
+		if !ok {
+			continue
+		}
+		add, ok := m["$addFields"].(bson.M)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(add))
+		for k := range add {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	t.Fatal("no $addFields stage in pipeline")
+	return nil
+}
+
+// roomDerivedBadgeFields are the two fields the terminal $project keeps that the
+// subscription document does not store — models.ActiveSubscription documents both
+// as joined from the room. The unread reference is lastUserMsgAt ?? lastMsgAt, so
+// dropping lastUserMsgAt silently reads unread off lastMsgAt, which counts SYSTEM
+// messages the design deliberately excludes (see the system-message-unread spec).
+var roomDerivedBadgeFields = []string{"lastMsgAt", "lastUserMsgAt"}
+
+// The badge pipeline keeps exactly the two room fields above, so its rooms join
+// must fetch exactly those. Reusing the list path's 12-field enrichment
+// materializes ten more per joined room — including the encKey blob — that the
+// terminal $project then discards, once per account in a notification batch.
+func TestActiveSubscriptionPipeline_JoinsOnlyBadgeRoomFields(t *testing.T) {
+	r := &SubscriptionRepo{}
+
+	sub := lookupSubPipeline(t, r.activeSubscriptionPipeline("alice", 100))
+
+	assert.Equal(t, roomDerivedBadgeFields, projectedKeys(t, sub),
+		"the badge join must project exactly the room fields the terminal $project keeps")
+}
+
+// A field the terminal $project includes but nothing upstream produces decodes as
+// a silent nil, not an error — so the join and the projection must be pinned
+// together. This is the guard that a narrowed join cannot quietly drop an input
+// the unread test depends on.
+func TestActiveSubscriptionPipeline_LiftsEveryRoomDerivedField(t *testing.T) {
+	r := &SubscriptionRepo{}
+	pipeline := r.activeSubscriptionPipeline("alice", 100)
+
+	assert.Equal(t, roomDerivedBadgeFields, addFieldsKeys(t, pipeline),
+		"$addFields must lift every room-derived field the terminal $project keeps")
+
+	projected := projectedKeys(t, bson.A{pipeline[len(pipeline)-1]})
+	for _, f := range roomDerivedBadgeFields {
+		assert.Contains(t, projected, f, "the terminal $project must keep every room-derived field")
+	}
+}
+
+// The join must not carry the E2E key into the working set: it is the largest
+// field in the enrichment set and the badge count never reads it.
+func TestActiveSubscriptionPipeline_JoinOmitsRoomKey(t *testing.T) {
+	r := &SubscriptionRepo{}
+
+	sub := lookupSubPipeline(t, r.activeSubscriptionPipeline("alice", 100))
+
+	for _, k := range projectedKeys(t, sub) {
+		assert.NotContains(t, k, "encKey", "the badge join must not fetch the room E2E key")
+	}
+}

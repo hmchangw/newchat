@@ -857,16 +857,21 @@ func TestAggregateSubscriptions_OriginFieldRoundTrip_Integration(t *testing.T) {
 		"list rows must carry the persisted origin like every other read path")
 }
 
-// The badge path must return exactly its five fields, across local, empty and cross-site rooms.
+// The badge path must return exactly its six fields, across local, empty and cross-site rooms.
+// The room carries lastUserMsgAt distinct from lastMsgAt: unread reads
+// lastUserMsgAt ?? lastMsgAt, so a fixture where the two coincide (or where
+// lastUserMsgAt is absent) cannot tell a dropped join field from a correct one.
 func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
 	r, db := newTestSubscriptionRepo(t)
 	ctx := context.Background()
 	lastMsg := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	lastUserMsg := time.Date(2026, 8, 23, 8, 0, 0, 0, time.UTC)
 	seen := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
 
 	seed(t, db, "rooms",
 		bson.M{"_id": "p-room", "name": "Eng", "siteId": "site-a", "lastMsgAt": lastMsg,
-			"userCount": 9, "appCount": 1, "encKey": bson.M{"priv": make([]byte, 120), "ver": 3}},
+			"lastUserMsgAt": lastUserMsg,
+			"userCount":     9, "appCount": 1, "encKey": bson.M{"priv": make([]byte, 120), "ver": 3}},
 		bson.M{"_id": "p-quiet", "name": "Quiet", "siteId": "site-a"},
 	)
 	seed(t, db, "subscriptions",
@@ -894,15 +899,21 @@ func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
 	assert.Equal(t, seen.UTC(), local.LastSeenAt.UTC())
 	require.NotNil(t, local.LastMsgAt, "the joined room's lastMsgAt must survive the projection")
 	assert.Equal(t, lastMsg.UTC(), local.LastMsgAt.UTC())
+	// The unread reference (lastUserMsgAt ?? lastMsgAt). Absent here, unread would
+	// silently fall through to lastMsgAt and count system messages.
+	require.NotNil(t, local.LastUserMsgAt, "the joined room's lastUserMsgAt must survive the projection")
+	assert.Equal(t, lastUserMsg.UTC(), local.LastUserMsgAt.UTC())
 	assert.Equal(t, []string{"pm-1", "pm-2"}, local.ThreadUnread)
 
 	quiet := byRoom["p-quiet"]
 	assert.Nil(t, quiet.LastMsgAt, "a room with no messages has no lastMsgAt")
+	assert.Nil(t, quiet.LastUserMsgAt, "a room with no messages has no lastUserMsgAt")
 	assert.Nil(t, quiet.LastSeenAt, "an unread-from-birth sub has no lastSeenAt")
 
 	remote := byRoom["p-remote"]
 	assert.Equal(t, "site-b", remote.SiteID)
 	assert.Nil(t, remote.LastMsgAt, "a cross-site sub has no local room document")
+	assert.Nil(t, remote.LastUserMsgAt, "a cross-site sub has no local room document")
 	require.NotNil(t, remote.LastSeenAt)
 
 	// Assert on the raw document: decoding first would discard a leaked encKey.
@@ -923,8 +934,8 @@ func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
 	for k := range rawRoom {
 		keys = append(keys, k)
 	}
-	assert.ElementsMatch(t, []string{"roomId", "siteId", "lastSeenAt", "threadUnread", "lastMsgAt"}, keys,
-		"the raw $project output for p-room must contain exactly the five projected fields — no encKey or other room baseline field")
+	assert.ElementsMatch(t, []string{"roomId", "siteId", "lastSeenAt", "threadUnread", "lastMsgAt", "lastUserMsgAt"}, keys,
+		"the raw $project output for p-room must contain exactly the six projected fields — no encKey or other room baseline field")
 }
 
 // TestFindChannelsByMembers_LastUserMsgAt_Survival verifies that lastUserMsgAt (a new room
