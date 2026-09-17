@@ -2378,14 +2378,9 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	// Single room-scoped event (the room_renamed sys message published above)
 	// is sufficient — clients update their subscription state from the room
 	// event without per-subscription fan-out.
-	subs, err := h.store.ListByRoom(ctx, req.RoomID)
+	accounts, err := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 	if err != nil {
-		return fmt.Errorf("list subscriptions: %w", err)
-	}
-
-	accounts := make([]string, 0, len(subs))
-	for i := range subs {
-		accounts = append(accounts, subs[i].User.Account)
+		return fmt.Errorf("list subscription accounts: %w", err)
 	}
 	remoteSites, err := h.findRemoteSitesForAccounts(ctx, accounts)
 	if err != nil {
