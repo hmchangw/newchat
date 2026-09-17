@@ -118,7 +118,11 @@ func (r *roomInvalidator) ack(msg jetstream.Msg) {
 // reader closes the queue on its way out, which is what allows the drain worker
 // to finish the work already accepted. If stepCtx expires while the worker is
 // wedged in an in-flight Valkey call, its context is cancelled to free it and
-// Stop still waits, so no goroutine outlives the call. Safe to call twice.
+// Stop still waits, so no goroutine outlives the call — but it returns the
+// deadline rather than nil, because the queued invalidations the worker then
+// runs under a cancelled context are abandoned, not drained. shutdown.Wait logs
+// a step error and proceeds, so reporting costs nothing and a silent nil hides
+// exactly the case this path exists to handle. Safe to call twice.
 func (r *roomInvalidator) Stop(stepCtx context.Context) error {
 	r.stopOnce.Do(func() { r.iter.Stop() })
 	defer r.cancel()
@@ -136,6 +140,7 @@ func (r *roomInvalidator) Stop(stepCtx context.Context) error {
 	case <-stepCtx.Done():
 		r.cancel()     // unblock an in-flight Valkey DEL so the worker can exit
 		<-r.workerDone // bounded: the queue is closed, so the range terminates
+		return fmt.Errorf("invalidation worker did not drain: %w", stepCtx.Err())
 	}
 	return nil
 }

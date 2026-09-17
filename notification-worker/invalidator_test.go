@@ -192,7 +192,12 @@ func TestRoomInvalidator_DropsWhenQueueFull(t *testing.T) {
 
 	close(release)
 	require.NoError(t, inv.Stop(context.Background()))
-	assert.LessOrEqual(t, handled.Load(), int64(4))
+	// Four events were supplied, so "<= 4" would hold even with the bound ignored.
+	// One worker wedged on the first item plus a queue of one caps acceptance at
+	// two; everything after that must be dropped.
+	assert.LessOrEqual(t, handled.Load(), int64(2),
+		"queue size 1 with the worker blocked accepts at most two invalidations")
+	assert.GreaterOrEqual(t, handled.Load(), int64(1), "the accepted work must still run")
 }
 
 // TestRoomInvalidator_MalformedEventIsAckedAndSkipped: an undecodable event is
@@ -249,7 +254,10 @@ func TestRoomInvalidator_StopIsIdempotent(t *testing.T) {
 
 // TestRoomInvalidator_StopCancelsWedgedWorkerOnDeadline: if the drain worker is
 // stuck in an in-flight Valkey call past the step deadline, Stop cancels its
-// context to free it and still returns rather than hanging shutdown.
+// context to free it and still returns rather than hanging shutdown — but it
+// reports the deadline. Invalidations already accepted into the queue are
+// abandoned on that path (the worker drains them under a cancelled context), so
+// returning nil would record a clean drain that did not happen.
 func TestRoomInvalidator_StopCancelsWedgedWorkerOnDeadline(t *testing.T) {
 	iter := newScriptedIter(memberEventMsg(t, "r1"))
 
@@ -269,7 +277,9 @@ func TestRoomInvalidator_StopCancelsWedgedWorkerOnDeadline(t *testing.T) {
 
 	select {
 	case err := <-done:
-		require.NoError(t, err)
+		require.Error(t, err, "an abandoned drain must not be reported as success")
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Contains(t, err.Error(), "invalidation worker")
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop hung on a wedged worker instead of cancelling it")
 	}
