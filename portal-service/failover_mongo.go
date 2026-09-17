@@ -7,6 +7,9 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // mongoFailoverStore persists FailoverState in the failover_states collection,
@@ -15,8 +18,14 @@ type mongoFailoverStore struct {
 	coll *mongo.Collection
 }
 
+// newMongoFailoverStore pins reads to the primary, overriding portal's
+// client-wide secondaryPreferred. This collection is the failover decision
+// itself: a read lagging behind replication would hand routing a stale serving
+// target (on top of the reader's TTL) and feed Post a stale version, turning a
+// legitimate operator transition into a spurious CAS conflict mid-incident.
 func newMongoFailoverStore(db *mongo.Database) *mongoFailoverStore {
-	return &mongoFailoverStore{coll: db.Collection("failover_states")}
+	coll := mongoutil.CollectionWithReadPreference(db.Collection("failover_states"), readpref.Primary())
+	return &mongoFailoverStore{coll: coll}
 }
 
 // Get returns the stored state for siteID, or a synthesized healthy version-0

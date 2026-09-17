@@ -14,4 +14,6 @@ const (
 	PortalFailoverVersionConflict Reason = "failover_version_conflict"
 	// PortalFailoverUnknownSite: the failover control surface was asked to transition a site absent from PORTAL_SITE_URLS.
 	PortalFailoverUnknownSite Reason = "failover_unknown_site"
+	// PortalFailoverBackupUnavailable: the requested transition would serve the backup, but PORTAL_BACKUP_SITE_ID is unset or absent from PORTAL_SITE_URLS.
+	PortalFailoverBackupUnavailable Reason = "failover_backup_unavailable"
 )

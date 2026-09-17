@@ -26,8 +26,9 @@ func newFailoverTestServer(t *testing.T) (*gin.Engine, *MockFailoverStore) {
 	ctrl := gomock.NewController(t)
 	store := NewMockFailoverStore(ctrl)
 	h := NewFailoverHandler(store, map[string]siteURL{
-		"site-a": {BaseURL: "http://a", NATSURL: "ws://a"},
-	})
+		"site-a":  {BaseURL: "http://a", NATSURL: "ws://a"},
+		"_backup": {BaseURL: "http://b", NATSURL: "ws://b"},
+	}, "_backup")
 	h.now = func() time.Time { return time.UnixMilli(1700).UTC() }
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -221,4 +222,93 @@ func TestFailoverHandler_Unauthorized(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// newFailoverTestServerWithBackup is newFailoverTestServer with an explicit
+// backup id and registry, for the backup-route validation tests.
+func newFailoverTestServerWithBackup(t *testing.T, backupSiteID string, sites map[string]siteURL) (*gin.Engine, *MockFailoverStore) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	store := NewMockFailoverStore(ctrl)
+	h := NewFailoverHandler(store, sites, backupSiteID)
+	h.now = func() time.Time { return time.UnixMilli(1700).UTC() }
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	registerFailoverRoutes(r, h, testOpsToken)
+	return r, store
+}
+
+// Failing a site over to a backup that routing cannot resolve would flip the
+// state and then 500 every user's /api/userInfo — the site goes dark instead of
+// failing over. Refuse at the operator's request instead.
+func TestFailoverHandler_PostRejectsFailoverWithoutServableBackup(t *testing.T) {
+	registry := map[string]siteURL{"site-a": {BaseURL: "http://a", NATSURL: "ws://a"}}
+	tests := []struct {
+		name         string
+		backupSiteID string
+	}{
+		{"backup id unset", ""},
+		{"backup id absent from registry", "_backup"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, store := newFailoverTestServerWithBackup(t, tt.backupSiteID, registry)
+			store.EXPECT().Get(gomock.Any(), "site-a").Return(
+				FailoverState{SiteID: "site-a", Status: StatusHealthy, Version: 0}, nil)
+			// No Transition: the state must not move.
+
+			w := do(t, r, http.MethodPost, "/internal/v1/failover/site-a",
+				`{"action":"failover","operator":"jane","reason":"nats down"}`)
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			assert.Contains(t, w.Body.String(), "failover_backup_unavailable")
+		})
+	}
+}
+
+// The same guard must not block the recovery path: actions that return a site
+// home need no backup route.
+func TestFailoverHandler_PostAllowsRecoveryWithoutServableBackup(t *testing.T) {
+	registry := map[string]siteURL{"site-a": {BaseURL: "http://a", NATSURL: "ws://a"}}
+	r, store := newFailoverTestServerWithBackup(t, "", registry)
+	store.EXPECT().Get(gomock.Any(), "site-a").Return(
+		FailoverState{SiteID: "site-a", Status: StatusFailedOver, Version: 3}, nil)
+	store.EXPECT().Transition(gomock.Any(), gomock.Any()).Return(nil)
+
+	w := do(t, r, http.MethodPost, "/internal/v1/failover/site-a",
+		`{"action":"resume","operator":"jane","reason":"false alarm"}`)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var got failoverStateResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, StatusHealthy, got.Status)
+	assert.Equal(t, ServingHome, got.ServingTarget)
+}
+
+func TestValidateFailoverConfig(t *testing.T) {
+	sites := map[string]siteURL{
+		"site-a":  {BaseURL: "http://a", NATSURL: "ws://a"},
+		"_backup": {BaseURL: "http://b", NATSURL: "ws://b"},
+	}
+	tests := []struct {
+		name         string
+		opsToken     string
+		backupSiteID string
+		wantErr      bool
+	}{
+		{"control surface disabled, no backup", "", "", false},
+		{"control surface disabled, bogus backup", "", "nope", false},
+		{"enabled with a resolvable backup", "t", "_backup", false},
+		{"enabled without a backup id", "t", "", true},
+		{"enabled with a backup absent from the registry", "t", "nope", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateFailoverConfig(tt.opsToken, tt.backupSiteID, sites)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
 }

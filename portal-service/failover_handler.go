@@ -16,16 +16,43 @@ import (
 
 // FailoverHandler serves the operator control surface over the internal
 // listener. It reads/writes FailoverState directly (operators need fresh state,
-// not a cached view). sites is the PORTAL_SITE_URLS registry, used to reject a
-// transition for a site routing could never serve. now is overridable in tests.
+// not a cached view). sites is the PORTAL_SITE_URLS registry and backupSiteID
+// the reserved entry within it; together they reject transitions routing could
+// never serve. now is overridable in tests.
 type FailoverHandler struct {
-	store FailoverStore
-	sites map[string]siteURL
-	now   func() time.Time
+	store        FailoverStore
+	sites        map[string]siteURL
+	backupSiteID string
+	now          func() time.Time
 }
 
-func NewFailoverHandler(store FailoverStore, sites map[string]siteURL) *FailoverHandler {
-	return &FailoverHandler{store: store, sites: sites, now: time.Now}
+func NewFailoverHandler(store FailoverStore, sites map[string]siteURL, backupSiteID string) *FailoverHandler {
+	return &FailoverHandler{store: store, sites: sites, backupSiteID: backupSiteID, now: time.Now}
+}
+
+// backupIsServable reports whether a configured backup entry exists to route to.
+// Without one, any status that serves backup would 500 every login for that
+// site — the site goes dark rather than failing over.
+func backupIsServable(sites map[string]siteURL, backupSiteID string) bool {
+	if backupSiteID == "" {
+		return false
+	}
+	_, ok := sites[backupSiteID]
+	return ok
+}
+
+// validateFailoverConfig fails startup when the control surface is enabled but
+// no servable backup is configured: a deployment that advertises failover it
+// cannot perform would only discover that mid-incident. When the control
+// surface is disabled no failover can be initiated, so the backup is moot.
+func validateFailoverConfig(opsToken, backupSiteID string, sites map[string]siteURL) error {
+	if opsToken == "" {
+		return nil
+	}
+	if !backupIsServable(sites, backupSiteID) {
+		return fmt.Errorf("failover control surface is enabled but PORTAL_BACKUP_SITE_ID %q is not an entry in PORTAL_SITE_URLS", backupSiteID)
+	}
+	return nil
 }
 
 // failoverActionRequest is the POST body: the operator-requested transition,
@@ -131,6 +158,17 @@ func (h *FailoverHandler) Post(c *gin.Context) {
 		errhttp.Write(ctx, c, errcode.Conflict(
 			fmt.Sprintf("action %q not allowed from status %q", req.Action, cur.Status),
 			errcode.WithReason(errcode.PortalFailoverIllegalTransition)))
+		return
+	}
+
+	// Refuse to enter a backup-serving status with no backup to serve — that
+	// would take the site dark (500 per login) instead of failing it over.
+	// Derived from the resulting serving target, so recovery actions that
+	// return a site home are never blocked by a missing backup.
+	if next.ServingTarget() == ServingBackup && !backupIsServable(h.sites, h.backupSiteID) {
+		errhttp.Write(ctx, c, errcode.Unavailable(
+			"no servable backup site is configured; set PORTAL_BACKUP_SITE_ID to an entry in PORTAL_SITE_URLS",
+			errcode.WithReason(errcode.PortalFailoverBackupUnavailable)))
 		return
 	}
 

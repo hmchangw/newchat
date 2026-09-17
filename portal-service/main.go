@@ -114,6 +114,10 @@ func run() error {
 		return fmt.Errorf("parse site URL registry: %w", err)
 	}
 
+	if err := validateFailoverConfig(cfg.FailoverOpsToken, cfg.BackupSiteID, sites); err != nil {
+		return fmt.Errorf("validate failover config: %w", err)
+	}
+
 	otelBaseURL, err := parseOTELBaseURL(cfg.OTELBaseURL)
 	if err != nil {
 		return fmt.Errorf("parse OTEL base URL: %w", err)
@@ -197,7 +201,7 @@ func run() error {
 	// listener so no privileged write shares the public discovery server.
 	var internalSrv *http.Server
 	if cfg.FailoverOpsToken != "" {
-		failoverHandler := NewFailoverHandler(failoverStore, sites)
+		failoverHandler := NewFailoverHandler(failoverStore, sites, cfg.BackupSiteID)
 
 		ir := gin.New()
 		ir.Use(gin.Recovery())

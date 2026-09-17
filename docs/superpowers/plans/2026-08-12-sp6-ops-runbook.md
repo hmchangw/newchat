@@ -31,9 +31,21 @@ is the only place the decision is made.
 |---|---|---|---|
 | `FAILOVER_OPS_TOKEN` | portal-service | Break-glass bearer token gating the control surface. **Empty disables the control surface entirely.** | Provision as a secret (below). Required to operate failover. |
 | `FAILOVER_INTERNAL_ADDR` | portal-service | Listen address for the internal-only control listener (default `:8090`), kept **off** the public `:8085` discovery API. | Expose only to the ops network (below). |
-| `PORTAL_BACKUP_SITE_ID` | portal-service | Reserved id in `PORTAL_SITE_URLS` whose `{baseUrl,natsUrl}` are served for a failed-over site (e.g. `_backup`). Empty in single-site deployments. | Set once the backup site exists; add its entry to `PORTAL_SITE_URLS`. |
-| `FAILOVER_STATE_TTL` | portal-service | How long portal caches a site's serving target before re-reading (default `5s`). | Leave default unless routing-propagation latency needs tuning. |
-| `PORTAL_SITE_URLS` | portal-service | Site registry; **must contain the `PORTAL_BACKUP_SITE_ID` entry** or a failover returns `500` (loud, by design). | Add the backup entry when the backup is deployed. |
+| `PORTAL_BACKUP_SITE_ID` | portal-service | Reserved id in `PORTAL_SITE_URLS` whose `{baseUrl,natsUrl}` are served for a failed-over site (e.g. `_backup`). May be empty **only** while the control surface is disabled. | Set once the backup site exists; add its entry to `PORTAL_SITE_URLS`. |
+| `FAILOVER_STATE_TTL` | portal-service | How long portal caches a site's serving target before re-reading (default `5s`). Must be positive — a zero/negative value is rejected at startup. | Leave default unless routing-propagation latency needs tuning. |
+| `PORTAL_SITE_URLS` | portal-service | Site registry; **must contain the `PORTAL_BACKUP_SITE_ID` entry** whenever the control surface is enabled. | Add the backup entry when the backup is deployed. |
+| `MONGO_READ_PREFERENCE` | portal-service | Applies to the directory only. The `failover_states` collection **always reads from the primary**, regardless of this value — the serving decision must not lag replication. | Leave as `secondaryPreferred`. |
+
+**Startup is fail-fast on this pairing:** portal refuses to boot when
+`FAILOVER_OPS_TOKEN` is set but `PORTAL_BACKUP_SITE_ID` is empty or absent from
+`PORTAL_SITE_URLS`. That combination advertises a failover capability the
+deployment cannot actually perform, and the alternative is discovering it
+mid-incident: the transition would commit and then every `/api/userInfo` for
+that site would `500`, taking it dark instead of failing it over. The control
+surface enforces the same invariant per request (`503`
+`failover_backup_unavailable`) for any action that would result in serving the
+backup; recovery actions that return a site home (`resume`, `complete`) are
+never blocked by a missing backup.
 
 ### 1.2 Secret provisioning — `FAILOVER_OPS_TOKEN`
 
