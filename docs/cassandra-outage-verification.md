@@ -179,8 +179,13 @@ is absent from the JSON entirely, so its presence is the signal.
 **The failure class is visible** (needs `O11Y_ENABLED=true`):
 
 ```bash
+# containerised (make up-detached)
 docker compose -f message-worker/deploy/docker-compose.yml exec message-worker \
   wget -qO- localhost:9090/metrics | grep message_worker_
+
+# hot-reload (make dev SERVICE=message-worker) — the worker is a local process,
+# so scrape it directly; the compose exec above has no container to attach to
+curl -s localhost:9090/metrics | grep message_worker_
 ```
 
 `message_worker_history_write_failures_total{class="infra"}` should be climbing
@@ -282,7 +287,7 @@ request-class error having never actually retried it.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `CONSUMER_MAX_DELIVER` | `-1` | Unlimited redelivery. Startup fails if `>= 0`. |
+| `CONSUMER_MAX_DELIVER` | — | **Not a knob in default mode.** Its env default is `6`, but `buildConsumerConfig` pins `-1` through `WithUnlimitedRedelivery` regardless of what you set, and `validateConsumerConfig` refuses to start if the resolved value is `>= 0`. Level 0 uses that inertness as its A/B lever. Teams mode is the exception and does read it. |
 | `INVALID_RETRY_WINDOW` | `1h` | How long a request-class failure retries before the drop. A floor, not a target — measured against the jittered minimum. |
 | `HISTORY_DROP_ENABLED` | `true` | Operator kill switch for destruction. |
 | `MAX_DROPS_PER_MINUTE` | `10` | Per-pod cap on destruction. |
