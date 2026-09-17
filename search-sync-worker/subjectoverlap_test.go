@@ -65,7 +65,6 @@ func TestPreflightFilters(t *testing.T) {
 		streamName   = "BOT-MESSAGES-CANONICAL-site-a"
 		consumerName = "bot-message-sync"
 	)
-	declared := []string{"chat.bot.canonical.site-a.>"}
 
 	lookupReturning := func(subjects []string) streamSubjectsFunc {
 		return func(context.Context, string) ([]string, error) { return subjects, nil }
@@ -94,26 +93,24 @@ func TestPreflightFilters(t *testing.T) {
 			filters: []string{"chat.bot.canonical.site-a.*"},
 		},
 		{
-			name:    "lookup failure falls back to the declared subjects",
+			// Previously this fell back to the local declaration and PASSED, which
+			// let a transient lookup failure silently disable the whole guard.
+			name:    "a lookup failure is refused, not substituted with the declaration",
 			lookup:  func(context.Context, string) ([]string, error) { return nil, errors.New("stream not found") },
 			filters: []string{"chat.bot.canonical.site-a.*"},
+			wantErr: "read deployed subjects",
 		},
 		{
-			name:    "empty live subjects fall back to the declared subjects",
+			name:    "a stream reporting no subjects is refused",
 			lookup:  lookupReturning(nil),
 			filters: []string{"chat.bot.canonical.site-a.*"},
-		},
-		{
-			name:    "fallback still rejects a filter the declaration cannot carry",
-			lookup:  func(context.Context, string) ([]string, error) { return nil, errors.New("stream not found") },
-			filters: []string{"chat.msg.canonical.site-a.*"},
-			wantErr: "shares no subject",
+			wantErr: "no deployed subjects",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := preflightFilters(context.Background(), tt.lookup, streamName, declared, tt.filters, consumerName)
+			err := preflightFilters(context.Background(), tt.lookup, streamName, tt.filters, consumerName)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -124,6 +121,19 @@ func TestPreflightFilters(t *testing.T) {
 			assert.Contains(t, err.Error(), streamName, "error must name the stream")
 		})
 	}
+
+	// The operator's next move depends on WHY the lookup failed (stream absent vs
+	// permissions vs a blip), so the cause has to survive rather than be flattened
+	// into "could not verify".
+	t.Run("the lookup error is wrapped, not swallowed", func(t *testing.T) {
+		sentinel := errors.New("nats: stream not found")
+		err := preflightFilters(context.Background(),
+			func(context.Context, string) ([]string, error) { return nil, sentinel },
+			streamName, []string{"chat.bot.canonical.site-a.*"}, consumerName)
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, sentinel)
+	})
 }
 
 // validSubjectPatterns returns every subject pattern of up to maxTokens tokens

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -121,19 +120,26 @@ func liveStreamSubjects[S cachedStreamInfo](lookup func(context.Context, string)
 // fact. Ops narrowing the real subjects is the one drift that happens in
 // production, and only a live read can see it.
 //
-// Falls back to the declared subjects when the stream cannot be read — it may not
-// exist yet, and consumer creation reports that far better than this check can.
-// Refusing to start there would turn a silent-indexing bug into an outage.
-func preflightFilters(ctx context.Context, lookup streamSubjectsFunc, streamName string, declared, filters []string, consumerName string) error {
+// An unreadable stream is therefore a failed check, not a reason to fall back to
+// the declaration. Substituting it would have passed exactly when the answer was
+// unknown — and the declaration always matches, because the filters are built
+// from the same constants — so a transient lookup failure against a stream that
+// HAS drifted would wave through the inert consumer this guard exists to stop.
+// Startup must not report a filter as verified when nothing verified it.
+//
+// Failing here costs nothing the caller was not already paying: main.go creates
+// the consumer immediately after, exiting on error, so a stream that is absent
+// aborts startup either way — this just names the real reason. The case the
+// fallback actually covered was the one where the stream exists but its info is
+// unreadable (denied credentials, a blip), and that is precisely the case where
+// the local declaration is evidence of nothing.
+func preflightFilters(ctx context.Context, lookup streamSubjectsFunc, streamName string, filters []string, consumerName string) error {
 	subjects, err := lookup(ctx, streamName)
-	if err != nil || len(subjects) == 0 {
-		slog.WarnContext(ctx, "could not read deployed stream subjects; checking filters against the local declaration",
-			"stream", streamName,
-			"consumer", consumerName,
-			"declared", declared,
-			"error", err,
-		)
-		subjects = declared
+	if err != nil {
+		return fmt.Errorf("consumer %q: read deployed subjects for stream %q: %w", consumerName, streamName, err)
+	}
+	if len(subjects) == 0 {
+		return fmt.Errorf("consumer %q: stream %q reports no deployed subjects", consumerName, streamName)
 	}
 	return checkFilterSubjects(streamName, subjects, filters, consumerName)
 }

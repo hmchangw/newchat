@@ -327,13 +327,15 @@ func main() {
 		// A filter that matches nothing on this stream is not a JetStream error —
 		// the consumer would be created, report healthy and index nothing. Refuse
 		// to start instead. Checked against the stream as deployed, since INBOX and
-		// HR are owned elsewhere and streamCfg is only this service's declaration.
+		// HR are owned elsewhere and streamCfg is only this service's declaration —
+		// which is also why an unreadable stream fails here rather than falling back
+		// to that declaration.
 		lookupSubjects := liveStreamSubjects(js.Stream)
 		if streamCfg.Name == hrName && hrJS != nil {
 			lookupSubjects = liveStreamSubjects(hrJS.Stream)
 		}
-		if err := preflightFilters(ctx, lookupSubjects, streamCfg.Name, streamCfg.Subjects, consumerCfg.FilterSubjects, coll.ConsumerName()); err != nil {
-			slog.ErrorContext(ctx, "consumer filter does not match its stream",
+		if err := preflightFilters(ctx, lookupSubjects, streamCfg.Name, consumerCfg.FilterSubjects, coll.ConsumerName()); err != nil {
+			slog.ErrorContext(ctx, "consumer filter preflight failed",
 				"stream", streamCfg.Name,
 				"consumer", coll.ConsumerName(),
 				"filters", consumerCfg.FilterSubjects,
