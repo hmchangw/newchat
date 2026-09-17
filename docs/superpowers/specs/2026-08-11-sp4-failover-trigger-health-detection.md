@@ -124,6 +124,14 @@ on the backup. SP4 builds this reader; SP3 wires it into `resolve()`.
   conditional update on `version`. Multiple portal replicas stay correct without
   leader election — concurrent identical transitions are idempotent, a divergent
   one loses the CAS and re-reads.
+- **Bounded propagation delay, not instant consistency.** The fence covers the
+  stored *decision*, not what each replica currently *serves*: routing reads
+  through a per-replica TTL cache (`FAILOVER_STATE_TTL`) that a transition does
+  not invalidate, so replicas may disagree for up to one TTL. Harmless on
+  `failover` (the stale answer names a down site, and the client retries);
+  material on `complete`, where it splits writes across home and backup for that
+  window. Cross-replica invalidation is out of scope for this slice — see the
+  SP6 runbook §1.5.
 
 ## 8. Forward-compatibility to the option-3 console (later)
 

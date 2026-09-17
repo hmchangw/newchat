@@ -12,4 +12,6 @@ const (
 	PortalFailoverIllegalTransition Reason = "failover_illegal_transition"
 	// PortalFailoverVersionConflict: the failover state changed concurrently (optimistic-concurrency CAS lost); retry.
 	PortalFailoverVersionConflict Reason = "failover_version_conflict"
+	// PortalFailoverUnknownSite: the failover control surface was asked to transition a site absent from PORTAL_SITE_URLS.
+	PortalFailoverUnknownSite Reason = "failover_unknown_site"
 )

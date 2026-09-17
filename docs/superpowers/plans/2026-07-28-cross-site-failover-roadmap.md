@@ -92,6 +92,12 @@ alongside from SP1 onward.
   **no new minting code, no grant work**.
 - **Serving path — still needs SP1.** Plannable once SP1 materialization exists;
   that (not identity) is the remaining SP2 substance.
+- **⚠️ Blocking security item for the serving path:** the `chat.local.room.>`
+  subscribe grant is **not site-scoped**, so once the backup holds every site's
+  rooms in one NATS, a user displaced from one site could subscribe to another
+  site's room events there. Pre-existing *within* a site, newly cross-site at the
+  backup. Nothing is exploitable until the backup serves traffic — but this must
+  be closed **before** it does (SP2 spec §4.1, "OPEN (security)").
 
 ### SP3 — Routing brain: portal-service health-aware override  *(needs SP4 signal)*
 - **Deliverable:** `portal-service` becomes the single source of truth for "who
@@ -108,11 +114,16 @@ alongside from SP1 onward.
   the backup auth-service session branch). The SP3 routing hook is then a single
   `servingURLs(...)` call in `HandleLogin`. Tracked so this is not lost.
 
-### SP4 — Failover trigger / health detection  *(own design)*
-- **Deliverable:** auto-detect a down site (+ manual operator override) and drive
-  the SP3 override (spec §11.3).
-- **Ready to plan?** **No.** Resolve the detection mechanism and the override
-  control surface first (own brainstorm).
+### SP4 — Failover trigger / health detection  *(designed; control surface SHIPPED)*
+- **Deliverable:** drive the SP3 override from an authoritative per-site
+  `FailoverState` (spec §11.3).
+- **Status:** the **operator control surface is built and merged** — the state
+  machine, the CAS-guarded store and the ops-token-gated
+  `/internal/v1/failover` endpoints (`specs/2026-08-11-sp4-…`,
+  `plans/2026-08-12-sp4-…`, operated per the SP6 runbook §1).
+- **Still open:** **automatic** health detection. Deliberately deferred to
+  operator-confirmed failover — an automatic trigger that is wrong fails a
+  healthy site over. Needs its own design cycle before it can be planned.
 
 ### SP5 — Failback & reconciliation  *(needs SP1+SP2 live)*
 - **Deliverable:** replay the outage log home, verify convergence, cut over
@@ -144,6 +155,9 @@ sourcing topology. It is the linchpin: SP2 and SP5 cannot exist without it, and
 SP1a (the message slice) is likely writable as a concrete no-placeholder plan
 immediately once the sourcing topology is chosen.
 
-Everything downstream (SP2 identity, SP4 detection) also needs its own short
-design cycle before it can be planned without placeholders — this is expected for
-a DR architecture at this altitude, not a gap in the spec.
+The downstream design cycles have since run: **SP2 identity is resolved**
+(World 1 — one shared NATS account; the `chat.local.room.>` grant is already on
+`main`, so SP2 has no app work left, only the backup `auth-service` deploy), and
+**SP4 is designed with its control surface shipped**; only SP4's *automatic*
+detection still needs a cycle. This progression was expected for a DR
+architecture at this altitude, not a gap in the spec.

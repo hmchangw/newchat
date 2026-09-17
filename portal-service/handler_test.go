@@ -779,3 +779,32 @@ func TestHandleUserInfo_NoFailoverConfiguredRoutesHome(t *testing.T) {
 	assert.Equal(t, "https://site-a.example.com", resp.BaseURL)
 	assert.Equal(t, "site-a", resp.SiteID)
 }
+
+// An enabled failover control surface that stopped serving must fail readiness:
+// the pod is not fit to serve if operators cannot drive failover through it.
+func TestHandleReady_ControlSurfaceHealth(t *testing.T) {
+	tests := []struct {
+		name     string
+		healthy  bool
+		wantCode int
+	}{
+		{"control surface serving", true, http.StatusOK},
+		{"control surface stopped", false, http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewPortalHandler(cacheWith(alice), false, "site-local", "ws://localhost:9222",
+				testSites, testSettings,
+				WithControlSurfaceHealth(func() bool { return tt.healthy }))
+			w := getPath(t, setupRouter(t, h), "/readyz")
+			assert.Equal(t, tt.wantCode, w.Code)
+		})
+	}
+}
+
+// Without the option (FAILOVER_OPS_TOKEN unset) readiness is unchanged.
+func TestHandleReady_NoControlSurfaceConfigured(t *testing.T) {
+	h := newTestHandler(cacheWith(alice), false)
+	w := getPath(t, setupRouter(t, h), "/readyz")
+	assert.Equal(t, http.StatusOK, w.Code)
+}

@@ -26,8 +26,12 @@ when the home site recovers.
 
 **In scope (lifeboat functionality):**
 - Send and receive messages in rooms the user is **already** a member of.
-- Read **recent** message history (default window: 72h, matching
-  `MESSAGE_BUCKET_HOURS`).
+- Read **recent** message history (proposed lifeboat read cap: 72h). This is a
+  *lifeboat retention policy*, its own setting — **not** `MESSAGE_BUCKET_HOURS`,
+  which is the Cassandra partition width (repo default `360`) and must stay
+  identical across the backup and every origin site (CLAUDE.md §Cassandra).
+  Conflating the two would mis-partition writes; the 72h figure below sizes
+  storage and restore, nothing else.
 
 **Out of scope during failover (deferred, degraded):**
 - Creating rooms / DMs, membership changes, role changes.
@@ -340,7 +344,10 @@ first time (a single 1× copy to the backup) — new inter-site traffic, but che
 **Risks & levers:**
 - **Silent RPO decay** if the backup can't keep up with aggregate ingest — its lag
   grows and the DR guarantee quietly weakens. **Monitor per-site replication lag**
-  (reuse the membership-federation lag signal) and alert.
+  and alert. There is **no existing lag signal to reuse** — emitting a per-site
+  replication-lag gauge from the backup materializers is *new SP1 work*, not a
+  wiring task (the membership-federation path is worth reading as an
+  implementation reference, but it publishes no such metric today).
 - **Warm-standby idle waste** — N-way ingest runs 24/7 while serving ~nothing. If
   RTO can relax, a **colder** standby (buffer + replay-on-promote) cuts continuous
   compute, trading RTO for cost.

@@ -276,7 +276,7 @@ The returned `natsJwt` has a server-configured lifetime (default 2h). Clients sh
 **Endpoint:** `GET /api/userInfo?account={account}`
 **Reply:** synchronous HTTP response
 
-Site discovery — called once per login, **before** §2.2. Looks the account up in the portal's in-memory directory, which is **users-primary**: every account in the `users` collection (the canonical user record) is loaded, left-joined against the HR-owned `hr_employee` collection (refreshed daily) for enrichment fields. A cache hit therefore means the account is provisioned in `users` — bot/admin accounts resolve too, just without `hr_employee` enrichment — and returns the home site's connection coordinates. The client then calls `POST {baseUrl}/api/v1/auth` (§2.2) and connects to `natsUrl` (§2.1). JWT renewal does **not** re-query the portal — site assignment is stable within a session.
+Site discovery — called once per login, **before** §2.2. Looks the account up in the portal's in-memory directory, which is **users-primary**: every account in the `users` collection (the canonical user record) is loaded, left-joined against the HR-owned `hr_employee` collection (refreshed daily) for enrichment fields. A cache hit therefore means the account is provisioned in `users` — bot/admin accounts resolve too, just without `hr_employee` enrichment — and returns the connection coordinates of whichever site is **currently serving** the account (its home site, or the backup while the home site is failed over; see the note below). The client then calls `POST {baseUrl}/api/v1/auth` (§2.2) and connects to `natsUrl` (§2.1). JWT renewal does **not** re-query the portal — site assignment is stable within a session.
 
 **Discovery only — no token is validated here.** The endpoint serves non-secret directory data keyed by `account`. The client supplies the account directly: derived from the SSO token's `preferred_username` claim in production, or the dev login form in dev mode. The authoritative check is auth-service (§2.2), which validates the SSO token before minting a JWT — an account that resolves here still cannot obtain a NATS JWT or connect without a valid token at that step.
 
@@ -305,9 +305,9 @@ GET /api/userInfo?account=alice
 |---|---|---|
 | `account` | string | The `{account}` used in every NATS subject. |
 | `employeeId` | string | From the portal directory; informational. |
-| `baseUrl` | string | Home-site unified backend origin — the Traefik gateway (`:7777`), fronting auth-service, upload-service, and media-service under `/api/v1/*`. The client calls `POST {baseUrl}/api/v1/auth` next. Portal login (§2.5) is portal-direct and is NOT routed through this gateway. |
-| `natsUrl` | string | WebSocket URL of the home site's NATS. |
-| `siteId` | string | The user's home site; scopes site-suffixed NATS subjects. |
+| `baseUrl` | string | Currently-serving site's unified backend origin — the Traefik gateway (`:7777`), fronting auth-service, upload-service, and media-service under `/api/v1/*`. The client calls `POST {baseUrl}/api/v1/auth` next. Portal login (§2.5) is portal-direct and is NOT routed through this gateway. |
+| `natsUrl` | string | WebSocket URL of the currently-serving site's NATS. |
+| `siteId` | string | The user's **home** site — unchanged by failover; scopes site-suffixed NATS subjects and namespaces the account's data wherever it is served. |
 
 ```json
 {

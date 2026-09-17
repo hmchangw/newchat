@@ -120,6 +120,11 @@ type PortalHandler struct {
 	failover failoverTargeter
 	// backupSiteID is the reserved PORTAL_SITE_URLS entry served during failover.
 	backupSiteID string
+
+	// controlSurfaceHealthy reports whether the optional failover control
+	// surface is still serving; nil when it is disabled (then readiness
+	// ignores it entirely).
+	controlSurfaceHealthy func() bool
 }
 
 // failoverTargeter reads SP4's per-site serving target. *failoverReader
@@ -153,6 +158,14 @@ func WithFailoverReader(f failoverTargeter) PortalHandlerOption {
 // failed-over site (PORTAL_BACKUP_SITE_ID).
 func WithBackupSiteID(id string) PortalHandlerOption {
 	return func(h *PortalHandler) { h.backupSiteID = id }
+}
+
+// WithControlSurfaceHealth registers a probe reporting whether the optional
+// failover control surface is still serving. Wired only when the control
+// surface is enabled; /readyz then fails if its listener dies, so a pod that
+// operators can no longer drive failover through is taken out of rotation.
+func WithControlSurfaceHealth(ok func() bool) PortalHandlerOption {
+	return func(h *PortalHandler) { h.controlSurfaceHealthy = ok }
 }
 
 // servingURLs returns the coordinates to hand a client for an account homed on
@@ -405,9 +418,15 @@ func (h *PortalHandler) HandleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// HandleReady is the readiness probe: fails until the directory cache holds data.
+// HandleReady is the readiness probe: fails until the directory cache holds
+// data, and — when the failover control surface is enabled — while its listener
+// is down.
 func (h *PortalHandler) HandleReady(c *gin.Context) {
 	if !h.cache.Ready() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
+		return
+	}
+	if h.controlSurfaceHealthy != nil && !h.controlSurfaceHealthy() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 		return
 	}

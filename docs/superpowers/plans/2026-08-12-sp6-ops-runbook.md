@@ -90,8 +90,17 @@ stable backup while the home site drains. *(The drain/replay itself is SP5.)*
 
 **Complete failback (flip home):** `{"action":"complete",...}` → `healthy`;
 `servingTarget` flips to `home`; the backup drains its impersonation and clients
-reconnect home. **Gate this on SP5's lag≈0 signal** once SP5 exists; today it is a
-manual operator action.
+reconnect home.
+
+> **⚠️ DANGER — `complete` is unguarded until SP5 lands.** SP5 (replay +
+> convergence) is deferred, so **nothing in the system verifies that the outage's
+> backup-only writes have reached home** before this flips routing. Completing
+> early strands those writes on the backup while clients read a home site that
+> never received them — silent, user-visible data loss. Until SP5 exists, treat
+> `complete` as a **manual, evidence-required** step: confirm convergence out of
+> band before issuing it, and prefer leaving a site in `failing_back` over
+> guessing. Once SP5 ships, gate this transition on its lag≈0 signal in code
+> rather than in this runbook.
 
 **False alarm (undo a failover):** `{"action":"resume",...}` → straight back to
 `healthy`, skipping the drain.
@@ -99,12 +108,32 @@ manual operator action.
 **Inspect:** `GET /internal/v1/failover` for the whole fleet's state, including
 `operator`/`reason`/`since` for the audit trail.
 
-### 1.5 Split-brain guarantee
+### 1.5 Split-brain guarantee — and its bounded overlap
 
-A site is `home` **xor** `backup` because the decision is a single, single-valued
-`FailoverState` document that only portal writes (CAS-guarded). Do **not**
-attempt to route around portal or edit the `failover_states` collection by hand —
-that is the one thing that can break the fence.
+The **decision** is single-valued: one `FailoverState` document per site that
+only portal writes, CAS-guarded on `version`. No two operators can drive a site
+to different targets, and no replica can invent one.
+
+What the CAS does **not** buy is instantaneous propagation. Each portal replica
+resolves routing through its own `failoverReader` cache, and a transition does
+not invalidate those caches — they lapse on `FAILOVER_STATE_TTL` (default `5s`).
+So for **up to one TTL after a transition**, replicas can hand out different
+coordinates for the same site:
+
+- **On `failover`** this is harmless: a lagging replica still names the home
+  site, which is down, so the client's existing reconnect path retries and picks
+  up the backup on its next `/api/userInfo`.
+- **On `complete` (failback)** it is not: for up to one TTL, some clients are
+  sent home while others are still sent to the backup, so writes land in **both**
+  places. Keep `FAILOVER_STATE_TTL` small, and treat the flip as a window in
+  which the backup must still accept writes — this is part of why `complete`
+  needs SP5's drain/replay (§1.4) and not just an operator's judgement.
+
+Closing the overlap entirely needs cache invalidation or version propagation
+across replicas (a NATS broadcast on transition, say); it is deliberately not in
+this slice. Do **not** attempt to route around portal or edit the
+`failover_states` collection by hand — that is the one thing that can break the
+fence itself, as opposed to merely delaying it.
 
 ---
 
@@ -164,9 +193,12 @@ Owned by the platform/NATS/IaC team; no code in this repo.
   and the backup's INBOX — owned/bootstrapped per the `BOOTSTRAP_STREAMS`
   convention; ops/IaC owns creation in production.
 - **Bucket-window parity.** The backup and every origin site **must** share
-  `MESSAGE_BUCKET_HOURS` (default 72). A mismatch silently mis-partitions writes
-  and reads (CLAUDE.md §Cassandra; design §6.4). Enforce this in the backup's
-  deploy config.
+  `MESSAGE_BUCKET_HOURS`. A mismatch silently mis-partitions writes and reads
+  (CLAUDE.md §Cassandra; design §6.4). The **origin sites' `history-service` /
+  `message-worker` configuration is the source of truth** (repo default `360`) —
+  copy that value into the backup's deploy config; do not pick one from this
+  runbook. Note this is *unrelated* to the lifeboat read window (design §2),
+  which is a separate retention policy that happens to be shorter.
 
 ---
 

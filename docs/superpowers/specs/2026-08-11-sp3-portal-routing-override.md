@@ -64,7 +64,8 @@ unit-testable in isolation:
 // on siteID, applying SP4's failover override. siteID (the home site) is
 // returned unchanged for data scoping; only the transport URLs may swap.
 func (h *PortalHandler) servingURLs(ctx context.Context, siteID string) (siteURL, error) {
-    if h.failover.ServingTarget(ctx, siteID) == ServingBackup {
+    // nil reader (no failover configured) routes home.
+    if h.failover != nil && h.failover.ServingTarget(ctx, siteID) == ServingBackup {
         b, ok := h.sites[h.backupSiteID]
         if !ok {
             // A failover with no configured backup is a real misconfig — surface

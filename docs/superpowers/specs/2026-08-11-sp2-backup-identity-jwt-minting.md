@@ -79,7 +79,29 @@ Post-SP0, same-site rooms move to `chat.local.room.{id}.>`. A user's JWT must th
 (design §7, req #1). Because the template is shared, *every* user — home and
 displaced — gets the grant identically, which **eliminates** the design's "backup
 silently missing the grant" failure mode rather than mitigating it (there is no
-separate backup template to drift). This is exactly what `main` already ships.
+separate backup template to drift). This is what `main` already ships.
+
+> **OPEN (security) — the grant is site-wide, and the backup is multi-site.**
+> `chat.local.room.>` is not scoped by room membership: today, at a single site,
+> any authenticated user's JWT may already subscribe to any *same-site* room's
+> local subjects. Membership is enforced where messages are *addressed*
+> (`broadcast-worker` fans message payloads to per-user `chat.user.{account}.…`
+> subjects), but room-level **events** (`…​.event`, membership, metadata, thread
+> events) are published to the room subject and delivered by interest — so a
+> non-member who knows a room id can observe them. That is a pre-existing
+> property of the single-site model, unchanged by this spec.
+>
+> The backup changes its **blast radius**, and this is the part that is new:
+> because the backup materializes *every* site's rooms into one NATS, the site
+> boundary stops containing that exposure — a user displaced from site-a could
+> subscribe to a site-b room's events on the backup. The serving path this
+> affects does not exist yet (it is gated on SP1 materialization), so nothing is
+> exploitable today, but **this must be closed before the backup ever serves
+> traffic.** Two candidate fixes, to be decided in the SP1/SP2 serving-path work:
+> scope local-room subjects (or the grant) by origin site, so a JWT reaches only
+> its own site's rooms; or enforce membership at subscribe time rather than
+> relying on subject grants. The production leaf deny is **not** a mitigation
+> here — it blocks cross-gateway interest, not a local subscribe on the backup.
 
 ### 4.2 Backup `auth-service` deployment (ops / SP6 handoff)
 Deploy `auth-service` at the backup with the **shared** `AUTH_SCOPED_SIGNING_KEY`

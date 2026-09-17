@@ -21,6 +21,7 @@ type failoverReader struct {
 
 type cachedTarget struct {
 	target  ServingTarget
+	version int64
 	expires time.Time
 }
 
@@ -54,7 +55,13 @@ func (r *failoverReader) ServingTarget(ctx context.Context, siteID string) Servi
 	target := st.ServingTarget()
 
 	r.mu.Lock()
-	r.cache[siteID] = cachedTarget{target: target, expires: r.now().Add(r.ttl)}
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	// Concurrent misses can finish out of order. A read that carries an older
+	// version than what is already cached lost the race: keep the newer entry
+	// and answer from it, or the stale target sticks for a whole TTL.
+	if c, ok := r.cache[siteID]; ok && st.Version < c.version {
+		return c.target
+	}
+	r.cache[siteID] = cachedTarget{target: target, version: st.Version, expires: r.now().Add(r.ttl)}
 	return target
 }

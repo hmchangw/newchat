@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,14 +16,16 @@ import (
 
 // FailoverHandler serves the operator control surface over the internal
 // listener. It reads/writes FailoverState directly (operators need fresh state,
-// not a cached view). now is overridable in tests.
+// not a cached view). sites is the PORTAL_SITE_URLS registry, used to reject a
+// transition for a site routing could never serve. now is overridable in tests.
 type FailoverHandler struct {
 	store FailoverStore
+	sites map[string]siteURL
 	now   func() time.Time
 }
 
-func NewFailoverHandler(store FailoverStore) *FailoverHandler {
-	return &FailoverHandler{store: store, now: time.Now}
+func NewFailoverHandler(store FailoverStore, sites map[string]siteURL) *FailoverHandler {
+	return &FailoverHandler{store: store, sites: sites, now: time.Now}
 }
 
 // failoverActionRequest is the POST body: the operator-requested transition,
@@ -96,13 +99,23 @@ func (h *FailoverHandler) Post(c *gin.Context) {
 			errcode.WithReason(errcode.AuthMissingFields)))
 		return
 	}
-	if req.Operator == "" || req.Reason == "" {
+	// Trim before validating so a whitespace-only value can't pass as attribution.
+	operator := strings.TrimSpace(req.Operator)
+	reason := strings.TrimSpace(req.Reason)
+	if operator == "" || reason == "" {
 		errhttp.Write(ctx, c, errcode.BadRequest("operator and reason are required",
 			errcode.WithReason(errcode.AuthMissingFields)))
 		return
 	}
 	if !isKnownAction(req.Action) {
 		errhttp.Write(ctx, c, errcode.BadRequest(fmt.Sprintf("unknown action %q", req.Action)))
+		return
+	}
+	// A site absent from the registry has no coordinates to route to, so state
+	// for it would be inert. Reject the typo instead of minting a dead document.
+	if _, ok := h.sites[siteID]; !ok {
+		errhttp.Write(ctx, c, errcode.NotFound(fmt.Sprintf("site %q is not in the site registry", siteID),
+			errcode.WithReason(errcode.PortalFailoverUnknownSite)))
 		return
 	}
 
@@ -113,7 +126,7 @@ func (h *FailoverHandler) Post(c *gin.Context) {
 	}
 
 	nowMs := h.now().UTC().UnixMilli()
-	next, err := applyAction(&cur, req.Action, req.Operator, req.Reason, nowMs)
+	next, err := applyAction(&cur, req.Action, operator, reason, nowMs)
 	if err != nil {
 		errhttp.Write(ctx, c, errcode.Conflict(
 			fmt.Sprintf("action %q not allowed from status %q", req.Action, cur.Status),
@@ -133,7 +146,7 @@ func (h *FailoverHandler) Post(c *gin.Context) {
 
 	slog.InfoContext(ctx, "failover transition",
 		"siteId", siteID, "from", cur.Status, "to", next.Status,
-		"operator", req.Operator, "reason", req.Reason, "version", next.Version)
+		"operator", operator, "reason", reason, "version", next.Version)
 	c.JSON(http.StatusOK, toResponse(&next))
 }
 

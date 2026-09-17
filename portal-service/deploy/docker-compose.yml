@@ -41,9 +41,11 @@ services:
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
-      # Operator failover control surface (SP4). Dev-only token — never a real
-      # secret. Bound on an internal-only listener, off the public :8085 API.
-      - FAILOVER_OPS_TOKEN=${FAILOVER_OPS_TOKEN:-dev-failover-token}
+      # Operator failover control surface (SP4). Empty by default — matching
+      # main.go's safe default, the control surface stays off until an operator
+      # supplies a token. Set FAILOVER_OPS_TOKEN in the env to exercise it
+      # locally; it binds an internal-only listener, off the public :8085 API.
+      - FAILOVER_OPS_TOKEN=${FAILOVER_OPS_TOKEN:-}
       - FAILOVER_INTERNAL_ADDR=${FAILOVER_INTERNAL_ADDR:-:8090}
       # Reserved backup entry served for a failed-over site (SP3).
       - PORTAL_BACKUP_SITE_ID=${PORTAL_BACKUP_SITE_ID:-_backup}
