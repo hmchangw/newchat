@@ -2,7 +2,6 @@ package valkeyutil
 
 import (
 	"context"
-	"log/slog"
 	"slices"
 	"time"
 )
@@ -72,8 +71,7 @@ func SlideTTL(ctx context.Context, client Client, key string, ttl time.Duration,
 	slideCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bustTimeout)
 	defer cancel()
 	if _, err := client.Expire(slideCtx, key, ttl); err != nil {
-		slog.WarnContext(ctx, label+" L2 TTL slide failed (entry keeps its current deadline)",
-			"key", key, "error", err)
+		LogDegraded(ctx, label+" L2 TTL slide failed (entry keeps its current deadline)", err, "key", key)
 	}
 }
 
@@ -100,8 +98,7 @@ func BustKeys(ctx context.Context, client Client, label string, keys ...string) 
 	for batch := range slices.Chunk(keys, bustBatchSize) {
 		// Each batch is independent: one failure must not skip the rest.
 		if err := client.Del(bustCtx, batch...); err != nil {
-			slog.WarnContext(ctx, label+" L2 invalidate failed (TTL will reconcile)",
-				"count", len(batch), "error", err)
+			LogDegraded(ctx, label+" L2 invalidate failed (TTL will reconcile)", err, "count", len(batch))
 		}
 	}
 }
@@ -129,8 +126,7 @@ func SetMany(ctx context.Context, client Client, entries []KV, ttl time.Duration
 		return
 	}
 	if err := client.MSet(ctx, entries, ttl); err != nil {
-		slog.WarnContext(ctx, label+" L2 bulk write failed (TTL will reconcile)",
-			"count", len(entries), "error", err)
+		LogDegraded(ctx, label+" L2 bulk write failed (TTL will reconcile)", err, "count", len(entries))
 	}
 }
 
