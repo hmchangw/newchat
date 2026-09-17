@@ -2556,8 +2556,11 @@ func (s *failingStore) SaveMessage(ctx context.Context, msg *model.Message, send
 	if !s.healthy {
 		return errors.New("gocql: no connections available")
 	}
+	if err := s.Store.SaveMessage(ctx, msg, sender, siteID); err != nil {
+		return err
+	}
 	s.saved = append(s.saved, msg.ID)
-	return s.Store.SaveMessage(ctx, msg, sender, siteID)
+	return nil
 }
 
 func (s *failingStore) setHealthy(v bool) {

@@ -254,8 +254,11 @@ Send messages and watch:
 - `message_worker_history_write_failures_total{class="request"}` climbs
   immediately — this is the leading indicator, visible *before* the window
   elapses and anything is destroyed.
-- After ~30s of accumulated retries, `message_worker_history_dropped_total{code="invalid"}`
-  starts counting. Any non-zero value here is data destruction.
+- `message_worker_history_dropped_total{code="invalid"}` starts counting on the first
+  delivery whose `jsretry.MinWindow` reaches 30s — the **5th**, since the window is
+  measured through the backoff schedule's jitter floor rather than off a wall clock.
+  Allow **78–156s** from the first delivery; don't stop at 30 seconds and conclude the
+  drop path is broken. Any non-zero value here is data destruction.
 - Push past 10 drops in a minute and
   `message_worker_history_drop_suppressed_total{reason="rate_limited"}` appears —
   the unattended cap holding the rest of the feed together.
