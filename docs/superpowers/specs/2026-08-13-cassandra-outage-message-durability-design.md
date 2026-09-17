@@ -338,10 +338,13 @@ brakes below exist to bound what can go through it:
   Per-pod and in-process by design (no shared state, no round trip on the failure
   path), so **N pods allow N × the cap in aggregate**. The window is fixed rather than
   a token bucket, so an interval straddling a boundary can pass up to `2×max − 1` drops
-  (a token bucket of equal rate would not re-burst like that). The aggregate bound is
-  unaffected — windows are disjoint and independently capped, so total drops over a
-  duration `D` stay ≤ `max × ceil(D/window)` per pod, which is what the figures below
-  rest on.
+  (a token bucket of equal rate would not re-burst like that). The aggregate is still
+  bounded — windows are disjoint and independently capped — but the bound has to count
+  the straddle: an arbitrary interval of duration `D` touches at most `ceil(D/window) + 1`
+  windows, so total drops stay ≤ `max × (ceil(D/window) + 1)` per pod. Only a
+  window-*aligned* interval gets the tighter `max × ceil(D/window)`; quoting that for an
+  arbitrary interval would contradict the `2×max − 1` straddle above, which is the same
+  effect at `D < window`. The figures below use the arbitrary-interval bound.
 
 Refusing a drop is not refusing it forever: the message returns on the backoff schedule
 and may drop in a later window, so destruction is *spread out* rather than blocked —
@@ -354,7 +357,7 @@ itself is not invisible.
 schema drift during a rolling migration that overruns the window — still destroys
 messages once `INVALID_RETRY_WINDOW` elapses, but the loss is now **bounded**:
 `MAX_DROPS_PER_MINUTE` per pod per minute, not the whole feed. A one-hour migration
-overrun on a 3-pod deployment costs at most ~1,800 messages instead of ~120,000, while
+overrun on a 3-pod deployment costs at most ~1,830 messages instead of ~120,000, while
 `message_worker_history_dropped_total` and the class-labelled failure counter make the
 wave visible from the first failure. What remains unbounded is *duration*: nothing
 stops the drip if nobody responds, so the dropped-message counter warrants an alert on
