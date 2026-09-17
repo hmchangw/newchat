@@ -4,6 +4,10 @@ How to confirm, locally, that `message-worker` loses no message history while
 Cassandra is down — and that clients are told the history is incomplete rather
 than shown a gap as truth.
 
+Start at Level 0 if you want to see the original loss happen before watching the
+fix prevent it; a verification that only ever runs against fixed code cannot tell
+you whether the fix did anything.
+
 Design rationale lives in
 `docs/superpowers/specs/2026-08-13-cassandra-outage-message-durability-design.md`.
 This is the repeatable procedure, not the reasoning.
@@ -23,6 +27,68 @@ Claim 1 is the one that used to fail silently: `broadcast-worker` and
 `search-sync-worker` never touch Cassandra, so a message dropped by
 `message-worker` stayed on screen and stayed searchable while being gone from
 history permanently. Watching only the client is how this bug hid.
+
+## Level 0 — prove the bug was real (~5 min)
+
+Everything below verifies that the fix *holds*. None of it distinguishes "the fix
+works" from "the outage was too short to have lost anything anyway". Running the
+same outage against pre-fix code does, and it takes about five minutes.
+
+**The lever is one env var, and the asymmetry is the fix in miniature.**
+`CONSUMER_MAX_DELIVER=3`:
+
+- On **pre-fix `main`** it takes effect. `stream.WithOutageRetryBudget` raises a cap
+  only when it still equals `DefaultMaxDeliver` (6), so an explicit 3 survives.
+- On **this branch** it is ignored. `buildConsumerConfig` applies
+  `stream.WithUnlimitedRedelivery`, which pins `MaxDeliver = -1` before the backoff
+  schedule is derived, and `validateConsumerConfig` refuses to start otherwise.
+
+With a cap of 3 the message is destroyed about **six seconds** into the outage —
+deliveries land at roughly t=0, t=1s and t=6s on `DefaultBackoff`'s first rungs —
+so neither half of this needs the hour that a realistic cap would.
+
+### A. Pre-fix: watch a message disappear
+
+```bash
+git worktree add ../newchat-prefix origin/main
+cd ../newchat-prefix
+# add to message-worker/deploy/docker-compose.yml under environment:
+#   - CONSUMER_MAX_DELIVER=3
+make deps-up && make up-detached && make ui-up
+```
+
+Send one message and confirm it reaches history, so the path is known-good. Then:
+
+```bash
+docker stop chat-local-cassandra
+# send a second message from the UI; note its id
+# wait ~15s — the third delivery fails at ~6s and JetStream terminates it
+docker start chat-local-cassandra
+# wait ~30s for the consumer to settle
+docker exec chat-local-cassandra cqlsh -e \
+  "SELECT id FROM chat.messages_by_id WHERE id='<second-id>';"
+```
+
+**Zero rows — and that is the whole bug.** The message is still on screen and still
+returned by search, because `broadcast-worker` delivered it and
+`search-sync-worker` indexed it, and neither touches Cassandra. Nothing logged an
+error after the last NAK; the advisory JetStream emitted
+(`$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES`) has no consumer in this repo. A
+client cannot tell, and neither can an operator.
+
+### B. This branch: watch it survive
+
+Repeat exactly the same steps on this branch, `CONSUMER_MAX_DELIVER=3` included.
+The env var is ignored, the message NAKs for as long as the outage lasts, and the
+same query returns the row after recovery. The consumer also reports
+`max_deliver: -1` rather than 3, which is the env var being overridden in the open.
+
+```bash
+cd /path/to/this/branch && make deps-up && make up-detached && make ui-up
+# same outage, same query → one row
+```
+
+Tear the scratch tree down with `git worktree remove ../newchat-prefix`.
 
 ## Level 1 — the automated guard (~2 min)
 
