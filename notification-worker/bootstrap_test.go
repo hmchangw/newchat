@@ -55,6 +55,44 @@ type fakeStream struct {
 
 func (s *fakeStream) CachedInfo() *jetstream.StreamInfo { return s.info }
 
+// testWiring is the real production wiring, so these tests pin the values main.go
+// actually passes rather than hand-written stand-ins that can drift from it.
+func testWiring() stream.Wiring { return stream.Resolve(stream.PipelineUser, "test") }
+
+// TestBootstrapStreams_BindsFullStreamSubjects is the regression pin for the
+// narrowing bug. CreateOrUpdateStream NARROWS an existing stream, so binding the
+// .created leaf this worker happens to filter on would strip
+// .edited/.deleted/.reacted/.pinned from a stream message-gatekeeper owns —
+// last service to boot wins.
+func TestBootstrapStreams_BindsFullStreamSubjects(t *testing.T) {
+	w := testWiring()
+	js := &fakeStreamManager{}
+
+	require.NoError(t, bootstrapStreams(context.Background(), js, w.CanonicalStream, w.PushStream, true))
+
+	in, ok := js.configs[w.CanonicalStream.Name]
+	require.True(t, ok)
+	assert.Equal(t, w.CanonicalStream.Subjects, in.Subjects,
+		"must bind the whole canonical subject tree, not the .created leaf")
+	assert.NotContains(t, in.Subjects, w.CanonicalCreated,
+		"a consumer filter subject must never become the stream binding")
+
+	out, ok := js.configs[w.PushStream.Name]
+	require.True(t, ok)
+	assert.Equal(t, w.PushStream.Subjects, out.Subjects)
+}
+
+// The bot pipeline binds its own canonical/push pair; the same rule holds.
+func TestBootstrapStreams_BotPipelineBindsFullSubjects(t *testing.T) {
+	w := stream.Resolve(stream.PipelineBot, "test")
+	js := &fakeStreamManager{}
+
+	require.NoError(t, bootstrapStreams(context.Background(), js, w.CanonicalStream, w.PushStream, true))
+
+	assert.Equal(t, w.CanonicalStream.Subjects, js.configs[w.CanonicalStream.Name].Subjects)
+	assert.Equal(t, w.PushStream.Subjects, js.configs[w.PushStream.Name].Subjects)
+}
+
 func TestBootstrapStreams(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -128,7 +166,8 @@ func TestBootstrapStreams(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing, dedup: tc.dedup, lookupErr: tc.lookupErr}
-			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.notification.test", tc.enabled)
+			w := testWiring()
+			err := bootstrapStreams(context.Background(), fake, w.CanonicalStream, w.PushStream, tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -152,8 +191,8 @@ func TestBootstrapStreams(t *testing.T) {
 // covers that span, or a batch already accepted is published again and a duplicate push goes out.
 func TestBootstrapStreams_PushStreamDedupWindowCoversTheRetryBudget(t *testing.T) {
 	js := &fakeStreamManager{}
-	require.NoError(t, bootstrapStreams(context.Background(), js,
-		"MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.test.>", true))
+	w := testWiring()
+	require.NoError(t, bootstrapStreams(context.Background(), js, w.CanonicalStream, w.PushStream, true))
 	cfg, ok := js.configs["PUSH-NOTIFICATION-test"]
 	require.True(t, ok)
 	assert.GreaterOrEqual(t, cfg.Duplicates, stream.OutageRetryWindow)
