@@ -3463,10 +3463,13 @@ func TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane(t *testing.T) {
 
 	ctrl := gomock.NewController(t)
 	mockUserStore := NewMockUserStore(ctrl)
-	// Transient failure: process returns a plain wrapped error, so the lane may escalate
-	// (a permanent errcode would Ack-drop instead).
-	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").
-		Return(nil, errors.New("mongo down"))
+	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
+	// A user-lookup failure fails open (the sender is projected from the event), so it is
+	// not the transient error the lane sees. The Cassandra write is: process returns a
+	// plain wrapped error, so the lane may escalate — a permanent errcode would Ack-drop.
+	mockStore := NewMockStore(ctrl)
+	mockStore.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(errors.New("cassandra unavailable"))
 
 	var gotSubject string
 	lane := &retrylane.Lane{
@@ -3478,7 +3481,7 @@ func TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane(t *testing.T) {
 	}
 
 	var escalated bool
-	h := NewHandler(NewMockStore(ctrl), mockUserStore, NewMockThreadStore(ctrl), "site-a",
+	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
 		withRetryLane(lane, jsretry.DefaultBackoff[:3]))
 
@@ -3504,10 +3507,14 @@ func TestHandler_HandleJetStreamMsg_NaksWhenNoLaneIsInjected(t *testing.T) {
 
 	ctrl := gomock.NewController(t)
 	mockUserStore := NewMockUserStore(ctrl)
-	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").
-		Return(nil, errors.New("mongo down"))
+	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
+	// Same transient path as the escalating test above: the user lookup fails open, the
+	// Cassandra write is what actually fails, so the settle decision is the lane's alone.
+	mockStore := NewMockStore(ctrl)
+	mockStore.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(errors.New("cassandra unavailable"))
 
-	h := NewHandler(NewMockStore(ctrl), mockUserStore, NewMockThreadStore(ctrl), "site-a",
+	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
 
 	msg := &fakeJSMsg{data: data, numDelivered: 4}
