@@ -110,3 +110,12 @@ func TestValidateConsumerConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildFailoverConsumerConfig(t *testing.T) {
+	cc := buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a")
+
+	assert.Equal(t, "message-worker-failover", cc.Durable,
+		"distinct durable so the two lanes keep independent cursors")
+	assert.Equal(t, []string{"chat.failover.msg.canonical.site-a.created"}, cc.FilterSubjects,
+		"mirrors the home lane's .created filter, on the failover root")
+}

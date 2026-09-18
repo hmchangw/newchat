@@ -19,6 +19,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/failoverlane"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/outbox"
@@ -98,7 +99,7 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 	homeConsInfo := homeCons.CachedInfo()
 	require.NotNil(t, homeConsInfo)
 
-	homeLane, err := startInboxLane(ctx, homeCons, &cfg, handler, homeConsInfo.Config.MaxDeliver, sem, &wg)
+	homeLane, err := startInboxLane(ctx, homeCons, &cfg, handler, homeConsInfo.Config.MaxDeliver, sem, &wg, loopguard.New("home", nil))
 	require.NoError(t, err)
 	t.Cleanup(homeLane.Stop)
 
@@ -108,7 +109,7 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 		SiteID: cfg.SiteID, Dialer: &natsutil.BuddyDialer{Config: cfg.Buddy},
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
-	buddyLane, err := startFailoverLane(ctx, buddyJS, &cfg, handler, binder, sem, &wg)
+	buddyLane, err := startFailoverLane(ctx, buddyJS, &cfg, handler, binder, sem, &wg, loopguard.New("buddy", nil))
 	require.NoError(t, err)
 	t.Cleanup(buddyLane.Stop)
 

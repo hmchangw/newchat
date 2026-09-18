@@ -9,6 +9,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -57,6 +58,13 @@ type Lanes struct {
 	homeConn  *o11ynats.Conn
 	buddyConn *o11ynats.Conn
 	wg        sync.WaitGroup
+	// One guard per lane. Both lanes feed one WaitGroup and one pool, so a live
+	// lane keeps the pod looking busy after the other's pull loop has died —
+	// leaving it ready and silently processing half of what it should. Guards
+	// are built here rather than by each service so every two-lane worker gets
+	// the same coverage without wiring it itself.
+	homeGuard  *loopguard.Guard
+	buddyGuard *loopguard.Guard
 }
 
 // BindLanes builds both handlers up front (home first, so a builder may capture
@@ -65,7 +73,17 @@ type Lanes struct {
 func BindLanes(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStream,
 	dialer *natsutil.BuddyDialer, spec *LanesSpec, build BuildHandler,
 ) (*Lanes, error) {
-	l := &Lanes{homeConn: home}
+	l := &Lanes{
+		homeConn: home,
+		// Named by lane so a readiness failure says which one stopped. Built
+		// before either bind: the home bind is deferred until its cluster is
+		// reachable and the buddy bind can fail outright, so a row that appeared
+		// only on success would not cover the window before it. A guard whose
+		// loop never starts reads ready, which is what keeps an undialled buddy
+		// home-only rather than permanently unready.
+		homeGuard:  loopguard.New("consume-loop-home", loopguard.SelfShutdown),
+		buddyGuard: loopguard.New("consume-loop-buddy", loopguard.SelfShutdown),
+	}
 	// One pool for both lanes: a buddy lane with its own semaphore would take
 	// the service to 2×MAX_WORKERS in-flight handlers against the same stores.
 	b := &Binder{
@@ -73,6 +91,12 @@ func BindLanes(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStre
 		Bootstrap: spec.Bootstrap, MaxWorkers: spec.MaxWorkers,
 		Sem: make(chan struct{}, spec.MaxWorkers), WG: &l.wg, Metrics: spec.Metrics,
 	}
+	// Each lane's loop reports to its own guard, so the binder is copied per
+	// lane rather than shared: one OnLoopStop could not tell them apart.
+	homeBinder := *b
+	homeBinder.OnLoopStop = l.homeGuard.Stopped
+	buddyBinder := *b
+	buddyBinder.OnLoopStop = l.buddyGuard.Stopped
 
 	homeHandle, err := build(ctx, home, homeJS, subject.LaneHome)
 	if err != nil {
@@ -89,7 +113,7 @@ func BindLanes(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStre
 		if err != nil {
 			return nil, fmt.Errorf("create consumer on %s: %w", homeName, err)
 		}
-		lp, err := b.startLoop(ctx, cons, homeName, &spec.Home.Consumer, homeHandle)
+		lp, err := homeBinder.startLoop(ctx, cons, homeName, &spec.Home.Consumer, homeHandle)
 		if err != nil {
 			return nil, err
 		}
@@ -105,11 +129,11 @@ func BindLanes(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStre
 			if err != nil {
 				return fmt.Errorf("build failover handler: %w", err)
 			}
-			cons, err := b.BindConsumer(ctx, bjs, spec.Buddy)
+			cons, err := buddyBinder.BindConsumer(ctx, bjs, spec.Buddy)
 			if err != nil {
 				return err
 			}
-			l.buddy, err = b.startLoop(ctx, cons, spec.Buddy.Stream.Name, &spec.Buddy.Consumer, handle)
+			l.buddy, err = buddyBinder.startLoop(ctx, cons, spec.Buddy.Stream.Name, &spec.Buddy.Consumer, handle)
 			return err
 		})
 	}
@@ -124,12 +148,25 @@ func (l *Lanes) Check() health.Check {
 	return natsutil.LanesCheck(l.home.Ready, func() bool { return l.buddy != nil })
 }
 
+// Checks is Check plus one row per lane's pull loop. Prefer it: Check alone
+// answers "is a lane bound", which stays true for a lane whose loop has since
+// died, and with two lanes the survivor would keep the pod ready while half its
+// traffic went unprocessed.
+func (l *Lanes) Checks() []health.Check {
+	return []health.Check{l.Check(), l.homeGuard.Check(), l.buddyGuard.Check()}
+}
+
 // StopHooks stops both lanes and waits for their in-flight handlers, in the
 // order shutdown.Wait should run them: both iterators stop before either lane
 // finishes, so neither pulls new work while the other is still draining.
 func (l *Lanes) StopHooks() []func(context.Context) error {
 	return []func(context.Context) error{
 		func(context.Context) error {
+			// Both guards before either Stop: stopping an iterator is what makes
+			// its Next return, and an unmarked stop reads as a death and
+			// re-signals a process already on its way out.
+			l.homeGuard.BeginShutdown()
+			l.buddyGuard.BeginShutdown()
 			l.home.Stop()
 			l.buddy.stop()
 			return nil
