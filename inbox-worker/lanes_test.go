@@ -179,3 +179,56 @@ func TestDispatchLanes_RoutesBySubject(t *testing.T) {
 		})
 	}
 }
+
+// hbThenTerminalIter returns a missing-heartbeat error, then a message, then a
+// terminal error. nats.go returns ErrNoHeartbeat without invalidating the
+// iterator, so dispatchLanes must retry instead of reporting the loop dead.
+type hbThenTerminalIter struct {
+	msg   jetstream.Msg
+	calls int
+}
+
+func (h *hbThenTerminalIter) Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error) {
+	h.calls++
+	switch h.calls {
+	case 1:
+		return nil, nil, jetstream.ErrNoHeartbeat
+	case 2:
+		return context.Background(), h.msg, nil
+	default:
+		return nil, nil, jetstream.ErrConsumerDeleted
+	}
+}
+
+// TestDispatchLanes_RetriesOnMissingHeartbeat pins that a heartbeat gap does not
+// end the pump. Its returned error reaches the guard's restart hook, which
+// raises SIGTERM, so escalating a transient stall would restart the pod.
+func TestDispatchLanes_RetriesOnMissingHeartbeat(t *testing.T) {
+	iter := &hbThenTerminalIter{msg: stubLaneMsg{subject: "chat.inbox.site-a.external.message_created"}}
+	membershipCh := make(chan laneMsg, 4)
+	sem := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+
+	var processed int
+	var mu sync.Mutex
+	err := dispatchLanes(iter,
+		func(string) bool { return false },
+		membershipCh, sem, &wg,
+		func(laneMsg) { mu.Lock(); processed++; mu.Unlock() })
+	wg.Wait()
+
+	if errors.Is(err, jetstream.ErrNoHeartbeat) {
+		t.Fatal("a heartbeat gap was reported as the loop's death")
+	}
+	if !errors.Is(err, jetstream.ErrConsumerDeleted) {
+		t.Fatalf("want the terminal error, got %v", err)
+	}
+	if iter.calls != 3 {
+		t.Fatalf("want Next called again after the heartbeat gap, got %d calls", iter.calls)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if processed != 1 {
+		t.Fatalf("want the message after the gap processed, got %d", processed)
+	}
+}

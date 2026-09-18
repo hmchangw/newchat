@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -226,6 +227,8 @@ func main() {
 	}
 	consumerMetrics.LoopStarted(ctx)
 
+	sig := shutdown.Signals()
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	var wg sync.WaitGroup
 
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
@@ -233,10 +236,12 @@ func main() {
 		guardedProcessor(func(msgCtx context.Context, msg *natsmetrics.Message) {
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			handler.HandleJetStreamMsg(handlerCtx, msg)
-		}))
+		}),
+		loop.Stopped)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -245,7 +250,8 @@ func main() {
 
 	slog.Info("message-gatekeeper running", "site", cfg.SiteID)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
+		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
