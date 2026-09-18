@@ -42,9 +42,15 @@ const (
 	// attempts. Without a wait, the attempts are paced by the RAMP TICKER
 	// (1/RAMP_RATE — 20ms at the default 50/s), so a whole budget burns in a
 	// fraction of a second and an auth-service restart abandons every account
-	// that happened to be starting. Five attempts on this schedule span
-	// roughly half a minute instead.
-	startBackoffBase = time.Second
+	// that happened to be starting.
+	//
+	// Read the window from the FLOOR, not a nominal sum: N attempts buy N-1
+	// waits (the last failure abandons rather than sleeping) and equal jitter
+	// halves each one, so the five default attempts guarantee 15s and reach
+	// 30s — 1-2s, 2-4s, 4-8s, 8-16s. The base is 2s rather than 1s for exactly
+	// that reason: at 1s the guarantee is 7.5s, which does not outlast the pod
+	// restart this exists to sit out.
+	startBackoffBase = 2 * time.Second
 	startBackoffMax  = 30 * time.Second
 
 	// defaultStableAfter is how long a client must stay up before its failure

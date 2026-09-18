@@ -548,13 +548,18 @@ func TestDefaultStartBackoff_GrowsAndCaps(t *testing.T) {
 	// change exists to remove.
 	assert.Positive(t, defaultStartBackoff(0))
 
-	// Five attempts must cover a restart, not a blink.
-	var total time.Duration
+	// The window the docs promise, pinned to the arithmetic that produces it.
+	// N attempts buy N-1 waits — the last failure abandons rather than
+	// sleeping — and equal jitter halves each one, so the floor is what an
+	// operator actually gets: 15s, not the 30s a nominal sum suggests.
+	var floor, ceiling time.Duration
 	for attempt := 1; attempt < defaultMaxStartAttempts; attempt++ {
-		total += defaultStartBackoff(attempt)
+		nominal := min(startBackoffBase<<(attempt-1), startBackoffMax)
+		floor += nominal / 2
+		ceiling += nominal
 	}
-	assert.Greater(t, total, 3*time.Second,
-		"the default budget must outlast a dependency blip, not burn inside one")
+	assert.Equal(t, 15*time.Second, floor, "the documented floor is the one a run is held to")
+	assert.Equal(t, 30*time.Second, ceiling, "and the documented ceiling")
 }
 
 // The defect this fixes: a 503 window at startup burned all five attempts

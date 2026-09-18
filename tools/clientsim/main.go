@@ -48,10 +48,10 @@ type config struct {
 	RampRate    float64 `env:"CLIENTSIM_RAMP_RATE" envDefault:"50"`
 	// MaxStartAttempts bounds CONSECUTIVE failed starts per account before it
 	// is dropped from the run. The waits between them are exponential with
-	// jitter, so the default five span roughly half a minute — enough to sit
-	// out a dependency restart. Raise it where the environment blips for
-	// longer; every account that exhausts it is a client the fleet never gets
-	// back (clientsim_accounts_abandoned_total).
+	// jitter: N attempts buy N-1 waits, so the default five guarantee 15s and
+	// reach 30s — enough to sit out a pod restart. Raise it where the
+	// environment blips for longer; every account that exhausts it is a client
+	// the fleet never gets back (clientsim_accounts_abandoned_total).
 	MaxStartAttempts int     `env:"CLIENTSIM_MAX_START_ATTEMPTS" envDefault:"5"`
 	ChurnRate        float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
 	// expiry is the DEFAULT because it is what the real client does: it never
