@@ -39,6 +39,7 @@ type config struct {
 	// events sit in the OUTBOX stream unconsumed.
 	AllSiteIDs   []string                `env:"ALL_SITE_IDS" envDefault:"" envSeparator:","`
 	Consumer     stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy        natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 	Bootstrap    bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr   string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled bool                    `env:"PPROF_ENABLED" envDefault:"false"`
@@ -66,61 +67,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
-	if err != nil {
-		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
-		os.Exit(1)
-	}
-
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
-		os.Exit(1)
-	}
-
-	outboxCfg := stream.Outbox(cfg.SiteID)
-
-	// Every forward is JetStream-backed: it blocks on PubAck and the server honors
-	// the msgID as Nats-Msg-Id for dedup. HandleEvent skips any target without a
-	// DedupID, so msgID is always non-empty here.
-	handler := NewHandler(func(ctx context.Context, subj string, data []byte, msgID string) error {
-		msg := natsutil.NewMsg(ctx, subj, data)
-		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
-			return fmt.Errorf("publish to %q: %w", subj, err)
-		}
-		return nil
-	})
-
-	// process is the one message disposition shared by every consumer:
-	// jobguard Acks on panic (poison drop) — the callbacks run outside
-	// natsrouter's Recovery middleware, so an unrecovered panic would crash the
-	// worker and crash-loop on JetStream redelivery — and jsretry Ack-drops
-	// permanent errors and Naks transient ones with backoff.
-	process := func(msgCtx context.Context, msg jetstream.Msg) {
-		jobguard.Run(msg, func() {
-			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
-			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Subject(), msg.Data()))
-		})
-	}
-
-	// Shared bounded worker pool: every relay event is idempotent (dedup via
-	// DedupID + the destination inbox-worker's high-water-mark guards), so
-	// concurrent forwarding is order-safe. The pool caps total in-flight work
-	// across every per-destination concurrent lane.
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	var wg sync.WaitGroup
-
-	// Armed before any lane starts: a dying lane raises SIGTERM on this process,
-	// and a signal raised before the handler exists is fatal.
-	sig := shutdown.Signals()
-	guards := make([]*loopguard.Guard, 0, 2*len(cfg.AllSiteIDs))
-	checks := []health.Check{natsutil.HealthCheck(nc)}
-
 	// Both lanes are per remote peer (from ALL_SITE_IDS). Per destination, not a
 	// single shared consumer, so a down peer's parked forwards (MaxDeliver=-1,
 	// never Ack) fill only their own consumer's ack-pending budget instead of
@@ -132,42 +78,78 @@ func main() {
 		slog.Warn("no remote peers in ALL_SITE_IDS — federation events published to OUTBOX would sit unconsumed",
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
-	iters := make([]o11ynats.MessagesContext, 0, len(peers))
-	orderedCtxs := make([]o11ynats.ConsumeContext, 0, len(peers))
-	for _, dest := range peers {
-		ccons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create concurrent consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-		if err != nil {
-			slog.Error("concurrent messages failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		iters = append(iters, iter)
-		cg := loopguard.New("outbox-concurrent-"+dest, loopguard.SelfShutdown)
-		guards = append(guards, cg)
-		checks = append(checks, cg.Check())
-		drainPool(iter, sem, &wg, process, cg.Stopped)
 
-		ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create ordered consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		cc, err := ocons.Consume(ctx, process)
-		if err != nil {
-			slog.Error("ordered consume failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		orderedCtxs = append(orderedCtxs, cc)
-		// A callback consumer reports its death only by closing Closed().
-		og := loopguard.New("outbox-ordered-"+dest, loopguard.SelfShutdown)
-		og.WatchClosed(cc.Closed())
-		guards = append(guards, og)
-		checks = append(checks, og.Check())
+	// With no peers there is nothing to forward, so the buddy lane is gated out
+	// entirely — and the home dial stays fail-fast, since without a buddy a pod
+	// that cannot reach home has nothing to do.
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(len(peers) > 0), cfg.NatsCredsFile, sdk)
+	// Lazy home dial; see natsutil.BuddyDialer.ConnectHome.
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
+	if err != nil {
+		slog.Error("nats connect failed", "error", err)
+		os.Exit(1)
 	}
+
+	outboxCfg := stream.Outbox(cfg.SiteID)
+
+	// Shared bounded worker pool: every relay event is idempotent (dedup via
+	// DedupID + the destination inbox-worker's high-water-mark guards), so
+	// concurrent forwarding is order-safe. The pool caps total in-flight work
+	// across every per-destination concurrent lane.
+	sem := make(chan struct{}, cfg.MaxWorkers)
+	var wg sync.WaitGroup
+
+	// Armed before any lane starts: a dying lane raises SIGTERM on this process,
+	// and a signal raised before the handler exists is fatal.
+	//
+	// Both lanes' guards are built eagerly, before either bind. The home bind is
+	// deferred to whenever the cluster returns, so a readiness row that only
+	// appeared then would leave the window it covers unwatched; and a guard whose
+	// loop never starts reads ready, so an undialled buddy stays home-only rather
+	// than permanently unready.
+	sig := shutdown.Signals()
+	homeGuards := newPeerGuards("home", peers)
+	buddyGuards := newPeerGuards("failover", peers)
+
+	// Home lanes, bound once the home connection is up — immediately in the
+	// ordinary case, later if the pod booted during an outage. Dev-only stream
+	// bootstrap rides inside for the same reason: it needs the server too. The
+	// per-peer consumers are the bind's own, so its stop closes exactly them.
+	homeLanes, err := natsutil.BindWhenConnected(ctx, nc, outboxCfg.Name, func(ctx context.Context) (func(), error) {
+		if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+			return nil, fmt.Errorf("bootstrap streams: %w", err)
+		}
+		return bindPeerLanes(ctx, js, outboxCfg.Name, subject.LaneHome, peers, &cfg, sem, &wg, newLaneProcess(js), homeGuards)
+	})
+	if err != nil {
+		slog.Error("bind home lanes failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Buddy lane: keeps this site federating outward while its own NATS is down.
+	// A failed dial adds no failover lane and the home lanes carry on.
+	var stopBuddy func()
+	buddyConn := dialer.Bind(ctx, func(ctx context.Context, _ *o11ynats.Conn, bjs o11ynats.JetStream) error {
+		failoverCfg := stream.OutboxFailover(cfg.SiteID)
+		if err := stream.EnsureFailoverStream(ctx, bjs, failoverCfg,
+			cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+			return err
+		}
+		// Its own process, forwarding through the buddy connection.
+		stop, err := bindPeerLanes(ctx, bjs, failoverCfg.Name, subject.LaneFailover, peers, &cfg, sem, &wg, newLaneProcess(bjs), buddyGuards)
+		if err != nil {
+			return err
+		}
+		stopBuddy = stop
+		return nil
+	})
+
+	checks := []health.Check{
+		natsutil.HealthCheck(nc),
+		natsutil.LanesCheck(homeLanes.Ready, func() bool { return stopBuddy != nil }),
+	}
+	checks = append(checks, homeGuards.checks()...)
+	checks = append(checks, buddyGuards.checks()...)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled, checks...)
 	if err != nil {
@@ -178,31 +160,22 @@ func main() {
 	slog.Info("outbox-worker running", "site", cfg.SiteID, "federation_peers", peers)
 
 	shutdown.WaitOn(ctx, sig, 25*time.Second,
-		func(ctx context.Context) error {
+		func(context.Context) error {
 			// Mark the stop intended BEFORE Stop() ends the lanes, or the guards
 			// read a clean shutdown as a death and re-signal the process.
-			for _, g := range guards {
-				g.BeginShutdown()
-			}
-			for _, it := range iters {
-				it.Stop()
-			}
-			for _, cc := range orderedCtxs {
-				cc.Stop()
+			homeGuards.beginShutdown()
+			buddyGuards.beginShutdown()
+			homeLanes.Stop()
+			if stopBuddy != nil {
+				stopBuddy()
 			}
 			return nil
 		},
 		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
-			}
+			return natsutil.WaitPool(ctx, &wg)
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { return healthStop(ctx) },
 		// obsShutdown LAST so all prior teardown telemetry is exported.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
@@ -247,8 +220,8 @@ func drainPool(iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGr
 	}()
 }
 
-// buildLaneConsumerConfig is the shared body of the two per-destination lane
-// configs: durable outbox-worker-{lane}-{dest}, one filter subject per event
+// buildLaneConsumerConfig is the shared body of the two per-destination consumer
+// configs: durable outbox-worker-{kind}-{dest}, one filter subject per event
 // type, and MaxDeliver=-1 (retry forever — a destination outage delays a
 // forward, never exhausts it).
 //
@@ -258,20 +231,147 @@ func drainPool(iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGr
 // a shared consumer's finite MaxAckPending budget would fill with one down
 // peer's parked events and stall first-delivery of every healthy peer's events.
 // One consumer per peer gives each its own budget, so a down peer stalls only
-// its own lane.
-func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, lane string, eventTypes []model.InboxEventType) jetstream.ConsumerConfig {
+// its own lane. That holds on the failover lane too — a peer that is down while
+// WE are failed over is still a peer that must not stall the others — and the
+// lane's own durable keeps the two cursors independent.
+//
+// kind is the consumer pair's half ("concurrent" or "ordered"), not the lane.
+func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, kind string,
+	eventTypes []model.InboxEventType, lane subject.Lane,
+) jetstream.ConsumerConfig {
 	// Unlimited redelivery: a peer that is down for an hour must not exhaust
 	// MaxDeliver and drop the federated event. Applied to the settings, not to
 	// the config afterwards, so the derived BackOff is not clamped against a cap
 	// that no longer applies — see stream.WithUnlimitedRedelivery.
 	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
-	cc.Durable = "outbox-worker-" + lane + "-" + destSiteID
+	cc.Durable = "outbox-worker-" + kind + "-" + destSiteID
+	if lane == subject.LaneFailover {
+		cc.Durable = "outbox-worker-" + kind + "-failover-" + destSiteID
+	}
 	filters := make([]string, 0, len(eventTypes))
 	for _, et := range eventTypes {
-		filters = append(filters, subject.Outbox(siteID, destSiteID, et))
+		filters = append(filters, lane.Outbox(siteID, destSiteID, et))
 	}
 	cc.FilterSubjects = filters
 	return cc
+}
+
+// newLaneProcess is the message disposition every consumer on one lane shares:
+// jobguard Acks on panic (poison drop) — the callbacks run outside natsrouter's
+// Recovery middleware, so an unrecovered panic would crash the worker and
+// crash-loop on JetStream redelivery — and jsretry Ack-drops permanent errors
+// and Naks transient ones with backoff.
+//
+// Each lane builds its own from the connection it consumes on (see
+// failoverlane.BuildHandler): forwarding through the dead home connection would
+// neither deliver nor Ack, redelivering the event forever while appearing to be
+// in flight. Every forward is JetStream-backed — it blocks on PubAck and the
+// server honors msgID as Nats-Msg-Id; HandleEvent skips any target without one.
+func newLaneProcess(js natsutil.JetStreamMsgPublisher) func(context.Context, jetstream.Msg) {
+	handler := NewHandler(natsutil.JetStreamPublishFunc(js, natsmetrics.Publisher{}))
+	return jobguard.Handler(func(msgCtx context.Context, msg jetstream.Msg) {
+		handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
+		jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Subject(), msg.Data()))
+	})
+}
+
+// bindPeerLanes binds this lane's per-destination consumer pair on every peer:
+// a concurrent lane plus a FIFO lane each. Both lanes of the service run this
+// same body — a forward while we are failed over is the same forward — so the
+// two cannot drift apart on the event-type partition, which would leave a type
+// on the stream with no consumer.
+//
+// Failing partway is not partial success: the consumers bound so far are
+// stopped and the error returned, because a half-bound lane would silently drop
+// whichever event types missed their consumer.
+// peerGuards holds this lane's loop guards, one per destination per consumer
+// kind. They are built before the bind that starts the loops, because both
+// binds are deferred — the home one until its cluster is reachable, the buddy
+// one until its dial succeeds — and a readiness row that appeared only on a
+// successful bind would not cover the window before it.
+type peerGuards struct {
+	concurrent map[string]*loopguard.Guard
+	ordered    map[string]*loopguard.Guard
+}
+
+// newPeerGuards names each guard by lane and destination, so a readiness
+// failure says which peer's forwarding stopped and on which cluster.
+func newPeerGuards(lane string, peers []string) *peerGuards {
+	g := &peerGuards{
+		concurrent: make(map[string]*loopguard.Guard, len(peers)),
+		ordered:    make(map[string]*loopguard.Guard, len(peers)),
+	}
+	for _, dest := range peers {
+		g.concurrent[dest] = loopguard.New("outbox-"+lane+"-concurrent-"+dest, loopguard.SelfShutdown)
+		g.ordered[dest] = loopguard.New("outbox-"+lane+"-ordered-"+dest, loopguard.SelfShutdown)
+	}
+	return g
+}
+
+func (g *peerGuards) checks() []health.Check {
+	checks := make([]health.Check, 0, len(g.concurrent)+len(g.ordered))
+	for _, guard := range g.concurrent {
+		checks = append(checks, guard.Check())
+	}
+	for _, guard := range g.ordered {
+		checks = append(checks, guard.Check())
+	}
+	return checks
+}
+
+func (g *peerGuards) beginShutdown() {
+	for _, guard := range g.concurrent {
+		guard.BeginShutdown()
+	}
+	for _, guard := range g.ordered {
+		guard.BeginShutdown()
+	}
+}
+
+func bindPeerLanes(ctx context.Context, js o11ynats.JetStream, streamName string, lane subject.Lane,
+	peers []string, cfg *config, sem chan struct{}, wg *sync.WaitGroup,
+	process func(context.Context, jetstream.Msg), guards *peerGuards,
+) (func(), error) {
+	iters := make([]o11ynats.MessagesContext, 0, len(peers))
+	ordered := make([]o11ynats.ConsumeContext, 0, len(peers))
+	stop := func() {
+		for _, it := range iters {
+			it.Stop()
+		}
+		for _, cc := range ordered {
+			cc.Stop()
+		}
+	}
+
+	for _, dest := range peers {
+		ccons, err := js.CreateOrUpdateConsumer(ctx, streamName, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest, lane))
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("create concurrent consumer for %s: %w", dest, err)
+		}
+		iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("bind concurrent messages for %s: %w", dest, err)
+		}
+		iters = append(iters, iter)
+		drainPool(iter, sem, wg, process, guards.concurrent[dest].Stopped)
+
+		ocons, err := js.CreateOrUpdateConsumer(ctx, streamName, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest, lane))
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("create ordered consumer for %s: %w", dest, err)
+		}
+		cc, err := ocons.Consume(ctx, process)
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("ordered consume for %s: %w", dest, err)
+		}
+		ordered = append(ordered, cc)
+		// A callback consumer reports its death only by closing Closed().
+		guards.ordered[dest].WatchClosed(cc.Closed())
+	}
+	return stop, nil
 }
 
 // buildConcurrentConsumerConfig returns a per-destination consumer config for
@@ -281,8 +381,8 @@ func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, lane
 // pkg/outbox owns the partition and rejects publishes outside it. Concurrency
 // within a peer is preserved (default MaxAckPending); only the isolation
 // boundary is per-destination.
-func buildConcurrentConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string) jetstream.ConsumerConfig {
-	return buildLaneConsumerConfig(s, siteID, destSiteID, "concurrent", outbox.ConcurrentEventTypes)
+func buildConcurrentConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string, lane subject.Lane) jetstream.ConsumerConfig {
+	return buildLaneConsumerConfig(s, siteID, destSiteID, "concurrent", outbox.ConcurrentEventTypes, lane)
 }
 
 // buildOrderedConsumerConfig returns the per-destination FIFO consumer config
@@ -294,8 +394,11 @@ func buildConcurrentConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID
 // retry pressure on a down peer is bounded to one in-flight probe per backoff
 // interval. These events are low-volume, so the serial ceiling (~1/RTT per
 // destination) is far above the real rate.
-func buildOrderedConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string) jetstream.ConsumerConfig {
-	cc := buildLaneConsumerConfig(s, siteID, destSiteID, "ordered", outbox.OrderedEventTypes)
+//
+// Set here for both lanes, so the live and failover lanes cannot drift apart on
+// the very property the lane exists to guarantee.
+func buildOrderedConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string, lane subject.Lane) jetstream.ConsumerConfig {
+	cc := buildLaneConsumerConfig(s, siteID, destSiteID, "ordered", outbox.OrderedEventTypes, lane)
 	cc.MaxAckPending = 1
 	return cc
 }

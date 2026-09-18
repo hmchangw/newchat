@@ -162,7 +162,7 @@ func (b *Binder) startLoop(ctx context.Context, cons o11ynats.Consumer, streamNa
 	})
 
 	if b.Metrics == nil {
-		natsutil.RunPool(iter, b.Sem, b.WG, handle)
+		natsutil.RunPool(iter, b.Sem, b.WG, handle, b.OnLoopStop)
 		return &loop{lane: natsutil.NewLane(iter), metrics: laneMetrics}, nil
 	}
 

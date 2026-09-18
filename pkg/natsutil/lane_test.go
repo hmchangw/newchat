@@ -58,7 +58,7 @@ func TestRunPool_HandlesEveryMessageThenExitsOnIteratorError(t *testing.T) {
 		mu.Lock()
 		seen++
 		mu.Unlock()
-	})
+	}, nil)
 
 	wgDone(t, iter, &wg)
 	mu.Lock()
@@ -86,7 +86,7 @@ func TestRunPool_BoundsConcurrencyBySemaphore(t *testing.T) {
 		mu.Lock()
 		inFlight--
 		mu.Unlock()
-	})
+	}, nil)
 
 	wgDone(t, iter, &wg)
 	mu.Lock()
@@ -175,8 +175,8 @@ func TestRunPool_TwoLanesShareOneBudget(t *testing.T) {
 		mu.Unlock()
 	}
 
-	natsutil.RunPool(iterA, sem, &wg, handle)
-	natsutil.RunPool(iterB, sem, &wg, handle)
+	natsutil.RunPool(iterA, sem, &wg, handle, nil)
+	natsutil.RunPool(iterB, sem, &wg, handle, nil)
 
 	wgDone(t, iterA, &wg)
 	wgDone(t, iterB, &wg)
@@ -184,4 +184,37 @@ func TestRunPool_TwoLanesShareOneBudget(t *testing.T) {
 	defer mu.Unlock()
 	assert.LessOrEqual(t, peak, 3,
 		"a second lane must draw from the same budget, not add its own")
+}
+
+// A pooled loop shares its WaitGroup with every other lane, so the group keeps
+// looking busy after one of them dies. The stopped hook is the only signal a
+// caller has, and it must carry the terminal error, not just the fact of it.
+func TestRunPool_ReportsTheTerminalErrorToStopped(t *testing.T) {
+	iter := newFakeIter(2)
+	sem := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+
+	stopped := make(chan error, 1)
+	natsutil.RunPool(iter, sem, &wg, func(context.Context, jetstream.Msg) {},
+		func(err error) { stopped <- err })
+
+	wgDone(t, iter, &wg)
+	select {
+	case err := <-stopped:
+		require.Error(t, err, "a loop that exited must report why")
+		assert.Contains(t, err.Error(), "iterator closed")
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopped was never called; a dead lane would sit unobserved")
+	}
+}
+
+// A nil hook is the ordinary case for a single-lane caller, and must not panic
+// the loop goroutine on the way out.
+func TestRunPool_NilStoppedIsSafe(t *testing.T) {
+	iter := newFakeIter(1)
+	sem := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+
+	natsutil.RunPool(iter, sem, &wg, func(context.Context, jetstream.Msg) {}, nil)
+	wgDone(t, iter, &wg)
 }

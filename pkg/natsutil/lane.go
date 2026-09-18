@@ -27,8 +27,11 @@ type MsgIterator interface {
 // The loop exits when Next reports an error, which is what iter.Stop causes.
 // Acking, retry, and panic recovery belong to handle, because they differ per
 // service.
+// stopped receives the terminal Next error once the loop has exited; nil
+// ignores it. Nothing else observes that exit, so a caller with several pooled
+// loops needs it to tell a dead one from a busy one — see pkg/loopguard.
 func RunPool(iter MsgIterator, sem chan struct{}, wg *sync.WaitGroup,
-	handle func(context.Context, jetstream.Msg),
+	handle func(context.Context, jetstream.Msg), stopped func(error),
 ) {
 	// The loop goroutine is itself counted, so shutdown — which stops the
 	// iterator and then waits on wg — cannot pass through while a message Next
@@ -40,6 +43,9 @@ func RunPool(iter MsgIterator, sem chan struct{}, wg *sync.WaitGroup,
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				if stopped != nil {
+					stopped(err)
+				}
 				return
 			}
 			sem <- struct{}{}
