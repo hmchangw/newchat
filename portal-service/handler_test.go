@@ -715,3 +715,65 @@ func TestParseSiteURLs(t *testing.T) {
 		})
 	}
 }
+
+// A displaced client learns peers from /api/settings — portal holds the whole
+// registry but every other response exposes only the caller's own site, so
+// without this there is no way to discover where else to connect.
+func TestBuildPeerList(t *testing.T) {
+	peers := buildPeerList(testSites)
+
+	require.Len(t, peers, 3)
+	byID := make(map[string]string, len(peers))
+	for _, p := range peers {
+		byID[p.SiteID] = p.NATSURL
+	}
+	assert.Equal(t, "wss://nats-3.site-a.example.com", byID["site-a"])
+	assert.Equal(t, "wss://nats.site-b.example.com", byID["site-b"])
+	assert.Equal(t, "ws://localhost:9222", byID["site-local"])
+}
+
+// Deterministic ordering keeps the response cacheable and diffable; the client
+// shuffles it anyway, so server-side order carries no selection meaning.
+func TestBuildPeerList_SortedBySiteID(t *testing.T) {
+	peers := buildPeerList(map[string]siteURL{
+		"site-c": {BaseURL: "https://c.com", NATSURL: "wss://nats.c.com"},
+		"site-a": {BaseURL: "https://a.com", NATSURL: "wss://nats.a.com"},
+		"site-b": {BaseURL: "https://b.com", NATSURL: "wss://nats.b.com"},
+	})
+
+	require.Len(t, peers, 3)
+	assert.Equal(t, []string{"site-a", "site-b", "site-c"},
+		[]string{peers[0].SiteID, peers[1].SiteID, peers[2].SiteID})
+}
+
+func TestBuildPeerList_EmptyRegistry(t *testing.T) {
+	assert.Empty(t, buildPeerList(map[string]siteURL{}))
+}
+
+// baseUrl must not leak: a displaced client relocates its NATS connection only,
+// and its HTTP calls still go to its own home gateway. Publishing every site's
+// baseUrl would widen the disclosure for no use.
+func TestHandleSettings_PeerListOmitsBaseURL(t *testing.T) {
+	settings := testSettings
+	settings.Sites = buildPeerList(testSites)
+	h := NewPortalHandler(cacheWith(alice), false, "site-local", "ws://localhost:9222", testSites, settings)
+
+	w := getPath(t, setupRouter(t, h), "/api/settings")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"siteId":"site-a"`)
+	assert.NotContains(t, w.Body.String(), "https://site-a.example.com",
+		"a peer's baseUrl must never reach the client")
+	assert.NotContains(t, w.Body.String(), "baseUrl")
+}
+
+// An unconfigured peer list must serialize as an absent field rather than null,
+// so a client on the old contract keeps parsing the response unchanged.
+func TestHandleSettings_OmitsSitesWhenUnset(t *testing.T) {
+	h := newTestHandler(cacheWith(alice), false)
+
+	w := getPath(t, setupRouter(t, h), "/api/settings")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "sites")
+}
