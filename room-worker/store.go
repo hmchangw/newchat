@@ -104,8 +104,18 @@ type SubscriptionStore interface {
 	GetOrgMembersWithIndividualStatus(ctx context.Context, roomID, orgID string) ([]OrgMemberStatus, error)
 
 	// --- write operations (remove flow) ---
-	DeleteSubscription(ctx context.Context, roomID, account string) (int64, error)
-	DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (int64, error)
+	// DeleteSubscription deletes the (roomID, account) sub and reports the
+	// deleted row's persisted u.isBot. The flag comes off the row rather than
+	// the account string because ReconcileMemberCounts counts u.isBot==true and
+	// derives userCount by subtraction, so a row missing the flag sits in
+	// userCount whatever its account reads; decrementing the other counter
+	// would drift both until the next reconcile.
+	DeleteSubscription(ctx context.Context, roomID, account string) (deleted int64, wasBot bool, err error)
+	// DeleteSubscriptionsByAccounts deletes the accounts' subs in roomID and
+	// reports how many of the deleted rows carried u.isBot==true, for the same
+	// reason as DeleteSubscription. deletedBots is only meaningful when deleted
+	// equals the target count; a partial delete makes the caller recompute.
+	DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (deleted, deletedBots int64, err error)
 	DeleteRoomMember(ctx context.Context, roomID string, memberType model.RoomMemberType, memberID string) error
 
 	// --- thread-state cleanup (remove flow): scrub departed accounts so they no longer fan out as followers (#308); no-op on empty ---

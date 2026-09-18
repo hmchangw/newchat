@@ -427,7 +427,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		return nil
 	}
 
-	deleted, delErr := h.store.DeleteSubscription(ctx, req.RoomID, req.Account)
+	deleted, wasBot, delErr := h.store.DeleteSubscription(ctx, req.RoomID, req.Account)
 	if delErr != nil {
 		return fmt.Errorf("delete subscription: %w", delErr)
 	}
@@ -443,8 +443,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 
 	if deleted > 0 {
+		// The deleted row's own flag, not the account shape: see DeleteSubscription.
 		userDelta, appDelta := -1, 0
-		if subIsBot(req.Account) {
+		if wasBot {
 			userDelta, appDelta = 0, -1
 		}
 		if err := h.applyMemberRemovalCounts(ctx, req.RoomID, userDelta, appDelta); err != nil {
@@ -647,13 +648,13 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		accounts[i] = m.Account
 	}
 
-	var deletedSubs int64
+	var deletedSubs, deletedBots int64
 	if len(accounts) > 0 {
-		n, delErr := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts)
+		n, bots, delErr := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts)
 		if delErr != nil {
 			return fmt.Errorf("delete subscriptions by accounts: %w", delErr)
 		}
-		deletedSubs = n
+		deletedSubs, deletedBots = n, bots
 		// Bust AFTER the write, in one batched round trip: each removed
 		// account's cached positive decision must die immediately, not linger
 		// for the L2 TTL.
@@ -674,14 +675,9 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	case len(accounts) == 0:
 		// Every org member survives via another source: nothing left the room.
 	case int(deletedSubs) == len(accounts):
-		var removedUsers, removedApps int
-		for _, acc := range accounts {
-			if subIsBot(acc) {
-				removedApps++
-			} else {
-				removedUsers++
-			}
-		}
+		// Split by the deleted rows' own flags: see DeleteSubscriptionsByAccounts.
+		removedApps := int(deletedBots)
+		removedUsers := len(accounts) - removedApps
 		if err := h.applyMemberRemovalCounts(ctx, req.RoomID, -removedUsers, -removedApps); err != nil {
 			return err
 		}

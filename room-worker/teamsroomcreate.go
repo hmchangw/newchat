@@ -174,7 +174,8 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		}
 	}
 	if len(removed) > 0 {
-		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, room.ID, removed); err != nil {
+		// Counts are recomputed authoritatively below, so the bot split is unused here.
+		if _, _, err := h.store.DeleteSubscriptionsByAccounts(ctx, room.ID, removed); err != nil {
 			return fmt.Errorf("delete departed subs: %w", err)
 		}
 		// Bust AFTER the write, one batched round trip: same store method

@@ -442,9 +442,10 @@ func TestMongoStore_DeleteSubscription_Integration(t *testing.T) {
 		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
 	})
 
-	deleted, err := store.DeleteSubscription(ctx, "r1", "alice")
+	deleted, wasBot, err := store.DeleteSubscription(ctx, "r1", "alice")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), deleted)
+	assert.False(t, wasBot)
 
 	subs, err := store.ListByRoom(ctx, "r1")
 	require.NoError(t, err)
@@ -469,9 +470,10 @@ func TestMongoStore_DeleteSubscriptionsByAccounts_Integration(t *testing.T) {
 		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
 	})
 
-	deleted, err := store.DeleteSubscriptionsByAccounts(ctx, "r1", []string{"alice", "bob"})
+	deleted, deletedBots, err := store.DeleteSubscriptionsByAccounts(ctx, "r1", []string{"alice", "bob"})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), deleted)
+	assert.Equal(t, int64(0), deletedBots)
 
 	subs, err := store.ListByRoom(ctx, "r1")
 	require.NoError(t, err)
@@ -2465,4 +2467,65 @@ func TestSetRoomCrossSite_Sticky(t *testing.T) {
 	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r1"}).Decode(&got))
 	require.NotNil(t, got.CrossSite)
 	assert.True(t, *got.CrossSite)
+}
+
+// The counter delta follows the row's stored u.isBot, so these pin what the
+// store reports for a flagged row, for a row missing the field entirely (the
+// pre-flag legacy shape, which ReconcileMemberCounts counts as a user), and for
+// the bot count over a mixed target set.
+
+func TestMongoStore_DeleteSubscription_ReportsPersistedBotFlag_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "flagged.bot", IsBot: true},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
+	})
+	// Legacy row: bot-shaped account, u.isBot absent, so it sits in userCount.
+	_, err := db.Collection("subscriptions").InsertOne(ctx, bson.M{
+		"_id": "s2", "roomId": "r1", "u": bson.M{"_id": "u2", "account": "legacy.bot"},
+	})
+	require.NoError(t, err)
+
+	deleted, wasBot, err := store.DeleteSubscription(ctx, "r1", "flagged.bot")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+	assert.True(t, wasBot)
+
+	deleted, wasBot, err = store.DeleteSubscription(ctx, "r1", "legacy.bot")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+	assert.False(t, wasBot, "a row without u.isBot is counted as a user, so it must decrement userCount")
+
+	deleted, wasBot, err = store.DeleteSubscription(ctx, "r1", "absent")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), deleted)
+	assert.False(t, wasBot)
+}
+
+func TestMongoStore_DeleteSubscriptionsByAccounts_CountsPersistedBots_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "flagged.bot", IsBot: true},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "alice"},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
+	})
+	_, err := db.Collection("subscriptions").InsertOne(ctx, bson.M{
+		"_id": "s3", "roomId": "r1", "u": bson.M{"_id": "u3", "account": "legacy.bot"},
+	})
+	require.NoError(t, err)
+
+	deleted, deletedBots, err := store.DeleteSubscriptionsByAccounts(ctx, "r1",
+		[]string{"flagged.bot", "alice", "legacy.bot"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), deleted)
+	assert.Equal(t, int64(1), deletedBots, "only the flagged row counts as an app")
 }

@@ -480,20 +480,45 @@ func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, room
 	return results, nil
 }
 
-func (s *MongoStore) DeleteSubscription(ctx context.Context, roomID, account string) (int64, error) {
-	res, err := s.subscriptions.DeleteOne(ctx, bson.M{"roomId": roomID, "u.account": account})
-	if err != nil {
-		return 0, fmt.Errorf("delete subscription for %q in room %q: %w", account, roomID, err)
+// DeleteSubscription deletes-and-returns in one round trip, so the counter delta
+// is keyed on the row that actually left rather than on a re-derivation from the
+// account string, which disagrees for rows written before u.isBot existed.
+func (s *MongoStore) DeleteSubscription(ctx context.Context, roomID, account string) (int64, bool, error) {
+	var doc struct {
+		User struct {
+			IsBot bool `bson:"isBot"`
+		} `bson:"u"`
 	}
-	return res.DeletedCount, nil
+	err := s.subscriptions.FindOneAndDelete(ctx,
+		bson.M{"roomId": roomID, "u.account": account},
+		options.FindOneAndDelete().SetProjection(bson.M{"u.isBot": 1}),
+	).Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("delete subscription for %q in room %q: %w", account, roomID, err)
+	}
+	return 1, doc.User.IsBot, nil
 }
 
-func (s *MongoStore) DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (int64, error) {
-	res, err := s.subscriptions.DeleteMany(ctx, bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}})
+// DeleteSubscriptionsByAccounts counts the bot rows among the targets before
+// deleting them: DeleteMany cannot return the documents, and the delta must
+// follow the persisted u.isBot rather than the account strings. The count is
+// index-backed over the target set, not the whole room. A row deleted between
+// the count and the delete shows up as a partial delete, which makes the caller
+// recompute instead of trusting the split.
+func (s *MongoStore) DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (int64, int64, error) {
+	filter := bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}}
+	bots, err := s.subscriptions.CountDocuments(ctx, bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}, "u.isBot": true})
 	if err != nil {
-		return 0, fmt.Errorf("delete subscriptions for room %q: %w", roomID, err)
+		return 0, 0, fmt.Errorf("count bot subscriptions for room %q: %w", roomID, err)
 	}
-	return res.DeletedCount, nil
+	res, err := s.subscriptions.DeleteMany(ctx, filter)
+	if err != nil {
+		return 0, 0, fmt.Errorf("delete subscriptions for room %q: %w", roomID, err)
+	}
+	return res.DeletedCount, bots, nil
 }
 
 func (s *MongoStore) DeleteRoomMember(ctx context.Context, roomID string, memberType model.RoomMemberType, memberID string) error {
