@@ -25,7 +25,13 @@ type streamManager interface {
 
 // bootstrapStreams creates (dev/integration) or verifies (production, fail-fast) the JetStream
 // input stream; identity is env-driven so user/bot deployments target their own stream. Federation config belongs to ops/IaC.
-func bootstrapStreams(ctx context.Context, js streamManager, streamName, subjectFilter string, enabled bool) error {
+//
+// The retry stream (RETRY-{siteID}) is dev-only like the input stream — in
+// production it is ops/IaC-owned and deliberately not verified here: with
+// RETRY_LANE_ENABLED=false the worker runs without the retry consumer rather
+// than refusing to start (main.go, retrylane.SkipMissingStream), so the lane
+// ships dark. With the lane on, the bind in main.go is the fail-fast point.
+func bootstrapStreams(ctx context.Context, js streamManager, streamName, subjectFilter, retryStream, retrySubject string, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     streamName,
@@ -33,8 +39,16 @@ func bootstrapStreams(ctx context.Context, js streamManager, streamName, subject
 		}); err != nil {
 			return fmt.Errorf("create stream %s: %w", streamName, err)
 		}
+		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+			Name:     retryStream,
+			Subjects: []string{retrySubject},
+		}); err != nil {
+			return fmt.Errorf("create stream %s: %w", retryStream, err)
+		}
 		return nil
 	}
+	// Retry stream absence is non-fatal here: with the lane off the worker skips
+	// the retry consumer, and with it on main.go's bind is the fail-fast point.
 	if _, err := js.Stream(ctx, streamName); err != nil {
 		return fmt.Errorf("verify stream %s: %w", streamName, err)
 	}

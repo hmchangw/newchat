@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -38,16 +39,36 @@ type Handler struct {
 	siteID      string
 	publish     PublishFunc
 	metrics     *persistenceMetrics
+	// lane and fastBackoff back HandleJetStreamMsg's Settle call. lane holds no
+	// per-message OnEscalate hook — HandleJetStreamMsg derives a per-delivery
+	// copy via WithEscalationHook so the hook (a metrics recorder closure)
+	// never mutates state shared across the worker's message goroutines.
+	lane        *retrylane.Lane
+	fastBackoff []time.Duration
 }
 
 type messageWorkerHandlerOption func(*messageWorkerHandlerOptions)
 
 type messageWorkerHandlerOptions struct {
-	metrics *persistenceMetrics
+	metrics     *persistenceMetrics
+	lane        *retrylane.Lane
+	fastBackoff []time.Duration
 }
 
 func withPersistenceMetrics(metrics *persistenceMetrics) messageWorkerHandlerOption {
 	return func(opts *messageWorkerHandlerOptions) { opts.metrics = metrics }
+}
+
+// withRetryLane injects the base tiered-redelivery lane plus the fast-rung
+// backoff schedule it settles with in place before escalating. Omitted (as in
+// every pre-existing NewHandler call site), the handler falls back to a
+// disabled zero-value Lane and the full jsretry.DefaultBackoff schedule —
+// exactly today's behavior.
+func withRetryLane(lane *retrylane.Lane, fastBackoff []time.Duration) messageWorkerHandlerOption {
+	return func(opts *messageWorkerHandlerOptions) {
+		opts.lane = lane
+		opts.fastBackoff = fastBackoff
+	}
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string, publish PublishFunc, options ...messageWorkerHandlerOption) *Handler {
@@ -58,6 +79,12 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 	if opts.metrics == nil {
 		opts.metrics = newPersistenceMetrics(otel.Meter("message-worker"))
 	}
+	if opts.lane == nil {
+		opts.lane = &retrylane.Lane{} // zero value: Settle degrades to plain jsretry.Settle
+	}
+	if opts.fastBackoff == nil {
+		opts.fastBackoff = jsretry.DefaultBackoff
+	}
 	return &Handler{
 		store:       store,
 		userStore:   userStore,
@@ -65,10 +92,16 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 		siteID:      siteID,
 		publish:     publish,
 		metrics:     opts.metrics,
+		lane:        opts.lane,
+		fastBackoff: opts.fastBackoff,
 	}
 }
 
-func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
+// onEscalate is called when the retry lane hands this delivery to RETRY-{siteID}
+// instead of settling it in place — the per-delivery metrics hook (typically
+// (*natsmetrics.Message).Escalated), so it must never be shared across message
+// goroutines. Nil is safe: WithEscalationHook(nil) simply leaves OnEscalate unset.
+func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg, onEscalate func()) {
 	// flow: hop entry — stream-wait latency the inter-hop time-diff can't see.
 	// Gate the whole block so msg.Metadata() and arg-building are skipped on the
 	// unflagged hot path (slog.Log evaluates its args before Enabled runs).
@@ -82,11 +115,26 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			"subject", msg.Subject(), "bytes", len(msg.Data()), "stream_wait_ms", streamWaitMs)
 	}
 
-	// Migrated (X-Migration: live) events are persisted, but downstream thread side-effects are suppressed (see processMessage).
-	isMigration := natsutil.IsMigrationLiveHeader(msg.Headers())
 	// Sole persister of message history to Cassandra: transient failures must
 	// retry with backoff (never drop); malformed events Ack-drop as poison.
-	jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, h.processMessage(ctx, msg.Data(), isMigration))
+	// The per-message lane escalates to RETRY-{siteID} once h.fastBackoff is spent
+	// (when the lane is enabled); disabled, this is exactly jsretry.Settle over the
+	// full schedule.
+	lane := h.lane.WithEscalationHook(onEscalate)
+	lane.Settle(ctx, msg, h.fastBackoff, h.process(ctx, msg))
+}
+
+// process decodes and persists one delivery, without settling it — the caller
+// decides how: HandleJetStreamMsg settles through the retry lane (it may
+// escalate to RETRY-{siteID}), while main.go's retry-consumer loop settles a
+// message already on RETRY with plain jsretry.Settle over the slow-rung
+// schedule (the retry lane does not escalate a second time). Both callers
+// share this one path so the two settling strategies can never diverge on
+// what "processed" means.
+func (h *Handler) process(ctx context.Context, msg jetstream.Msg) error {
+	// Migrated (X-Migration: live) events are persisted, but downstream thread side-effects are suppressed (see processMessage).
+	isMigration := natsutil.IsMigrationLiveHeader(msg.Headers())
+	return h.processMessage(ctx, msg.Data(), isMigration)
 }
 
 func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration bool) error {

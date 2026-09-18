@@ -24,10 +24,14 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams creates the input+output streams when enabled (dev/integration), otherwise verifies the
-// input stream exists and the output stream's duplicate window covers the consumer's outage retry budget,
-// so a misconfigured deploy fails at startup; identities are env-driven.
-func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubject string, enabled bool) error {
+// bootstrapStreams creates the input+output+retry streams when enabled (dev/integration), otherwise verifies
+// the input stream exists and the output stream's duplicate window covers the consumer's outage retry budget,
+// so a misconfigured deploy fails at startup; identities are env-driven. RETRY-{siteID} is dev-only like the
+// output stream — in production it is ops/IaC-owned and deliberately not verified here: with
+// RETRY_LANE_ENABLED=false the worker runs without the retry consumer rather than refusing to start
+// (main.go, retrylane.SkipMissingStream), so the lane ships dark. With the lane on, the bind in main.go is
+// the fail-fast point.
+func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubject, retryStream, retrySubject string, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     inputStream,
@@ -46,11 +50,20 @@ func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputS
 		}); err != nil {
 			return fmt.Errorf("create stream %s: %w", outputStream, err)
 		}
+		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+			Name:     retryStream,
+			Subjects: []string{retrySubject},
+		}); err != nil {
+			return fmt.Errorf("create stream %s: %w", retryStream, err)
+		}
 		return nil
 	}
 	if _, err := js.Stream(ctx, inputStream); err != nil {
 		return fmt.Errorf("verify stream %s: %w", inputStream, err)
 	}
+	// RETRY is deliberately not verified here: the retry consumer's own bind reports a
+	// missing stream, and with RETRY_LANE_ENABLED=false that bind skips the lane rather
+	// than failing the service (see main.go).
 	// A present output stream must carry the window above, or a redelivery after it republishes batches
 	// the stream already accepted. Only ABSENCE is non-fatal (async publish surfaces that per-publish,
 	// and nothing can be duplicated in a stream that does not exist); any other lookup error leaves the

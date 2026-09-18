@@ -78,7 +78,7 @@ func TestHandler_HandleJetStreamMsg_RecordsPersistenceOutcomes(t *testing.T) {
 			h := NewHandler(store, users, threads, "site-a", func(context.Context, string, []byte, string) error { return nil }, withPersistenceMetrics(metrics))
 			msg := &fakeJSMsg{data: data}
 
-			h.HandleJetStreamMsg(context.Background(), msg)
+			h.HandleJetStreamMsg(context.Background(), msg, nil)
 
 			var rm metricdata.ResourceMetrics
 			require.NoError(t, reader.Collect(context.Background(), &rm))

@@ -349,7 +349,9 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 
 ### JetStream Redelivery Backoff
 
-Two levers space redeliveries, and they fire on **disjoint** failure modes. Set both.
+Three levers space redeliveries. `BackOff` fires on a disjoint failure mode from the
+other two; `pkg/retrylane` shares `jsretry`'s trigger but moves where the wait happens
+once the fast rungs are spent. Set all three.
 
 - **Consumer `BackOff`** (server-side, `pkg/stream.ConsumerSettings`) fires only when a
   message goes un-acked past `AckWait` — pod crash, OOM, hang, or a handler slower than
@@ -358,6 +360,17 @@ Two levers space redeliveries, and they fire on **disjoint** failure modes. Set 
 - **`pkg/jsretry`** (client-side `NakWithDelay`) fires when a handler catches a transient
   error. `DefaultBackoff` for non-latency-sensitive work, `LowLatencyBackoff` for
   user-visible fan-out. Equal-jittered; the server-side lever cannot jitter.
+- **`pkg/retrylane`** (client-side escalation) fires when a handler's transient failures
+  exhaust the in-place fast rungs. It republishes the message to `RETRY-{siteID}` and Acks,
+  so the long waits stop occupying the hot consumer's ack-pending budget — a Nak'd-with-delay
+  message holds its slot for the whole backoff, so at ~5 failures/s the default 1000-slot
+  budget is exhausted in ~200s and the consumer stalls for healthy traffic too. The total
+  retry budget is unchanged; only the occupancy moves. Opt-in per service via
+  `RETRY_LANE_ENABLED` (`pkg/retrylane.Settings`, envPrefix `RETRY_`, default `false` —
+  disabling stops new escalations but the retry consumer keeps draining what's already
+  parked); excluded by design from the FIFO lanes (`outbox-worker` ordered consumers,
+  `hr-sync-worker`, both `MaxAckPending=1`) and from `search-sync-worker`, which rely on
+  delivery order that escalation does not preserve.
 
 Three server rules the code must respect (`nats-io/nats-server`, `server/consumer.go`):
 
