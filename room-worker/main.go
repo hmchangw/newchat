@@ -314,7 +314,7 @@ func main() {
 	if info := cons.CachedInfo(); info != nil {
 		ackWait = info.Config.AckWait
 	}
-	heartbeatEvery := jsretry.HeartbeatInterval(ackWait)
+	heartbeatBudget := buildHeartbeatBudget(cfg.Consumer, ackWait)
 
 	wg.Add(1)
 	go func() {
@@ -331,7 +331,7 @@ func main() {
 			// Heartbeat from delivery, not from when a worker frees up: a
 			// message queued on the semaphore is already spending its ack
 			// deadline, and a large-room mutation can outrun what is left.
-			stopHeartbeat := jsretry.Heartbeat(msgCtx, msg, heartbeatEvery)
+			stopHeartbeat := jsretry.Heartbeat(msgCtx, msg, heartbeatBudget)
 			sem <- struct{}{}
 			wg.Add(1)
 			go func(msgCtx context.Context, msg jetstream.Msg, stopHeartbeat func()) {
@@ -461,6 +461,16 @@ func runJobWithRecovery(msgCtx context.Context, handler jobProcessor, msg jetstr
 	handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 	logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 	handler.HandleJetStreamMsg(handlerCtx, msg)
+}
+
+// buildHeartbeatBudget pairs the interval derived from the deadline the server
+// actually applied with the operator's bound on total extension. Centralized
+// beside buildConsumerConfig so it is unit-testable without NATS.
+func buildHeartbeatBudget(s stream.ConsumerSettings, ackWait time.Duration) jsretry.HeartbeatBudget {
+	return jsretry.HeartbeatBudget{
+		Every: jsretry.HeartbeatInterval(ackWait),
+		Max:   s.HeartbeatMax,
+	}
 }
 
 // buildConsumerConfig returns the durable consumer config for the given mode:

@@ -33,7 +33,7 @@ func (m *countingHeartbeatMsg) calls() int {
 
 func TestHeartbeat_ExtendsDeadlineUntilStopped(t *testing.T) {
 	msg := &countingHeartbeatMsg{}
-	stop := Heartbeat(context.Background(), msg, 5*time.Millisecond)
+	stop := Heartbeat(context.Background(), msg, HeartbeatBudget{Every: 5 * time.Millisecond})
 	t.Cleanup(stop)
 
 	require.Eventually(t, func() bool { return msg.calls() >= 2 }, time.Second, time.Millisecond,
@@ -48,7 +48,7 @@ func TestHeartbeat_ExtendsDeadlineUntilStopped(t *testing.T) {
 // stop is the only termination path, so it must be safe on the panic path too.
 func TestHeartbeat_StopIsIdempotent(t *testing.T) {
 	msg := &countingHeartbeatMsg{}
-	stop := Heartbeat(context.Background(), msg, time.Millisecond)
+	stop := Heartbeat(context.Background(), msg, HeartbeatBudget{Every: time.Millisecond})
 	stop()
 	assert.NotPanics(t, stop)
 }
@@ -56,7 +56,7 @@ func TestHeartbeat_StopIsIdempotent(t *testing.T) {
 func TestHeartbeat_CancelledContextStops(t *testing.T) {
 	msg := &countingHeartbeatMsg{}
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := Heartbeat(ctx, msg, 5*time.Millisecond)
+	stop := Heartbeat(ctx, msg, HeartbeatBudget{Every: 5 * time.Millisecond})
 	t.Cleanup(stop)
 
 	require.Eventually(t, func() bool { return msg.calls() >= 1 }, time.Second, time.Millisecond)
@@ -73,7 +73,7 @@ func TestHeartbeat_CancelledContextStops(t *testing.T) {
 func TestHeartbeat_NonPositiveIntervalIsDisabled(t *testing.T) {
 	for _, every := range []time.Duration{0, -time.Second} {
 		msg := &countingHeartbeatMsg{}
-		stop := Heartbeat(context.Background(), msg, every)
+		stop := Heartbeat(context.Background(), msg, HeartbeatBudget{Every: every})
 		t.Cleanup(stop)
 		assert.Never(t, func() bool { return msg.calls() > 0 }, 30*time.Millisecond, 5*time.Millisecond,
 			"interval %s must disable the heartbeat entirely", every)
@@ -117,7 +117,7 @@ func TestHeartbeat_StopWaitsForInFlightHeartbeat(t *testing.T) {
 		returned.Store(true)
 		return nil
 	}}
-	stop := Heartbeat(context.Background(), msg, time.Millisecond)
+	stop := Heartbeat(context.Background(), msg, HeartbeatBudget{Every: time.Millisecond})
 	<-entered
 
 	stopped := make(chan struct{})
@@ -137,9 +137,49 @@ func TestHeartbeat_StopWaitsForInFlightHeartbeat(t *testing.T) {
 // the safe reading is transient: keep extending rather than silently stop.
 func TestHeartbeat_RetriesAfterTransientFailure(t *testing.T) {
 	msg := &countingHeartbeatMsg{fail: errors.New("connection reset")}
-	stop := Heartbeat(context.Background(), msg, 2*time.Millisecond)
+	stop := Heartbeat(context.Background(), msg, HeartbeatBudget{Every: 2 * time.Millisecond})
 	t.Cleanup(stop)
 
 	require.Eventually(t, func() bool { return msg.calls() >= 3 }, time.Second, time.Millisecond,
 		"a failing InProgress must not end the heartbeat")
+}
+
+// An unbounded heartbeat parks a wedged handler's message forever: it holds its
+// MaxAckPending slot with no redelivery and no MaxDeliver escape, so the server
+// lever CLAUDE.md relies on for a hang never fires. The budget gives that up.
+func TestHeartbeat_StopsExtendingOnceBudgetIsSpent(t *testing.T) {
+	msg := &countingHeartbeatMsg{}
+	stop := Heartbeat(context.Background(), msg, HeartbeatBudget{
+		Every: 5 * time.Millisecond,
+		Max:   50 * time.Millisecond,
+	})
+	t.Cleanup(stop)
+
+	require.Eventually(t, func() bool { return msg.calls() >= 2 }, time.Second, time.Millisecond,
+		"the heartbeat must extend the deadline while the budget lasts")
+
+	// A 50ms budget at 5ms allows ~11 extensions. An unbounded ticker reaches
+	// ~100 inside this window, so the ceiling separates bounded from unbounded
+	// without asserting an exact count.
+	assert.Never(t, func() bool { return msg.calls() > 25 }, 500*time.Millisecond, 10*time.Millisecond,
+		"the heartbeat must stop once its budget is spent, letting the message redeliver")
+}
+
+// Unbounded extension must not be reachable by omission — the zero value is the
+// one a caller gets wrong, so it resolves to the default rather than to "forever".
+func TestHeartbeatBudget_ResolvedMaxIsNeverUnbounded(t *testing.T) {
+	tests := []struct {
+		name string
+		max  time.Duration
+		want time.Duration
+	}{
+		{"unset falls back to the default bound", 0, DefaultHeartbeatMax},
+		{"negative falls back to the default bound", -time.Second, DefaultHeartbeatMax},
+		{"an explicit bound is honored", 90 * time.Second, 90 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, HeartbeatBudget{Every: time.Second, Max: tt.max}.resolvedMax())
+		})
+	}
 }

@@ -4,8 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -100,4 +102,27 @@ func TestHeartbeatIntervalLeavesHeadroomUnderAckWait(t *testing.T) {
 func TestHeartbeatDisabledWhenAckWaitUnset(t *testing.T) {
 	cc := buildConsumerConfig(stream.ConsumerSettings{MaxDeliver: 5}, "default")
 	assert.Zero(t, jsretry.HeartbeatInterval(cc.AckWait))
+}
+
+// The budget is what stops a wedged handler parking its message forever, so the
+// wiring must carry a positive Max through from the operator knob.
+func TestBuildHeartbeatBudget(t *testing.T) {
+	t.Run("pairs the derived interval with the configured bound", func(t *testing.T) {
+		s := stream.ConsumerSettings{AckWait: 30 * time.Second, HeartbeatMax: 5 * time.Minute}
+		b := buildHeartbeatBudget(s, s.EffectiveAckWait())
+
+		assert.Equal(t, 10*time.Second, b.Every)
+		assert.Equal(t, 5*time.Minute, b.Max)
+	})
+
+	t.Run("the repo default bound is positive, never unbounded", func(t *testing.T) {
+		var h struct {
+			Consumer stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+		}
+		require.NoError(t, env.Parse(&h))
+
+		b := buildHeartbeatBudget(h.Consumer, h.Consumer.EffectiveAckWait())
+		assert.Positive(t, b.Max, "an unbounded budget reintroduces the indefinite park")
+		assert.Less(t, b.Every, b.Max, "the budget must allow at least one extension")
+	})
 }

@@ -382,3 +382,26 @@ func TestWithUnlimitedRedelivery(t *testing.T) {
 	assert.Len(t, stream.DurableConsumerDefaults(got).BackOff, 12)
 	assert.Len(t, stream.DurableConsumerDefaults(in).BackOff, stream.DefaultMaxDeliver)
 }
+
+// The heartbeat bound is an operator knob, so it is declared once here rather
+// than per service; jsretry's fallback must not drift from this tag's default.
+func TestConsumerSettingsHeartbeatMax(t *testing.T) {
+	type holder struct {
+		Consumer stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	}
+
+	t.Run("default mirrors the jsretry fallback", func(t *testing.T) {
+		var h holder
+		require.NoError(t, env.Parse(&h))
+		assert.Equal(t, 10*time.Minute, h.Consumer.HeartbeatMax)
+		assert.Equal(t, jsretry.DefaultHeartbeatMax, h.Consumer.HeartbeatMax,
+			"a drifting default would silently change how long a wedged handler parks its message")
+	})
+
+	t.Run("operator override is honored", func(t *testing.T) {
+		t.Setenv("CONSUMER_HEARTBEAT_MAX", "90s")
+		var h holder
+		require.NoError(t, env.Parse(&h))
+		assert.Equal(t, 90*time.Second, h.Consumer.HeartbeatMax)
+	})
+}

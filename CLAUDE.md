@@ -349,7 +349,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 
 ### JetStream Redelivery Backoff
 
-Two levers space redeliveries, and they fire on **disjoint** failure modes. Set both.
+Three levers space redeliveries, and they fire on **disjoint** failure modes. Set all three.
 
 - **Consumer `BackOff`** (server-side, `pkg/stream.ConsumerSettings`) fires only when a
   message goes un-acked past `AckWait` — pod crash, OOM, hang, or a handler slower than
@@ -358,6 +358,18 @@ Two levers space redeliveries, and they fire on **disjoint** failure modes. Set 
 - **`pkg/jsretry`** (client-side `NakWithDelay`) fires when a handler catches a transient
   error. `DefaultBackoff` for non-latency-sensitive work, `LowLatencyBackoff` for
   user-visible fan-out. Equal-jittered; the server-side lever cannot jitter.
+- **`jsretry.Heartbeat`** (client-side `InProgress`) works the other way: it holds a
+  running handler's deadline open so honest slow work — a large-room key rotation, a
+  batched reconcile — is not redelivered into a second worker doing the same job. It is
+  paced at `AckWait/3` off the deadline the **server** applied, and bounded by
+  `CONSUMER_HEARTBEAT_MAX` (default 10m, mirrored by `jsretry.DefaultHeartbeatMax`).
+  **The bound is the point, and unbounded is deliberately not expressible**: a wedged
+  handler that heartbeats forever holds its `MaxAckPending` slot forever, never
+  redelivers, and never reaches `MaxDeliver`, so it converts a bounded failure into an
+  invisible permanent one and neutralizes the hang arm of the first lever. Spending the
+  budget hands the message back to that lever. Note it does not un-wedge the handler
+  goroutine, which keeps its worker slot until it returns. Adopted by `room-worker`;
+  every other consumer still rides `AckWait` alone.
 
 Three server rules the code must respect (`nats-io/nats-server`, `server/consumer.go`):
 
