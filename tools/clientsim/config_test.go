@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,7 +24,7 @@ func validTestConfig() config {
 		// owns the transport rule.
 		NATSWSURL: "ws://x", AllowInsecureWS: true,
 		AuthURL: "http://x", PoolFile: "p", SiteID: "s",
-		RampRate: 50, JWTMode: jwtModeProactive,
+		RampRate: 50, MaxStartAttempts: 5, JWTMode: jwtModeProactive,
 		SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
 		ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
 	}
@@ -44,6 +45,11 @@ func TestValidateConfig(t *testing.T) {
 		{"negative churn rate", func(c *config) { c.ChurnRate = -1 }, "CHURN_RATE"},
 		{"zero reconnect buffer", func(c *config) { c.ReconnectBufBytes = 0 }, "RECONNECT_BUF"},
 		{"zero ping interval", func(c *config) { c.PingInterval = 0 }, "PING_INTERVAL"},
+		// Zero would read as "give up after no attempts at all", which silently
+		// empties the fleet; the swarm's own zero means "use the default", so
+		// only this boundary can tell an operator that 0 is not what they want.
+		{"zero start attempts", func(c *config) { c.MaxStartAttempts = 0 }, "MAX_START_ATTEMPTS"},
+		{"negative start attempts", func(c *config) { c.MaxStartAttempts = -1 }, "MAX_START_ATTEMPTS"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -183,7 +189,7 @@ func TestValidateConfig_ReadyRatioBounds(t *testing.T) {
 				PoolFile:       "p",
 				MinReadyRatio:  tt.ratio,
 				SubPendingMsgs: 1, SubPendingBytes: 1, ShardCount: 1,
-				RampRate: 1, ReconnectBufBytes: 1, PingInterval: time.Minute}
+				RampRate: 1, MaxStartAttempts: 5, ReconnectBufBytes: 1, PingInterval: time.Minute}
 			err := validateConfig(cfg)
 			if tt.wantErr {
 				assert.ErrorContains(t, err, "MIN_READY_RATIO")
@@ -200,7 +206,7 @@ func TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn(t *testing.T) {
 			NATSWSURL: "wss://nats.example:443", JWTMode: jwtModeProactive,
 			PoolFile:      "p",
 			MinReadyRatio: 0.95, SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
-			RampRate: 50, ChurnRate: 0, ReconnectBufBytes: 1 << 16,
+			RampRate: 50, ChurnRate: 0, MaxStartAttempts: 5, ReconnectBufBytes: 1 << 16,
 			PingInterval: 2 * time.Minute,
 		}
 	}
@@ -280,7 +286,7 @@ func TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn(t *testing.T)
 		return &config{
 			JWTMode: jwtModeProactive, MinReadyRatio: 0.95, PoolFile: "p",
 			SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
-			RampRate: 50, ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
+			RampRate: 50, MaxStartAttempts: 5, ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
 		}
 	}
 	tests := []struct {
@@ -425,4 +431,19 @@ func TestWarnPlaintextObjectStore(t *testing.T) {
 			assert.Equal(t, tt.want, cfg.PlaintextEndpoint())
 		})
 	}
+}
+
+// The default lives in three places — the env tag, the swarm's fallback and
+// the README — and an operator who sets nothing must land on the one the
+// swarm actually uses.
+func TestConfigDefault_MaxStartAttemptsMatchesTheSwarm(t *testing.T) {
+	t.Setenv("CLIENTSIM_NATS_WS_URL", "wss://x")
+	t.Setenv("CLIENTSIM_AUTH_URL", "https://x")
+	t.Setenv("CLIENTSIM_SITE_ID", "site-t")
+	t.Setenv("CLIENTSIM_POOL_FILE", "p")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, defaultMaxStartAttempts, cfg.MaxStartAttempts,
+		"the env default and the swarm's fallback must not drift")
 }

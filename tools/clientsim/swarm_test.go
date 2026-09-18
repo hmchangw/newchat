@@ -8,9 +8,14 @@ import (
 	"testing"
 	"time"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// noStartBackoff keeps the pre-backoff pacing in tests that are about
+// something else: with the real schedule they would wait seconds per retry.
+func noStartBackoff(int) time.Duration { return 0 }
 
 type fakeClient struct {
 	started atomic.Int64
@@ -42,7 +47,7 @@ func TestRunSwarm_StartsEveryAccountAndStopsOnCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runSwarm(ctx, []string{"a", "b", "c"}, 1000, 0, factory) }()
+	go func() { done <- runSwarm(ctx, []string{"a", "b", "c"}, swarmConfig{RampRate: 1000}, factory) }()
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -70,7 +75,7 @@ func TestRunSwarm_RampPacesStarts(t *testing.T) {
 	// once), with only a generous upper bound to dodge CI clock noise.
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
-	_ = runSwarm(ctx, []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}, 20, 0, factory)
+	_ = runSwarm(ctx, []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}, swarmConfig{RampRate: 20}, factory)
 	assert.Less(t, count.Load(), int64(10), "ramp must pace, not thundering-herd")
 }
 
@@ -92,7 +97,7 @@ func TestRunSwarm_HighRateBatchesInsteadOfClamping(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runSwarm(ctx, accounts, 5000, 0, factory) }()
+	go func() { done <- runSwarm(ctx, accounts, swarmConfig{RampRate: 5000}, factory) }()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
@@ -117,7 +122,9 @@ func TestRunSwarm_FactoryErrorDoesNotAbortOthers(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runSwarm(ctx, []string{"bad", "good1", "good2"}, 1000, 0, factory) }()
+	go func() {
+		done <- runSwarm(ctx, []string{"bad", "good1", "good2"}, swarmConfig{RampRate: 1000, StartBackoff: noStartBackoff}, factory)
+	}()
 	select {
 	case <-okDone:
 	case <-time.After(2 * time.Second):
@@ -140,7 +147,7 @@ func TestRunSwarm_ChurnRestartsClients(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runSwarm(ctx, []string{"a", "b"}, 1000, 50, factory) }()
+	go func() { done <- runSwarm(ctx, []string{"a", "b"}, swarmConfig{RampRate: 1000, ChurnRate: 50}, factory) }()
 	select {
 	case <-restarted:
 	case <-time.After(5 * time.Second):
@@ -163,7 +170,9 @@ func TestRunSwarm_DrainTimeoutIsAnError(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runSwarm(ctx, []string{"a"}, 1000, 0, factory) }()
+	go func() {
+		done <- runSwarm(ctx, []string{"a"}, swarmConfig{RampRate: 1000, StartBackoff: noStartBackoff}, factory)
+	}()
 	require.Eventually(t, func() bool { return started.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
 	cancel()
 	select {
@@ -227,7 +236,9 @@ func TestRunSwarm_RetriesClientsThatExitEarly(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runSwarm(ctx, []string{"a"}, 1000, 0, factory) }()
+	go func() {
+		done <- runSwarm(ctx, []string{"a"}, swarmConfig{RampRate: 1000, StartBackoff: noStartBackoff}, factory)
+	}()
 	select {
 	case <-retried:
 	case <-time.After(2 * time.Second):
@@ -243,8 +254,8 @@ func TestRunSwarm_BoundsStartRetries(t *testing.T) {
 	factory := func(string) (runnable, error) { starts.Add(1); return &failFastClient{}, nil }
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	require.NoError(t, runSwarm(ctx, []string{"a"}, 1000, 0, factory))
-	assert.LessOrEqual(t, starts.Load(), int64(maxStartAttempts),
+	require.NoError(t, runSwarm(ctx, []string{"a"}, swarmConfig{RampRate: 1000, StartBackoff: noStartBackoff}, factory))
+	assert.LessOrEqual(t, starts.Load(), int64(defaultMaxStartAttempts),
 		"a permanently failing account must stop being retried")
 }
 
@@ -306,7 +317,7 @@ func TestRunSwarm_ChurnKeepsTheFleetUp(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runSwarm(ctx, []string{"a"}, 1000, 20, factory) }()
+	go func() { done <- runSwarm(ctx, []string{"a"}, swarmConfig{RampRate: 1000, ChurnRate: 20}, factory) }()
 
 	// Sample the fleet after the first churn cycles have had time to land.
 	time.Sleep(150 * time.Millisecond)
@@ -486,3 +497,190 @@ func TestReadyFloor_MatchesTheGatesBar(t *testing.T) {
 		})
 	}
 }
+
+// pendingQueue is where the retry delay actually lives, so it is worth
+// testing on its own: the swarm only asks "what may start now".
+func TestPendingQueue_ReleasesOnlyWhatIsDue(t *testing.T) {
+	base := time.Unix(0, 0)
+	var q pendingQueue
+	q.add("soon", base.Add(10*time.Millisecond))
+	q.add("later", base.Add(time.Second))
+	q.add("now", base)
+
+	assert.Equal(t, []string{"now"}, q.due(base, 10), "an entry still in its backoff must stay queued")
+	assert.Equal(t, 2, q.len())
+
+	assert.Equal(t, []string{"soon"}, q.due(base.Add(20*time.Millisecond), 10))
+	assert.Equal(t, []string{"later"}, q.due(base.Add(2*time.Second), 10))
+	assert.Zero(t, q.len())
+}
+
+// The ramp budget still bounds a tick: a backlog that all came due at once
+// must not bypass the pacing the operator configured.
+func TestPendingQueue_RespectsTheTickBudget(t *testing.T) {
+	base := time.Unix(0, 0)
+	var q pendingQueue
+	for _, a := range []string{"a", "b", "c"} {
+		q.add(a, base)
+	}
+	assert.Equal(t, []string{"a", "b"}, q.due(base, 2), "the tick's slots bound the release")
+	assert.Equal(t, []string{"c"}, q.due(base, 2), "and the rest keep their order")
+	assert.Nil(t, q.due(base, 0))
+}
+
+// The schedule is what turns five attempts from ~100ms of ramp ticks into a
+// window wide enough to outlast a dependency's restart.
+func TestDefaultStartBackoff_GrowsAndCaps(t *testing.T) {
+	for attempt := 1; attempt <= 10; attempt++ {
+		d := defaultStartBackoff(attempt)
+		assert.Positive(t, d, "attempt %d must wait", attempt)
+		assert.LessOrEqual(t, d, startBackoffMax, "attempt %d must respect the cap", attempt)
+
+		// Equal jitter: half the nominal delay is fixed, half is random, so
+		// a fleet that failed together does not retry in lockstep.
+		nominal := min(startBackoffBase<<(attempt-1), startBackoffMax)
+		assert.GreaterOrEqual(t, d, nominal/2, "attempt %d lost its floor", attempt)
+	}
+
+	// A caller that has not failed yet still waits: the swarm counts the
+	// attempt before the factory runs, so 0 can only arrive from a caller
+	// that lost count, and racing straight back is the behaviour this whole
+	// change exists to remove.
+	assert.Positive(t, defaultStartBackoff(0))
+
+	// The window the docs promise, pinned to the arithmetic that produces it.
+	// N attempts buy N-1 waits — the last failure abandons rather than
+	// sleeping — and equal jitter halves each one, so the floor is what an
+	// operator actually gets: 15s, not the 30s a nominal sum suggests.
+	var floor, ceiling time.Duration
+	for attempt := 1; attempt < defaultMaxStartAttempts; attempt++ {
+		nominal := min(startBackoffBase<<(attempt-1), startBackoffMax)
+		floor += nominal / 2
+		ceiling += nominal
+	}
+	assert.Equal(t, 15*time.Second, floor, "the documented floor is the one a run is held to")
+	assert.Equal(t, 30*time.Second, ceiling, "and the documented ceiling")
+}
+
+// The defect this fixes: a 503 window at startup burned all five attempts
+// inside a few ramp ticks, and the accounts were abandoned for the whole run.
+func TestRunSwarm_SpacesRetriesWithBackoff(t *testing.T) {
+	var mu sync.Mutex
+	var startTimes []time.Time
+	var seenAttempts []int
+
+	factory := func(string) (runnable, error) {
+		mu.Lock()
+		startTimes = append(startTimes, time.Now())
+		mu.Unlock()
+		return &failFastClient{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runSwarm(ctx, []string{"a"}, swarmConfig{
+			RampRate: 1000, // 1ms ticks: only the backoff can space the retries
+			StartBackoff: func(attempt int) time.Duration {
+				mu.Lock()
+				seenAttempts = append(seenAttempts, attempt)
+				mu.Unlock()
+				return 60 * time.Millisecond
+			},
+		}, factory)
+	}()
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(startTimes) >= 3
+	}, 5*time.Second, 5*time.Millisecond, "the account must keep being retried")
+
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(startTimes) && i < 3; i++ {
+		assert.GreaterOrEqual(t, startTimes[i].Sub(startTimes[i-1]), 50*time.Millisecond,
+			"retry %d came too fast: the ramp tick, not the backoff, paced it", i)
+	}
+	assert.Equal(t, []int{1, 2}, seenAttempts[:2],
+		"the schedule must see the attempt number, or it cannot grow")
+}
+
+// A client that stayed up and then failed is a new incident, not a
+// continuation of the one that spent the budget. Without the reset, three
+// scattered failures over a day-long soak abandon an account that was
+// healthy in between.
+func TestRunSwarm_StableClientEarnsAFreshBudget(t *testing.T) {
+	var starts atomic.Int64
+	factory := func(string) (runnable, error) {
+		starts.Add(1)
+		return &slowFailClient{after: 15 * time.Millisecond}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runSwarm(ctx, []string{"a"}, swarmConfig{
+			RampRate:         1000,
+			MaxStartAttempts: 2,
+			StableAfter:      10 * time.Millisecond,
+			StartBackoff:     func(int) time.Duration { return 0 },
+		}, factory)
+	}()
+
+	require.Eventually(t, func() bool { return starts.Load() > 4 }, 5*time.Second, 10*time.Millisecond,
+		"a client that ran past StableAfter must not be counted against the old budget")
+	cancel()
+	<-done
+}
+
+// The cap is an operator knob now: an environment known to blip wants a
+// wider budget than one where a failing account means a bad pool.
+func TestRunSwarm_MaxStartAttemptsIsConfigurable(t *testing.T) {
+	var starts atomic.Int64
+	factory := func(string) (runnable, error) { starts.Add(1); return &failFastClient{}, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	require.NoError(t, runSwarm(ctx, []string{"a"}, swarmConfig{
+		RampRate: 1000, MaxStartAttempts: 2, StartBackoff: func(int) time.Duration { return 0 },
+	}, factory))
+	assert.Equal(t, int64(2), starts.Load(), "the configured cap, not the built-in default, must bound it")
+}
+
+// Abandonment used to be a single WARN line. Nineteen of them inside one
+// shard is a shortfall no ratio gate notices, so it has to be a number the
+// run summary and a dashboard can see.
+func TestRunSwarm_AbandonmentIsCounted(t *testing.T) {
+	m := newMetrics()
+	factory := func(string) (runnable, error) { return &failFastClient{}, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, runSwarm(ctx, []string{"a", "b"}, swarmConfig{
+		RampRate: 1000, MaxStartAttempts: 1, StartBackoff: func(int) time.Duration { return 0 },
+		Metrics: m,
+	}, factory))
+
+	assert.InDelta(t, 2, promtestutil.ToFloat64(m.AccountsAbandoned), 0.001,
+		"both accounts exhausted their budget and must be counted")
+}
+
+// slowFailClient stays up for a while and then fails, modelling a client
+// that connected and later lost its dependency.
+type slowFailClient struct {
+	after  time.Duration
+	closed atomic.Int64
+}
+
+func (s *slowFailClient) run(ctx context.Context) error {
+	select {
+	case <-time.After(s.after):
+		return assert.AnError
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+func (s *slowFailClient) close() { s.closed.Add(1) }

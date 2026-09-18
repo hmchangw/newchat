@@ -85,6 +85,11 @@ type metrics struct {
 	// without anything noticing. See the counter's Help for why.
 	PaginatedWalks prometheus.Counter
 	AuthFailures   prometheus.Counter
+	// AccountsAbandoned counts accounts the swarm gave up on. The fleet is
+	// then permanently short by that many clients, and a readiness RATIO gate
+	// cannot see it: nineteen accounts in a shard of thousands sits well
+	// inside any sane floor. Alert on this, not on the ratio.
+	AccountsAbandoned prometheus.Counter
 	// Errors counts stage failures (stage: auth|connect|walk|resync|
 	// room_subscribe|async|conn_closed) so
 	// error RATE is queryable, not just grep-able from logs.
@@ -249,8 +254,12 @@ func newMetrics() *metrics {
 			Help: "Bootstrap walks that crossed a subscription.list page boundary. The server orders that list by room.lastMsgAt descending and pages it by offset, so under load a row can move across the boundary between two requests and never be returned: the plan is then short a room, and readiness cannot tell, because it is measured against the plan. The production client pages identically — this counts the clients exposed to it, it does not detect an actual loss.",
 		}),
 		AuthFailures: prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_auth_failures_total", Help: "Auth exchange failures (transport errors and non-2xx rejections)."}),
-		Errors:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_errors_total", Help: "Stage failures."}, []string{"stage"}),
-		RunInfo:      prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "clientsim_run_info", Help: "Static run metadata; value is always 1. Run ID stays in logs (unbounded label), matching loadgen."}, []string{"jwtMode", "shardIndex", "shardCount"}),
+		AccountsAbandoned: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "clientsim_accounts_abandoned_total",
+			Help: "Accounts dropped from the run after exhausting their consecutive start-attempt budget (CLIENTSIM_MAX_START_ATTEMPTS). Each one is a client the fleet is permanently short for the rest of the run.",
+		}),
+		Errors:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_errors_total", Help: "Stage failures."}, []string{"stage"}),
+		RunInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "clientsim_run_info", Help: "Static run metadata; value is always 1. Run ID stays in logs (unbounded label), matching loadgen."}, []string{"jwtMode", "shardIndex", "shardCount"}),
 	}
 	m.deliveredUser = m.Delivered.WithLabelValues("user")
 	m.deliveredChannel = m.Delivered.WithLabelValues("channel")
@@ -261,7 +270,7 @@ func newMetrics() *metrics {
 		m.Disconnects, m.Reconnects, m.ReconnectAttempt, m.JWTRefreshes, m.Delivered,
 		m.BroadcastLatency, m.CanonicalLatency,
 		m.DecodeFailures, m.InvalidTimestamp, m.SlowConsumer, m.RoomQueueDepth,
-		m.AuthFailures, m.Errors, m.RunInfo, m.PaginatedWalks,
+		m.AuthFailures, m.Errors, m.RunInfo, m.PaginatedWalks, m.AccountsAbandoned,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

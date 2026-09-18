@@ -83,7 +83,8 @@ the local YAML in this repo.
 | `CLIENTSIM_SHARD_INDEX` / `_SHARD_COUNT` | `0` / `1` | replica slice |
 | `CLIENTSIM_RAMP_RATE` | `50` | connects/sec **per replica** during ramp |
 | `CLIENTSIM_CHURN_RATE` | `0` | reconnect cycles/sec across the shard |
-| — | — | clients that exit early are restarted at the ramp rate, up to 5 attempts each |
+| `CLIENTSIM_MAX_START_ATTEMPTS` | `5` | consecutive failed starts per account before it is dropped from the run |
+| — | — | clients that exit early are restarted with an equal-jittered exponential wait (2s doubling, 30s cap). Five attempts buy **four** waits — the last failure abandons rather than sleeping — of 1-2s, 2-4s, 4-8s and 8-16s, so the budget guarantees 15s and reaches 30s, rather than the few ramp ticks it used to. A client that stayed up past a minute earns a fresh budget: the cap counts *consecutive* failures, not a lifetime quota. Every account that exhausts it is a client the fleet never gets back — count `clientsim_accounts_abandoned_total`, not the readiness ratio, which cannot see nineteen accounts in a shard of thousands |
 | `CLIENTSIM_JWT_MODE` | `expiry` | `expiry` = client parity: never refreshes; the server drops the conn at JWT expiry and the client re-mints on the reconnect. `proactive` re-mints at 76%–84% of remaining life — a deliberate stress knob for auth-service, **not** what the real client does |
 | `CLIENTSIM_ALLOW_INSECURE_WS` | `false` | opt into a cleartext `ws://` URL; without it a non-`wss://` URL is a startup error |
 | `CLIENTSIM_SUB_PENDING_MSGS` / `_BYTES` | `512` / `128KiB` | pending limits for the two per-user lanes; msgs also sizes the shared room-delivery channel |
