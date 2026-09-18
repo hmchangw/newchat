@@ -236,6 +236,16 @@ Image: **clientsim**. Replicas = `CLIENTSIM_SHARD_COUNT`.
 
 Everything else has a default — see the Configuration table in the README.
 
+**Start clientsim after the side issuer is Ready.** Every client mints a JWT
+before it connects, so a 503 window while the issuer is still rolling out lands
+squarely on the ramp. The tool survives it — five consecutive failed starts per
+account, spaced by an equal-jittered exponential wait that spans ~30s, tunable
+with `CLIENTSIM_MAX_START_ATTEMPTS` — but an account that exhausts the budget is
+gone for the rest of the run, and a readiness *ratio* cannot see a handful of
+them in a shard of thousands. Order the rollout (sync wave, or an initContainer
+that polls the issuer's `/healthz`) and alert on
+`clientsim_accounts_abandoned_total`, which is also printed in the run summary.
+
 `CLIENTSIM_POOL_FILE` and `CLIENTSIM_POOL_URL` are mutually exclusive: set
 exactly one. A **partly** set `POOL_S3_*` group fails startup even on the file
 path, because it means someone meant to use the object store and mistyped.

@@ -30,19 +30,118 @@ var swarmShutdownTimeout = 20 * time.Second
 // shutdown budget — the process must not report a clean run.
 var errDrainTimeout = errors.New("swarm drain timed out; some clients did not exit within the shutdown budget")
 
-// maxStartAttempts bounds restarts per account, so one permanently broken
-// account cannot spin for the length of a soak. It — not the refill pace —
-// is what bounds the load a dead dependency sees. The resulting fleet
-// shortfall is what the readiness gate reports.
-const maxStartAttempts = 5
+const (
+	// defaultMaxStartAttempts bounds CONSECUTIVE failed starts per account,
+	// so one permanently broken account cannot spin for the length of a soak.
+	// It — not the refill pace — is what bounds the load a dead dependency
+	// sees. Operators raise it with CLIENTSIM_MAX_START_ATTEMPTS where the
+	// environment is known to blip.
+	defaultMaxStartAttempts = 5
+
+	// startBackoffBase and startBackoffMax shape the wait between those
+	// attempts. Without a wait, the attempts are paced by the RAMP TICKER
+	// (1/RAMP_RATE — 20ms at the default 50/s), so a whole budget burns in a
+	// fraction of a second and an auth-service restart abandons every account
+	// that happened to be starting. Five attempts on this schedule span
+	// roughly half a minute instead.
+	startBackoffBase = time.Second
+	startBackoffMax  = 30 * time.Second
+
+	// defaultStableAfter is how long a client must stay up before its failure
+	// is read as a NEW incident rather than the tail of the one that spent the
+	// budget. Retries during an outage are seconds apart, so a client that
+	// held for a minute plainly cleared it. The cost of the reset is that a
+	// steadily flapping dependency keeps earning retries — correct, since such
+	// an account is not permanently broken, and the ramp rate still bounds the
+	// load those retries put on it.
+	defaultStableAfter = time.Minute
+)
+
+// swarmConfig is runSwarm's tuning, as a struct because the retry policy has
+// more knobs than a parameter list can carry readably. The zero value of each
+// field selects the default, so a caller states only what it means to change.
+type swarmConfig struct {
+	RampRate  float64
+	ChurnRate float64
+	// MaxStartAttempts bounds consecutive failed starts per account.
+	MaxStartAttempts int
+	// StartBackoff returns the wait before the nth consecutive retry of one
+	// account. Injected by tests, which cannot afford the real schedule.
+	StartBackoff func(attempt int) time.Duration
+	// StableAfter is the uptime that earns an account a fresh budget.
+	StableAfter time.Duration
+	// Now is the clock, injected so the queue's timing is testable.
+	Now func() time.Time
+	// Metrics, when set, counts abandoned accounts. Optional so tests that
+	// assert on scheduling need not build a registry.
+	Metrics *metrics
+}
+
+// defaultStartBackoff is equal-jittered exponential: half the nominal delay is
+// fixed and half is random, so a fleet whose accounts failed together does not
+// retry in lockstep and hit the recovering dependency with the same herd that
+// is waiting on it. Same shape as pkg/jsretry's, at a different layer.
+func defaultStartBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	nominal := startBackoffBase
+	for i := 1; i < attempt && nominal < startBackoffMax; i++ {
+		nominal *= 2
+	}
+	nominal = min(nominal, startBackoffMax)
+	half := nominal / 2
+	// Jitter at millisecond granularity: the delays are seconds, and it keeps
+	// the random draw a small int on every platform.
+	return half + time.Duration(secureIntN(int(half/time.Millisecond)+1))*time.Millisecond
+}
+
+// pendingStart is one account awaiting a (re)start, and the earliest time that
+// attempt may run.
+type pendingStart struct {
+	account   string
+	notBefore time.Time
+}
+
+// pendingQueue holds those entries in arrival order. Separate from the swarm
+// because it is the whole mechanism of the backoff: the swarm asks only what
+// may start now, and the ramp's per-tick budget still bounds the answer.
+type pendingQueue struct{ entries []pendingStart }
+
+func (q *pendingQueue) add(account string, notBefore time.Time) {
+	q.entries = append(q.entries, pendingStart{account: account, notBefore: notBefore})
+}
+
+func (q *pendingQueue) len() int { return len(q.entries) }
+
+// due removes and returns up to limit accounts whose wait has elapsed,
+// leaving every other entry queued in order.
+func (q *pendingQueue) due(now time.Time, limit int) []string {
+	if limit <= 0 || len(q.entries) == 0 {
+		return nil
+	}
+	var ready []string
+	kept := q.entries[:0]
+	for _, e := range q.entries {
+		if len(ready) < limit && !e.notBefore.After(now) {
+			ready = append(ready, e.account)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	q.entries = kept
+	return ready
+}
 
 // instance identifies one started client. The epoch is what lets a retired
 // client's exit report be told apart from its replacement's: without it,
 // churn's own teardown notification arrives after the new client is
-// registered and tears that one down instead.
+// registered and tears that one down instead. startedAt is what tells a
+// startup failure from a client that ran and later lost its dependency.
 type instance struct {
-	account string
-	epoch   uint64
+	account   string
+	epoch     uint64
+	startedAt time.Time
 }
 
 // rampBudget paces starts across ticks. Above the batch threshold a tick
@@ -138,9 +237,26 @@ func (o *orderIndex) pick(randN func(int) int) string {
 // rate is rampRate × replicas), optionally churns clients at churnRate
 // cycles/sec, and drains everything when ctx ends. Rates above 1000/s are
 // honored by starting batches per 1ms tick instead of silently clamping.
-func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float64, factory clientFactory) error {
+func runSwarm(ctx context.Context, accounts []string, cfg swarmConfig, factory clientFactory) error {
+	rampRate := cfg.RampRate
 	if rampRate <= 0 {
 		rampRate = 1
+	}
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
+	backoff := cfg.StartBackoff
+	if backoff == nil {
+		backoff = defaultStartBackoff
+	}
+	maxAttempts := cfg.MaxStartAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxStartAttempts
+	}
+	stableAfter := cfg.StableAfter
+	if stableAfter <= 0 {
+		stableAfter = defaultStableAfter
 	}
 	interval, budget := rampPacing(rampRate)
 
@@ -150,7 +266,7 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 		running  = map[string]runnable{}
 		cancels  = map[string]context.CancelFunc{}
 		order    = newOrderIndex() // O(1) random churn picks AND O(1) removal
-		pending  []string          // accounts awaiting a restart (failed start, or early exit)
+		pending  pendingQueue      // accounts awaiting a restart, each with its backoff deadline
 		attempts = map[string]int{}
 		epochs   = map[string]uint64{} // epoch of the instance currently registered
 		epoch    uint64
@@ -182,6 +298,7 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 		clientCtx, cancel := context.WithCancel(ctx)
 		epoch++
 		ep := epoch
+		startedAt := now()
 		mu.Lock()
 		running[account] = client
 		cancels[account] = cancel
@@ -197,7 +314,7 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 			// Report the exit unless the whole swarm is shutting down, where
 			// every client returns by design and nothing is left to consume.
 			select {
-			case exited <- instance{account: account, epoch: ep}:
+			case exited <- instance{account: account, epoch: ep, startedAt: startedAt}:
 			case <-ctx.Done():
 			}
 		}()
@@ -232,21 +349,28 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 	// attempts left; past the cap it is abandoned and shows up as a gap in
 	// clientsim_conns_ready.
 	requeue := func(account string) {
-		if attempts[account] >= maxStartAttempts {
+		if attempts[account] >= maxAttempts {
+			// A gap in clientsim_conns_ready is how this used to be found —
+			// a ratio gate does not notice nineteen accounts in a shard of
+			// thousands. Counted, so it is a number a dashboard and the run
+			// summary can see rather than one WARN in a soak's log stream.
 			slog.Warn("client abandoned after repeated start failures",
 				"account", account, "attempts", attempts[account])
+			if cfg.Metrics != nil {
+				cfg.Metrics.AccountsAbandoned.Inc()
+			}
 			return
 		}
-		pending = append(pending, account)
+		pending.add(account, now().Add(backoff(attempts[account])))
 	}
 
 	// Same pacing as the ramp: clamping to one cycle per 1ms tick silently ran
 	// a configured 5000/s at 1000/s.
 	var churnCh <-chan time.Time
 	churnBudget := &rampBudget{}
-	if churnRate > 0 {
+	if cfg.ChurnRate > 0 {
 		var churnInterval time.Duration
-		churnInterval, churnBudget = rampPacing(churnRate)
+		churnInterval, churnBudget = rampPacing(cfg.ChurnRate)
 		churnTicker := time.NewTicker(churnInterval)
 		defer churnTicker.Stop()
 		churnCh = churnTicker.C
@@ -260,10 +384,11 @@ loop:
 			break loop
 		case <-rampTicker.C:
 			// Refills first: restore what the fleet lost before growing it.
+			// Only the entries whose backoff has elapsed — the rest stay
+			// queued rather than consuming this tick's slots.
 			slots := budget.take()
-			for ; slots > 0 && len(pending) > 0; slots-- {
-				account := pending[0]
-				pending = pending[1:]
+			for _, account := range pending.due(now(), slots) {
+				slots--
 				if !start(account) {
 					requeue(account)
 				}
@@ -282,6 +407,14 @@ loop:
 				continue // a retired instance reporting in; its slot already moved on
 			}
 			stopOne(inst.account)
+			if now().Sub(inst.startedAt) >= stableAfter {
+				// It ran long enough to have cleared whatever spent the
+				// budget, so this failure starts its own count. Without this
+				// the budget is a lifetime quota and three scattered blips
+				// over a long soak retire an account that was healthy between
+				// them.
+				delete(attempts, inst.account)
+			}
 			requeue(inst.account)
 		case <-churnCh:
 			// Cycle random running clients through a full disconnect +
@@ -375,6 +508,10 @@ func summarize(m *metrics, runID, configDigest string, target int) (runSummary, 
 		case "clientsim_auth_failures_total":
 			v := fam.GetMetric()[0].GetCounter().GetValue()
 			s.Attrs = append(s.Attrs, "auth_failures", v)
+		case "clientsim_accounts_abandoned_total":
+			// In the summary because the shortfall it describes is invisible
+			// elsewhere: the run ends "valid" with fewer clients than asked for.
+			s.Attrs = append(s.Attrs, "accounts_abandoned", fam.GetMetric()[0].GetCounter().GetValue())
 		case "clientsim_broadcast_to_client_latency_seconds", "clientsim_canonical_to_client_latency_seconds":
 			h := fam.GetMetric()[0].GetHistogram()
 			s.Attrs = append(s.Attrs,

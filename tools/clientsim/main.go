@@ -46,7 +46,14 @@ type config struct {
 	ShardIndex  int     `env:"CLIENTSIM_SHARD_INDEX" envDefault:"0"`
 	ShardCount  int     `env:"CLIENTSIM_SHARD_COUNT" envDefault:"1"`
 	RampRate    float64 `env:"CLIENTSIM_RAMP_RATE" envDefault:"50"`
-	ChurnRate   float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
+	// MaxStartAttempts bounds CONSECUTIVE failed starts per account before it
+	// is dropped from the run. The waits between them are exponential with
+	// jitter, so the default five span roughly half a minute — enough to sit
+	// out a dependency restart. Raise it where the environment blips for
+	// longer; every account that exhausts it is a client the fleet never gets
+	// back (clientsim_accounts_abandoned_total).
+	MaxStartAttempts int     `env:"CLIENTSIM_MAX_START_ATTEMPTS" envDefault:"5"`
+	ChurnRate        float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
 	// expiry is the DEFAULT because it is what the real client does: it never
 	// refreshes on its own, it holds the JWT until the server drops the
 	// connection at expiry and re-mints on the reconnect. proactive is a
@@ -159,7 +166,10 @@ func run(ctx context.Context) error {
 		cancelSwarm()
 		close(captured)
 	}()
-	swarmErr := runSwarm(swarmCtx, shard, cfg.RampRate, cfg.ChurnRate, factory)
+	swarmErr := runSwarm(swarmCtx, shard, swarmConfig{
+		RampRate: cfg.RampRate, ChurnRate: cfg.ChurnRate,
+		MaxStartAttempts: cfg.MaxStartAttempts, Metrics: m,
+	}, factory)
 	<-captured
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -337,6 +347,13 @@ func validateConfig(cfg *config) error {
 	}
 	if cfg.ChurnRate < 0 {
 		return fmt.Errorf("CLIENTSIM_CHURN_RATE must be >= 0, got %v", cfg.ChurnRate)
+	}
+	// Rejected at the boundary because the swarm cannot: there a zero means
+	// "use the default", so an operator who set 0 intending "never retry"
+	// would instead get five attempts, and one who meant it would empty the
+	// fleet on the first blip.
+	if cfg.MaxStartAttempts < 1 {
+		return fmt.Errorf("CLIENTSIM_MAX_START_ATTEMPTS must be >= 1, got %d", cfg.MaxStartAttempts)
 	}
 	if cfg.ReconnectBufBytes <= 0 || cfg.PingInterval <= 0 {
 		return fmt.Errorf("CLIENTSIM_RECONNECT_BUF_BYTES and CLIENTSIM_PING_INTERVAL must be positive")
