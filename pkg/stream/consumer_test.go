@@ -392,7 +392,10 @@ func TestConsumerSettingsHeartbeatMax(t *testing.T) {
 
 	t.Run("default mirrors the jsretry fallback", func(t *testing.T) {
 		var h holder
-		require.NoError(t, env.Parse(&h))
+		// Parse against an empty environment: an operator's CONSUMER_HEARTBEAT_MAX
+		// would otherwise decide what "the default" is, so the test would stop
+		// exercising the contract it names.
+		require.NoError(t, env.ParseWithOptions(&h, env.Options{Environment: map[string]string{}}))
 		assert.Equal(t, 10*time.Minute, h.Consumer.HeartbeatMax)
 		assert.Equal(t, jsretry.DefaultHeartbeatMax, h.Consumer.HeartbeatMax,
 			"a drifting default would silently change how long a wedged handler parks its message")

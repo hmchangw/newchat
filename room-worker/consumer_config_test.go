@@ -119,7 +119,9 @@ func TestBuildHeartbeatBudget(t *testing.T) {
 		var h struct {
 			Consumer stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 		}
-		require.NoError(t, env.Parse(&h))
+		// Empty environment: inherited CONSUMER_ACK_WAIT / CONSUMER_HEARTBEAT_MAX
+		// would otherwise define the "default" this asserts on.
+		require.NoError(t, env.ParseWithOptions(&h, env.Options{Environment: map[string]string{}}))
 
 		b := buildHeartbeatBudget(h.Consumer, h.Consumer.EffectiveAckWait())
 		assert.Positive(t, b.Max, "an unbounded budget reintroduces the indefinite park")
