@@ -30,10 +30,13 @@ import (
 //
 // Fixed window, not a token bucket: an interval straddling a window boundary can pass
 // up to 2×max−1 drops (max at the tail of one window, max at the head of the next),
-// which a token bucket of equal rate would not do. The aggregate bound is unaffected —
-// windows are disjoint and independently capped, so total drops over a duration D stay
-// ≤ max × ceil(D/window) per pod — and the burst is bounded and small at these
-// settings, so the simpler counter wins.
+// which a token bucket of equal rate would not do. The aggregate stays bounded — windows
+// are disjoint and independently capped — but the bound has to count that straddle: an
+// arbitrary interval of duration D touches at most ceil(D/window)+1 windows, so drops stay
+// ≤ max × (ceil(D/window)+1) per pod. Only a window-aligned interval gets the tighter
+// max × ceil(D/window); quoting that here would contradict the 2×max−1 above, which is the
+// same effect at D < window. The burst is bounded and small at these settings, so the
+// simpler counter wins.
 type dropLimiter struct {
 	max    uint64
 	window time.Duration
