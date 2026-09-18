@@ -1,6 +1,6 @@
 .PHONY: lint fmt tidy test test-integration benchmark-natsmetrics test-loadgen-failure test-loadgen-failure-integration coverage-loadgen-failure coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
-        o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep sast-semgrep-test \
+        o11y-up o11y-down obs-up obs-down profile tools tools-mockgen tools-nats sast sast-gosec sast-vuln sast-semgrep sast-semgrep-test \
         fed-deps-up fed-deps-down fed-regen require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs \
         fed-seed fed-seed-reset fed-o11y-up fed-o11y-down
 
@@ -71,6 +71,8 @@ GOSEC_VERSION         := v2.26.1
 GOVULNCHECK_VERSION   := v1.3.0
 MOCKGEN_VERSION       := v0.6.0
 SEMGREP_VERSION       := 1.163.0
+NATS_SERVER_VERSION   := v2.10.22
+NATSCLI_VERSION       := v0.4.0
 
 GOSEC       := $(GOBIN_DIR)/gosec
 GOVULNCHECK := $(GOBIN_DIR)/govulncheck
@@ -468,6 +470,14 @@ profile:
 # setuptools is injected into semgrep's venv because semgrep imports
 # pkg_resources, which setuptools-less Python 3.12+ (e.g. ubuntu-latest)
 # no longer ships by default.
+# Install nats-server and the nats CLI, for driving a worker against a real
+# NATS without a Docker daemon (see docs/health-probes.md). Deliberately NOT
+# part of `tools`: it is only needed to reproduce a consume-loop failure by
+# hand, and every contributor would otherwise pull a NATS server they never run.
+tools-nats:
+	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install github.com/nats-io/nats-server/v2@$(NATS_SERVER_VERSION)
+	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install github.com/nats-io/natscli/nats@$(NATSCLI_VERSION)
+
 tools:
 	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)

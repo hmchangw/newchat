@@ -346,6 +346,8 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
   - **Sequential** (`cons.Consume()`): Callback-based sequential processing for lower-volume streams where concurrency is unnecessary
 - Match the pattern already used by the service being modified — don't mix patterns within a single consumer
 - Follow existing worker services (`message-worker`, `broadcast-worker`, etc.) as reference implementations
+- **Every consume loop is guarded by `pkg/loopguard`.** A loop that exits on a terminal iterator error (durable deleted, bad request) would otherwise leave a pod that reports ready and consumes nothing: liveness always answers 200 and readiness probes only the NATS connection, which stays healthy in exactly that failure. Wire it as roomlist-worker does: arm `sig := shutdown.Signals()` BEFORE starting the loop, build `loopguard.New(name, loopguard.SelfShutdown)`, report the loop's exit via `Stopped(err)` (pull iterators; `natsmetrics.Start` takes it as its `stopped` hook) or `WatchClosed(cc.Closed())` (callback `Consume` lanes), add `Check()` to the health server, and make `BeginShutdown()` the first hook of `shutdown.WaitOn(ctx, sig, …)` so the deliberate `iter.Stop()` is not read as a death. An unexpected stop fails readiness with the cause and raises SIGTERM on the process so the supervisor replaces it — the only actor able to rebuild the iterator
+- **A missing heartbeat is NOT a loop death.** `Messages()` defaults `ReportMissingHeartbeats` to true and leaves `Expires` at 30s, so nats.go raises `jetstream.ErrNoHeartbeat` from `Next` after 2×15s of silence — and the `ReportMissingHeartbeats` branch in `jetstream/pull.go` returns it WITHOUT calling `s.Stop()`, unlike the terminal branch beside it. The iterator is intact and the next `Next` resumes. A JetStream leader election or a rolling server upgrade produces one on a perfectly healthy connection, so reporting it to a Guard would raise SIGTERM on every pull-iterator worker at once — the reconnection storm `loopguard` exists to contain. Every pull loop MUST therefore `continue` on `natsmetrics.Recoverable(err)` before it reports the error to `Stopped`; the filter belongs at the `Next` error site, never inside `Stopped`, which runs after the loop has already given up. Callback `Consume` lanes need nothing: nats.go absorbs the same error there by re-issuing its pull request
 
 ### JetStream Redelivery Backoff
 
@@ -410,7 +412,7 @@ short for work that waits on a dependency.
   every peer, where `outbox-worker` instead splits its lanes per destination.
 
 ### Graceful Shutdown
-- Use `pkg/shutdown.Wait` in every service's `main.go`
-- JetStream workers cleanup order: `iter.Stop()` → `wg.Wait()` (with timeout) → `nc.Drain()` → disconnect databases
+- Use `pkg/shutdown.Wait` in every service's `main.go` — except a service that can raise its own shutdown signal (any `pkg/loopguard` worker), which arms `sig := shutdown.Signals()` before starting its loop and calls `shutdown.WaitOn(ctx, sig, …)`
+- JetStream workers cleanup order: `guard.BeginShutdown()` → stop every consumer (`iter.Stop()` for a pull iterator, `cc.Stop()` for a callback `Consume` lane; a multi-lane worker stops all of them) → `wg.Wait()` (with timeout) → `nc.Drain()` → disconnect databases
 - HTTP services cleanup order: `nc.Drain()` → disconnect databases
 - Shutdown timeout (25s) must be less than Kubernetes `terminationGracePeriodSeconds` (30s)
