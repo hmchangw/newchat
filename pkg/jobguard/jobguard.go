@@ -17,6 +17,7 @@
 package jobguard
 
 import (
+	"context"
 	"log/slog"
 	"runtime/debug"
 )
@@ -63,5 +64,18 @@ func Run(msg Message, process func()) {
 		// directly, e.g. search-sync-worker's batch loop) — both share Guard's
 		// recover line, but only Run disposes of the message.
 		slog.Warn("dropped poison message after panic (Ack)", "subject", msg.Subject())
+	}
+}
+
+// Handler wraps a per-message handler in Run's panic recovery, so a panicking
+// handler drops its message instead of crash-looping the worker.
+//
+// Generic over the message type because the consumer loops hand back different
+// ones — a plain jetstream.Msg from a pull iterator, the metrics facade's
+// message from an instrumented loop — and a service binding both lanes would
+// otherwise need one wrapper per type.
+func Handler[M Message](handle func(context.Context, M)) func(context.Context, M) {
+	return func(ctx context.Context, msg M) {
+		Run(msg, func() { handle(ctx, msg) })
 	}
 }
