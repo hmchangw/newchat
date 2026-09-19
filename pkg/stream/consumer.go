@@ -21,6 +21,12 @@ type ConsumerSettings struct {
 	MaxWaiting    int           `env:"MAX_WAITING"     envDefault:"512"`
 	MaxAckPending int           `env:"MAX_ACK_PENDING" envDefault:"1000"`
 
+	// HeartbeatMax caps how long pkg/jsretry may keep extending one message's
+	// ack deadline. Declared here, not per service, so every consumer that
+	// heartbeats shares one knob. Client-side only: it is not part of the
+	// consumer config the server sees. Mirrors jsretry.DefaultHeartbeatMax.
+	HeartbeatMax time.Duration `env:"HEARTBEAT_MAX" envDefault:"10m"`
+
 	// BackOff schedule shape: entry i is AckWait * Factor^i capped at Max. Entry 0
 	// is AckWait by construction — the server overwrites AckWait with BackOff[0]
 	// (consumer.go:677-682), so the two can never disagree. Steps=0 disables it.

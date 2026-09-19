@@ -4,9 +4,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -79,4 +82,49 @@ func TestConsumedSubjectsClassifyToBoundedEventTypes(t *testing.T) {
 			assert.NotEqual(t, natsmetrics.EventUnknown, got, "a dispatched subject must not fall back to unknown")
 		})
 	}
+}
+
+// The heartbeat derives from the consumer's own AckWait, so the two cannot
+// disagree; two ticks must fit inside the budget to survive a lost one.
+func TestHeartbeatIntervalLeavesHeadroomUnderAckWait(t *testing.T) {
+	for _, ackWait := range []time.Duration{30 * time.Second, time.Minute, 5 * time.Minute} {
+		cc := buildConsumerConfig(stream.ConsumerSettings{
+			AckWait: ackWait, MaxDeliver: 5, MaxWaiting: 512, MaxAckPending: 1000,
+		}, "default")
+
+		every := jsretry.HeartbeatInterval(cc.AckWait)
+		assert.Positive(t, every, "AckWait %s must produce a live heartbeat", ackWait)
+		assert.Less(t, 2*every, cc.AckWait, "two heartbeats must fit inside AckWait %s", ackWait)
+	}
+}
+
+// No local budget to pace against, so disable rather than invent an interval.
+func TestHeartbeatDisabledWhenAckWaitUnset(t *testing.T) {
+	cc := buildConsumerConfig(stream.ConsumerSettings{MaxDeliver: 5}, "default")
+	assert.Zero(t, jsretry.HeartbeatInterval(cc.AckWait))
+}
+
+// The budget is what stops a wedged handler parking its message forever, so the
+// wiring must carry a positive Max through from the operator knob.
+func TestBuildHeartbeatBudget(t *testing.T) {
+	t.Run("pairs the derived interval with the configured bound", func(t *testing.T) {
+		s := stream.ConsumerSettings{AckWait: 30 * time.Second, HeartbeatMax: 5 * time.Minute}
+		b := buildHeartbeatBudget(s, s.EffectiveAckWait())
+
+		assert.Equal(t, 10*time.Second, b.Every)
+		assert.Equal(t, 5*time.Minute, b.Max)
+	})
+
+	t.Run("the repo default bound is positive, never unbounded", func(t *testing.T) {
+		var h struct {
+			Consumer stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+		}
+		// Empty environment: inherited CONSUMER_ACK_WAIT / CONSUMER_HEARTBEAT_MAX
+		// would otherwise define the "default" this asserts on.
+		require.NoError(t, env.ParseWithOptions(&h, env.Options{Environment: map[string]string{}}))
+
+		b := buildHeartbeatBudget(h.Consumer, h.Consumer.EffectiveAckWait())
+		assert.Positive(t, b.Max, "an unbounded budget reintroduces the indefinite park")
+		assert.Less(t, b.Every, b.Max, "the budget must allow at least one extension")
+	})
 }
