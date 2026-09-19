@@ -56,18 +56,32 @@ type CassandraStore struct {
 	bucket msgbucket.Sizer
 	cipher atrest.Cipher
 	// threadPolicy tunes where exact counting stops and how often an
-	// approximate count is re-derived; tests override it.
+	// approximate count is re-derived. Operator-set; tests override it.
 	threadPolicy threadcount.Policy
 }
 
-func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
+func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher, opts ...StoreOption) *CassandraStore {
 	s := &CassandraStore{
 		sess:         sess,
 		bucket:       bucket,
 		cipher:       cipher,
 		threadPolicy: threadcount.DefaultPolicy(),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
 	return s
+}
+
+// StoreOption overrides a CassandraStore default at construction.
+type StoreOption func(*CassandraStore)
+
+// WithThreadPolicy replaces the compiled-in thread-count tuning with the
+// operator's. main.go is the only caller — it is an option rather than a
+// parameter so the existing call sites, nearly all of them tests, stay as they
+// are. Tests that want a different limit set the field directly.
+func WithThreadPolicy(p threadcount.Policy) StoreOption {
+	return func(s *CassandraStore) { s.threadPolicy = p }
 }
 
 // SaveMessage inserts into messages_by_room + messages_by_id via one UnloggedBatch.

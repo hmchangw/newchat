@@ -72,18 +72,47 @@ const (
 // Policy is the tuning a writer hands to Maintain. Writers hold one of these
 // rather than loose numbers, so adding a setting does not mean touching every
 // writer.
+//
+// The environment names live here, not in the services, so the three writers
+// cannot end up reading the same setting under different defaults. Mount it as
+// a named field and pass it where the store is built. Unlike a shared cache TTL,
+// the writers disagreeing is not corrupting: each one only decides for itself
+// whether to count a thread or move its number, and every route writes a value
+// it stands behind. It is still worth keeping them equal, or the same thread
+// gets counted exactly on a reply and estimated on a delete.
 type Policy struct {
 	// ScanLimit is the reply count at or above which a reply stops counting the
 	// thread and starts moving the saved number instead. Raising it widens the
 	// range where the count is exact and self-correcting, and makes every reply
 	// under the new limit pay for a longer read.
-	ScanLimit int
+	ScanLimit int `env:"THREAD_COUNT_SCAN_LIMIT" envDefault:"1000"`
 	// ReanchorBudget is how many rows one reply spends, on average, replacing the
 	// estimate with a real count; 0 turns that off.
-	ReanchorBudget int
+	ReanchorBudget int `env:"THREAD_COUNT_REANCHOR_BUDGET" envDefault:"50"`
 	// ReconcileRowLimit caps how many rows a full recount may read before giving
 	// up rather than save a number it cannot verify; 0 removes the cap.
-	ReconcileRowLimit int
+	ReconcileRowLimit int `env:"THREAD_COUNT_RECONCILE_ROW_LIMIT" envDefault:"50000"`
+}
+
+// Validate rejects a tuning that would undo what this package is for. Services
+// call it right after parsing their environment and exit on failure, because a
+// bad value here is not visible until a thread is already long enough to hurt.
+//
+// Only ScanLimit is genuinely dangerous. At zero, a thread nobody has counted
+// yet still looks short, and counting it reads every reply it has — the
+// unbounded walk this package replaced. The other two have a documented meaning
+// at zero and only need to not be negative.
+func (p Policy) Validate() error {
+	if p.ScanLimit <= 0 {
+		return fmt.Errorf("THREAD_COUNT_SCAN_LIMIT must be positive, got %d: at or below zero an uncounted thread is read to its end", p.ScanLimit)
+	}
+	if p.ReanchorBudget < 0 {
+		return fmt.Errorf("THREAD_COUNT_REANCHOR_BUDGET must not be negative, got %d (0 stops re-deriving the count)", p.ReanchorBudget)
+	}
+	if p.ReconcileRowLimit < 0 {
+		return fmt.Errorf("THREAD_COUNT_RECONCILE_ROW_LIMIT must not be negative, got %d (0 leaves a recount uncapped)", p.ReconcileRowLimit)
+	}
+	return nil
 }
 
 // DefaultPolicy is the production tuning, shared by every writer.

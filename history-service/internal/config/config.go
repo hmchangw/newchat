@@ -12,6 +12,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/roomtimescache"
 	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/threadcount"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -66,12 +67,13 @@ type Config struct {
 	Mongo                   MongoConfig     `envPrefix:"MONGO_"`
 	Pool                    mongoutil.PoolConfig
 	NATS                    NATSConfig `envPrefix:"NATS_"`
-	MessageBucketHours      int        `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
-	MessageReadMaxBuckets   int        `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
-	MessageHistoryFloorDays int        `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
-	LargeRoomThreshold      int        `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
-	MaxPinnedPerRoom        int        `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
-	PinEnabled              bool       `env:"PIN_ENABLED"                 envDefault:"true"`
+	Thread                  threadcount.Policy
+	MessageBucketHours      int  `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
+	MessageReadMaxBuckets   int  `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
+	MessageHistoryFloorDays int  `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
+	LargeRoomThreshold      int  `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
+	MaxPinnedPerRoom        int  `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
+	PinEnabled              bool `env:"PIN_ENABLED"                 envDefault:"true"`
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
@@ -236,6 +238,9 @@ func validate(cfg *Config) error {
 		return err
 	}
 	if err := cfg.Guard.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Thread.Validate(); err != nil {
 		return err
 	}
 	if cfg.Pool.ServerSelectionTimeout <= 0 {
