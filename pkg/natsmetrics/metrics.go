@@ -347,6 +347,14 @@ func (c *Consumer) LoopFailed(ctx context.Context, err error) {
 	if c == nil {
 		return
 	}
+	// A recoverable error did not end the loop, so recording it as a failure
+	// would lie twice: the loop-up gauge would read 0 while the loop is still
+	// consuming, and the early return below would then swallow the reason of
+	// the real terminal failure that follows. Guarding here rather than at each
+	// call site keeps the invariant out of reach of an ordering mistake.
+	if Recoverable(err) {
+		return
+	}
 	wasUp := c.up.Load()
 	c.LoopStopped(ctx)
 	if !wasUp {
