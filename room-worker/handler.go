@@ -650,7 +650,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 
 	var deletedSubs, deletedBots int64
 	if len(accounts) > 0 {
-		n, bots, delErr := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts)
+		n, bots, delErr := h.store.DeleteSubscriptionsWithBotSplit(ctx, req.RoomID, accounts)
 		if delErr != nil {
 			return fmt.Errorf("delete subscriptions by accounts: %w", delErr)
 		}
@@ -675,7 +675,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	case len(accounts) == 0:
 		// Every org member survives via another source: nothing left the room.
 	case int(deletedSubs) == len(accounts):
-		// Split by the deleted rows' own flags: see DeleteSubscriptionsByAccounts.
+		// Split by the deleted rows' own flags: see DeleteSubscriptionsWithBotSplit.
 		removedApps := int(deletedBots)
 		removedUsers := len(accounts) - removedApps
 		if err := h.applyMemberRemovalCounts(ctx, req.RoomID, -removedUsers, -removedApps); err != nil {

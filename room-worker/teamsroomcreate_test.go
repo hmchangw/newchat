@@ -222,7 +222,7 @@ func TestProcessTeamsRoomCreate_HardRemoveOnly(t *testing.T) {
 		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a"},
 		{User: model.SubscriptionUser{Account: "bob"}, RoomID: "chat1", SiteID: "site-b"},
 	}, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), []string{"bob"}).Return(int64(1), int64(0), nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), []string{"bob"}).Return(int64(1), nil)
 	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chat := model.TeamsRoomCreateChat{
@@ -261,7 +261,7 @@ func TestReconcileTeamsRoom_HardRemove_BustsSubL2(t *testing.T) {
 		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a"},
 		{User: model.SubscriptionUser{Account: "bob"}, RoomID: "chat1", SiteID: "site-a"},
 	}, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), []string{"bob"}).Return(int64(1), int64(0), nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), []string{"bob"}).Return(int64(1), nil)
 	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chat := model.TeamsRoomCreateChat{

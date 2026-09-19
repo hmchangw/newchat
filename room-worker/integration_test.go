@@ -470,10 +470,9 @@ func TestMongoStore_DeleteSubscriptionsByAccounts_Integration(t *testing.T) {
 		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
 	})
 
-	deleted, deletedBots, err := store.DeleteSubscriptionsByAccounts(ctx, "r1", []string{"alice", "bob"})
+	deleted, err := store.DeleteSubscriptionsByAccounts(ctx, "r1", []string{"alice", "bob"})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), deleted)
-	assert.Equal(t, int64(0), deletedBots)
 
 	subs, err := store.ListByRoom(ctx, "r1")
 	require.NoError(t, err)
@@ -2505,7 +2504,7 @@ func TestMongoStore_DeleteSubscription_ReportsPersistedBotFlag_Integration(t *te
 	assert.False(t, wasBot)
 }
 
-func TestMongoStore_DeleteSubscriptionsByAccounts_CountsPersistedBots_Integration(t *testing.T) {
+func TestMongoStore_DeleteSubscriptionsWithBotSplit_CountsPersistedBots_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	ctx := context.Background()
@@ -2523,7 +2522,7 @@ func TestMongoStore_DeleteSubscriptionsByAccounts_CountsPersistedBots_Integratio
 	})
 	require.NoError(t, err)
 
-	deleted, deletedBots, err := store.DeleteSubscriptionsByAccounts(ctx, "r1",
+	deleted, deletedBots, err := store.DeleteSubscriptionsWithBotSplit(ctx, "r1",
 		[]string{"flagged.bot", "alice", "legacy.bot"})
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), deleted)

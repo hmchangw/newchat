@@ -306,7 +306,7 @@ func TestHandler_ProcessRemoveOrg_CleansThreadStateForRemovedOnly(t *testing.T) 
 		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
 	}
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), int64(0), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), int64(0), nil)
 	// Thread cleanup targets exactly the departed accounts — not eve.
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
@@ -1707,7 +1707,7 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 		GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).
 		Return(orgMembers, nil)
 	store.EXPECT().
-		DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).
+		DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).
 		Return(int64(2), int64(0), nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).
@@ -2183,7 +2183,7 @@ func TestHandler_ProcessRemoveOrg_InboxFailurePropagates(t *testing.T) {
 	}
 
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, []string{"carol"}).Return(int64(1), int64(0), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, []string{"carol"}).Return(int64(1), int64(0), nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
@@ -6345,7 +6345,7 @@ func TestHandler_ProcessRemoveOrg_OtherOrgCovers_PreservesSub(t *testing.T) {
 			},
 		}, nil)
 	// MUST NOT be called — alice is still covered by the sibling org.
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	// MUST NOT rotate — no survivors were displaced.
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), gomock.Any()).Times(0)
 	// The X org row still gets deleted; the count gets reconciled.
@@ -7582,7 +7582,7 @@ func TestHandler_ProcessRemoveOrg_BustsSubL2ForEachRemovedAccount(t *testing.T) 
 		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
 	}
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), int64(0), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), int64(0), nil)
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
@@ -8271,7 +8271,7 @@ func TestHandler_ProcessRemoveOrg_AppliesCountDeltaForDeletedAccounts(t *testing
 		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
 	}
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).Return(int64(2), int64(1), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).Return(int64(2), int64(1), nil)
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).Return(nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
@@ -8297,7 +8297,7 @@ func TestHandler_ProcessRemoveOrg_PartialDeleteFallsBackToReconcile(t *testing.T
 		{Account: "dave", SiteID: siteID, Name: "Engineering"},
 	}
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.Any()).Return(int64(1), int64(0), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.Any()).Return(int64(1), int64(0), nil)
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.Any()).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.Any()).Return(nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
@@ -8363,7 +8363,7 @@ func TestHandler_ProcessRemoveOrg_SplitsByPersistedBotFlagNotAccountShape(t *tes
 	}
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
 	// Both rows predate u.isBot, so both sat in userCount despite one bot account.
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).
 		Return(int64(2), int64(0), nil)
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.Any()).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.Any()).Return(nil)

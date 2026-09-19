@@ -111,11 +111,13 @@ type SubscriptionStore interface {
 	// userCount whatever its account reads; decrementing the other counter
 	// would drift both until the next reconcile.
 	DeleteSubscription(ctx context.Context, roomID, account string) (deleted int64, wasBot bool, err error)
-	// DeleteSubscriptionsByAccounts deletes the accounts' subs in roomID and
-	// reports how many of the deleted rows carried u.isBot==true, for the same
-	// reason as DeleteSubscription. deletedBots is only meaningful when deleted
+	DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (int64, error)
+	// DeleteSubscriptionsWithBotSplit also reports how many deleted rows carried
+	// u.isBot==true, for the same reason as DeleteSubscription. It costs an extra
+	// read over the target set, so callers that recompute the counts afterwards
+	// use the plain delete above. deletedBots is only meaningful when deleted
 	// equals the target count; a partial delete makes the caller recompute.
-	DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (deleted, deletedBots int64, err error)
+	DeleteSubscriptionsWithBotSplit(ctx context.Context, roomID string, accounts []string) (deleted, deletedBots int64, err error)
 	DeleteRoomMember(ctx context.Context, roomID string, memberType model.RoomMemberType, memberID string) error
 
 	// --- thread-state cleanup (remove flow): scrub departed accounts so they no longer fan out as followers (#308); no-op on empty ---

@@ -502,13 +502,27 @@ func (s *MongoStore) DeleteSubscription(ctx context.Context, roomID, account str
 	return 1, doc.User.IsBot, nil
 }
 
-// DeleteSubscriptionsByAccounts counts the bot rows among the targets before
+func (s *MongoStore) DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (int64, error) {
+	res, err := s.subscriptions.DeleteMany(ctx, bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}})
+	if err != nil {
+		return 0, fmt.Errorf("delete subscriptions for room %q: %w", roomID, err)
+	}
+	return res.DeletedCount, nil
+}
+
+// DeleteSubscriptionsWithBotSplit counts the bot rows among the targets before
 // deleting them: DeleteMany cannot return the documents, and the delta must
-// follow the persisted u.isBot rather than the account strings. The count is
-// index-backed over the target set, not the whole room. A row deleted between
-// the count and the delete shows up as a partial delete, which makes the caller
-// recompute instead of trusting the split.
-func (s *MongoStore) DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (int64, int64, error) {
+// follow the persisted u.isBot rather than the account strings.
+//
+// The count seeks {roomId, u.account} over the target set, so it never scans the
+// whole room — but no index carries both u.account and u.isBot, so it fetches one
+// document per target to read the flag. That is a real cost on a large org, paid
+// to keep the delta exact; callers that recompute afterwards must use the plain
+// DeleteSubscriptionsByAccounts instead of discarding the split.
+//
+// A row deleted between the count and the delete shows up as a partial delete,
+// which makes the caller recompute instead of trusting the split.
+func (s *MongoStore) DeleteSubscriptionsWithBotSplit(ctx context.Context, roomID string, accounts []string) (int64, int64, error) {
 	filter := bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}}
 	bots, err := s.subscriptions.CountDocuments(ctx, bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}, "u.isBot": true})
 	if err != nil {
