@@ -6,4 +6,14 @@ const (
 	PortalAccountNotReady Reason = "account_not_ready"
 	// PortalBotLoginDisabled: portal /api/v1/login rejects a bot-role login because BOT_LOGIN_ENABLED=false.
 	PortalBotLoginDisabled Reason = "bot_login_disabled"
+	// PortalFailoverUnauthorized: the failover control surface rejected a request whose ops bearer token was missing or wrong.
+	PortalFailoverUnauthorized Reason = "failover_unauthorized"
+	// PortalFailoverIllegalTransition: the requested failover action is not valid from the site's current status.
+	PortalFailoverIllegalTransition Reason = "failover_illegal_transition"
+	// PortalFailoverVersionConflict: the failover state changed concurrently (optimistic-concurrency CAS lost); retry.
+	PortalFailoverVersionConflict Reason = "failover_version_conflict"
+	// PortalFailoverUnknownSite: the failover control surface was asked to transition a site absent from PORTAL_SITE_URLS.
+	PortalFailoverUnknownSite Reason = "failover_unknown_site"
+	// PortalFailoverBackupUnavailable: the requested transition would serve the backup, but PORTAL_BACKUP_SITE_ID is unset or absent from PORTAL_SITE_URLS.
+	PortalFailoverBackupUnavailable Reason = "failover_backup_unavailable"
 )
