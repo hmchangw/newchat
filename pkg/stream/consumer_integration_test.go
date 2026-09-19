@@ -174,6 +174,40 @@ func TestDurableConsumerDefaults_UpdatesAnExistingDurable(t *testing.T) {
 	assert.Equal(t, 6, got.MaxDeliver)
 }
 
+// Going from a finite cap to unlimited is the transition a deploy of
+// WithUnlimitedRedelivery actually performs on a live durable, and it is the one the
+// update test above does not cover: 5 → 6 keeps MaxDeliver finite throughout, so it
+// exercises neither the -1 value nor the BackOff length check that -1 exempts
+// (nats-server rejects len(BackOff) > MaxDeliver unless MaxDeliver is -1).
+//
+// The cost of being wrong is not a failed test but a failed rollout: every service
+// wiring a consumer exits non-zero when CreateOrUpdateConsumer errors, so a rejected
+// update is a crashloop of the only service that persists message history.
+func TestDurableConsumerDefaults_UpdatesAFiniteDurableToUnlimited(t *testing.T) {
+	js, ctx, streamName := newStream(t)
+
+	settings := stream.ConsumerSettings{
+		AckWait: 30 * time.Second, MaxDeliver: 6, MaxWaiting: 512, MaxAckPending: 1000,
+		BackOffSteps: 5, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+	}
+
+	before := stream.DurableConsumerDefaults(settings)
+	before.Durable = "finite-to-unlimited-consumer"
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, before)
+	require.NoError(t, err)
+	require.Equal(t, 6, cons.CachedInfo().Config.MaxDeliver)
+
+	after := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(settings))
+	after.Durable = "finite-to-unlimited-consumer"
+	updated, err := js.CreateOrUpdateConsumer(ctx, streamName, after)
+	require.NoError(t, err,
+		"a live durable must accept the finite → unlimited update, or the deploy crashloops")
+
+	got := updated.CachedInfo().Config
+	assert.Equal(t, -1, got.MaxDeliver, "the server must hold the consumer at unlimited")
+	assert.NotEmpty(t, got.BackOff, "the schedule must survive the switch to unlimited")
+}
+
 // CONSUMER_BACKOFF_STEPS=0 is the documented off-switch: it must produce a
 // consumer the server treats exactly as the pre-change flat-AckWait shape.
 func TestDurableConsumerDefaults_OffSwitchProducesFlatAckWait(t *testing.T) {

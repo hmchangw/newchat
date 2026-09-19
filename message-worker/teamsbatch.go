@@ -134,6 +134,10 @@ func (h *teamsBatchHandler) migrateOne(ctx context.Context, raw json.RawMessage)
 	}
 	cass := &cassParticipant{ID: sender.UserID, EngName: sender.EngName, CompanyName: sender.ChineseName, Account: sender.Account}
 
+	// Deliberately NOT tagged historyWriteError: teams mode is a separate stream,
+	// consumer and durable with its own isolate-and-Nak policy. A bulk-migration
+	// persist failure must not set the site's history-degraded marker and tell every
+	// live client their history is incomplete.
 	if err := h.store.SaveMessage(ctx, &msg, cass, h.siteID); err != nil {
 		h.metrics.Record(ctx, kindTeamsMigration, persistError)
 		// A persist failure is infra: surface it so the batch Naks and replays.
