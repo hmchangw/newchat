@@ -89,7 +89,7 @@ func TestBroadcastWorker_ChannelRoom_Integration(t *testing.T) {
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -134,7 +134,7 @@ func TestBroadcastWorker_ChannelRoom_IndividualMention_Integration(t *testing.T)
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -176,7 +176,7 @@ func TestBroadcastWorker_DMRoom_Integration(t *testing.T) {
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	keyStore := &fakeRoomKeyProvider{pair: nil}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -232,7 +232,7 @@ func TestBroadcastWorker_ChannelRoom_EncryptionDisabled_Integration(t *testing.T
 	pub := &recordingPublisher{}
 
 	// nil keyStore — encryption is disabled, handler must not consult it
-	handler := NewHandler(store, us, pub, nil, defaultParentFetcher, false, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, nil, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -408,7 +408,7 @@ func TestBroadcastWorker_ThreadViewSubject_NonFollowerReceivesReply_Integration(
 
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
-		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, subject.RouteGlobal, withThreadViewSubject(true))
+		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, fixedRoutes(subject.RouteGlobal), withThreadViewSubject(true))
 
 	// dave follows nothing; his only subscription is the open panel.
 	viewerSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-view", "parent-view", true))
@@ -466,7 +466,7 @@ func TestBroadcastWorker_ThreadViewSubject_SameSiteRoomRoutesLocal_Integration(t
 
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
-		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, subject.RouteLocal, withThreadViewSubject(true))
+		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, fixedRoutes(subject.RouteLocal), withThreadViewSubject(true))
 
 	localSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-local", "parent-local", false))
 	require.NoError(t, err)
@@ -523,7 +523,7 @@ func TestBroadcastWorker_ThreadViewSubject_EncryptedForRoomNamespace_Integration
 
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
-		&fakeRoomKeyProvider{pair: key}, stubParentFetcher{}, true, subject.RouteGlobal, withThreadViewSubject(true))
+		&fakeRoomKeyProvider{pair: key}, stubParentFetcher{}, true, fixedRoutes(subject.RouteGlobal), withThreadViewSubject(true))
 
 	viewerSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-enc", "parent-enc", true))
 	require.NoError(t, err)
@@ -592,11 +592,11 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 	us := userstore.NewMongoStore(db.Collection("users"))
 	key := testRoomKey(t)
 	handler := NewHandler(store, us, &recordingPublisher{}, &fakeRoomKeyProvider{pair: key},
-		defaultParentFetcher, true, subject.RouteGlobal,
+		defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal),
 		withOutboxFederation("site-a", func(ctx context.Context, subj string, data []byte, msgID string) error {
 			_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
 			return err
-		}))
+		}, subject.LaneHome))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	data, err := json.Marshal(model.MessageEvent{

@@ -19,6 +19,12 @@ services:
       # Valkey cluster backing the badge cache; empty disables it.
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (stream create, consumer bind, dual-lane drain) still runs.
+      # Placement is not asserted here — BOOTSTRAP_STREAMS=true takes the create
+      # branch, and a single-server NATS reports no cluster at all.
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

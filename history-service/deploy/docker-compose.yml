@@ -9,6 +9,8 @@ services:
       - OTEL_SERVICE_NAME=history-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
       # 0 derives the paginated-reply cap from the broker max_payload.
