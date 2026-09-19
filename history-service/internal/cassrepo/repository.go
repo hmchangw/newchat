@@ -27,7 +27,7 @@ type Repository struct {
 	walkFanout int
 	cipher     atrest.Cipher // nil when ATREST_ENABLED=false
 	// threadPolicy tunes where exact counting stops and how often an
-	// approximate count is re-derived; tests override it.
+	// approximate count is re-derived. Operator-set; tests override it.
 	threadPolicy threadcount.Policy
 }
 
@@ -36,7 +36,7 @@ type Repository struct {
 // buckets before returning a non-terminal cursor. cipher may be nil; when nil
 // the read path treats encountered enc_payload rows as a configuration error
 // and the write path uses legacy plaintext columns.
-func NewRepository(session *gocql.Session, bucket msgbucket.Sizer, maxBuckets int, cipher atrest.Cipher) *Repository {
+func NewRepository(session *gocql.Session, bucket msgbucket.Sizer, maxBuckets int, cipher atrest.Cipher, opts ...Option) *Repository {
 	r := &Repository{
 		session:      session,
 		bucket:       bucket,
@@ -45,5 +45,19 @@ func NewRepository(session *gocql.Session, bucket msgbucket.Sizer, maxBuckets in
 		cipher:       cipher,
 		threadPolicy: threadcount.DefaultPolicy(),
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
 	return r
+}
+
+// Option overrides a Repository default at construction.
+type Option func(*Repository)
+
+// WithThreadPolicy replaces the compiled-in thread-count tuning with the
+// operator's. main.go is the only caller — it is an option rather than a
+// parameter so the existing call sites, nearly all of them tests, stay as they
+// are. Tests that want a different limit set the field directly.
+func WithThreadPolicy(p threadcount.Policy) Option {
+	return func(r *Repository) { r.threadPolicy = p }
 }

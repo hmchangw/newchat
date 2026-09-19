@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/threadcount"
 )
 
 // baseValid returns a Config with all tunable knobs at valid values so each test
@@ -18,6 +19,7 @@ import (
 // doesn't touch them.
 func baseValid() Config {
 	return Config{
+		Thread:                 threadcount.DefaultPolicy(),
 		SubCacheSize:           100000,
 		SubCacheTTL:            2 * time.Minute,
 		RoomCacheSize:          50000,
@@ -104,6 +106,16 @@ func TestValidate_DelegatesGuardValidation(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MAX_CONCURRENCY")
+}
+
+// validate() delegates the thread-count tuning to threadcount.Policy.Validate,
+// so a scan limit that would reintroduce the unbounded reply walk stops startup.
+func TestValidate_DelegatesThreadPolicyValidation(t *testing.T) {
+	cfg := baseValid()
+	cfg.Thread.ScanLimit = 0
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "THREAD_COUNT_SCAN_LIMIT")
 }
 
 func TestValidate_RejectsNegativePreviewCacheSize(t *testing.T) {

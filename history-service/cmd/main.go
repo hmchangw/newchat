@@ -224,7 +224,8 @@ func main() {
 		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 
-	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
+	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher,
+		cassrepo.WithThreadPolicy(cfg.Thread))
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
 	roomRepo := mongorepo.NewRoomRepo(db, previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch})

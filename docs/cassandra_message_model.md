@@ -159,6 +159,23 @@ the retry is acked. It also advances `thread_last_msg_at` with the reply's own
 time (idempotent, unlike the count), and deliberately skips re-anchor sampling —
 a retry burst is the worst moment to add partition scans.
 
+**The tuning is operator-set.** `threadcount.Policy` carries the three knobs and
+declares their environment names once, so the three writers cannot pick up
+different defaults:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `THREAD_COUNT_SCAN_LIMIT` | `1000` | Reply count at or above which counting stops and the stamped value is moved by one instead. Raising it widens the exact range and makes every reply under the new limit read further. Must be positive — at zero a thread nobody has counted yet still looks short, and counting it walks every reply, which is the unbounded read this design replaced. |
+| `THREAD_COUNT_REANCHOR_BUDGET` | `50` | Rows one reply contributes, on average, toward re-deriving the count. `0` stops re-anchoring, leaving a long thread's count to drift uncorrected. |
+| `THREAD_COUNT_RECONCILE_ROW_LIMIT` | `50000` | Cap on what one re-anchor may read. `0` removes the cap. |
+
+Each service validates these at startup and exits on a bad value, because the
+damage only shows once a thread is long enough to matter. Unlike the bucket
+window, a disagreement between writers is not corrupting — each one decides only
+for itself whether to count or estimate, and every route writes a value it can
+stand behind — but keeping them equal avoids the same thread being counted
+exactly on a reply and estimated on a delete.
+
 Consequence for readers: `tcount` is exact for threads under the scan limit
 whose partition the scan can read to the end — every thread in practice — and
 otherwise, above the limit or behind a wall of tombstones, an approximation that
