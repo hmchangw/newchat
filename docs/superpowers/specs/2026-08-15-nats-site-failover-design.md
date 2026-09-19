@@ -46,7 +46,7 @@ stores.
 - **`ROOMS-FAILOVER`.** Room creation, invites, and the `.event.member` roster
   events `room-worker` emits from them all stall for the outage duration.
   Continuity here means send and receive messages in existing rooms. Listed so
-  the omission reads as a decision.
+  the omission reads as a decision; sketched in *Future work: room failover*.
 - **Capacity weighting in client site selection.** Uniform shuffle to start.
   Weights are a portal field addition whenever real distribution data says they
   are needed; guessing them now would age badly.
@@ -752,6 +752,65 @@ failover-mode routing rule, with the derived views
 (`docs/client-api/request-reply.md`, `docs/client-api/events.md`) updated in the
 same PR. `docs/architecture.md` §3–4 gets the stale FANOUT stream corrected, and
 `docs/nats-subject-naming.md` gains the `chat.failover.>` tree.
+
+## Future work: room failover
+
+`ROOMS-FAILOVER` was left out (see *Out of scope*), so room creation, invites,
+removals and renames fail for the duration of an outage while everything else
+keeps working. This section sketches how it would be wired, so the omission is a
+deferral with a known shape rather than an open question.
+
+**Why it fails today, precisely.** Room mutations are accept-then-async:
+`room-service` validates, provisions the room key and at-rest DEK, publishes a
+canonical event to `chat.room.canonical.{siteID}.{op}` and returns `accepted`;
+`room-worker` does the MongoDB write. `room-service` has a buddy lane, so it
+answers the RPC during an outage — but on the buddy no stream captures that
+subject, the JetStream publish returns no-responders, and the client gets an
+error. That is the good failure: loud, immediate, nothing half-written. Room
+*reads* are unaffected throughout, because they are MongoDB reads over
+request/reply and those lanes do fail over.
+
+**What already generalizes.** Three of the four pieces exist:
+
+- Every stream `room-worker` publishes *into* already has a standby —
+  `MESSAGES-CANONICAL-FAILOVER`, `INBOX-FAILOVER`, `OUTBOX-FAILOVER` (§C). Its
+  outputs are covered; only its input is not.
+- `room-worker`'s handler already takes its publisher as an injected
+  `PublishFunc`, which is the shape a lane builder needs, so there is no
+  untangling to do first. That untangling was the expensive part in the services
+  where the crossed-lane bug was found (§D).
+- MongoDB is up throughout. This is a NATS-cluster outage, not site loss, so
+  `room-worker`'s actual work is unaffected.
+
+**What is new.**
+
+1. `ROOMS-FAILOVER-{siteID}` in `pkg/stream`, with the same explicit
+   `Placement.Cluster` and startup assertion as the other five (§C).
+2. `room-service`'s canonical publish goes through the no-responders redirect
+   gate. `ROOMS` and `ROOMS-FAILOVER` are separate streams with independent
+   dedup windows, so the rule from §H applies unchanged: redirect on
+   no-responders only, never on a timeout.
+3. `room-worker`'s buddy lane — the wiring every other pipeline service gets
+   (§G), replacing its "needs no change" row.
+4. Tests: a lane-binding test asserting its publishes leave on its own
+   connection, and a failover integration test.
+
+**The open question.** A create is accepted before it is applied, so a client
+retrying after the no-responders error could in principle put attempts on both
+lanes. The gate should make that impossible — no-responders means nothing landed
+— but `room-worker`'s insert path has not been read against a double delivery of
+the same room ID. Settle that before committing to a size. It is reading, not
+redesign.
+
+**Ordering is not the obstacle it first appears.** `room-worker`'s `ROOMS`
+consumer uses the shared durable defaults: already concurrent, already unordered
+between two messages about one room. A second lane widens an existing window
+rather than breaking a guarantee. The `MaxAckPending=1` FIFO lanes are
+`outbox-worker`'s per-destination *forwarding*, where two lanes per destination
+is already the shape every other OUTBOX producer has here.
+
+**What it would not buy.** Nothing against whole-site loss, which stays a
+different problem needing replicated databases rather than a replicated bus.
 
 ## Ops invariants this design rests on
 
