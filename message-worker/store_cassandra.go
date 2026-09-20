@@ -58,18 +58,22 @@ func toMentionSet(mentions []model.Participant) []*cassParticipant {
 
 // CassandraStore implements Store using a Cassandra session.
 type CassandraStore struct {
-	cassSession  *gocql.Session
-	bucket       msgbucket.Sizer
-	cipher       atrest.Cipher // nil when ATREST_ENABLED=false
+	cassSession *gocql.Session
+	bucket      msgbucket.Sizer
+	cipher      atrest.Cipher // nil when ATREST_ENABLED=false
+	// threadPolicy tunes where exact counting stops and how often an
+	// approximate count is re-derived. Operator-set; tests override it.
+	threadPolicy threadcount.Policy
 	newBatch     func(context.Context) *gocql.Batch
 	executeBatch func(context.Context, *gocql.Batch) error
 }
 
-func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{
-		cassSession: session,
-		bucket:      bucket,
-		cipher:      cipher,
+func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher, opts ...StoreOption) *CassandraStore {
+	s := &CassandraStore{
+		cassSession:  session,
+		bucket:       bucket,
+		cipher:       cipher,
+		threadPolicy: threadcount.DefaultPolicy(),
 		newBatch: func(ctx context.Context) *gocql.Batch {
 			return session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
 		},
@@ -77,6 +81,21 @@ func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher at
 			return o11ycassandra.ExecuteBatch(ctx, session, batch)
 		},
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// StoreOption overrides a CassandraStore default at construction.
+type StoreOption func(*CassandraStore)
+
+// WithThreadPolicy replaces the compiled-in thread-count tuning with the
+// operator's. main.go is the only caller — it is an option rather than a
+// parameter so the existing call sites, nearly all of them tests, stay as they
+// are. Tests that want a different limit set the field directly.
+func WithThreadPolicy(p threadcount.Policy) StoreOption {
+	return func(s *CassandraStore) { s.threadPolicy = p }
 }
 
 // writeTS is the write timestamp every *plaintext* create INSERT binds via
@@ -244,8 +263,8 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 // thread_messages_by_thread. Both writes are plain INSERTs (no LWT): JetStream
 // MsgID dedup prevents double-delivery at the consumer level, so re-inserting
 // an identical row is safe and avoids the 5–10× Paxos overhead of IF NOT EXISTS.
-// countAndSetParentTcount derives tcount from a COUNT query and blind-SETs it,
-// which is idempotent on redelivery without any CAS.
+// countAndSetParentTcount then stamps the parent's tcount — exact and
+// idempotent below the scan limit, incremental past it (see its doc).
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, sender *cassParticipant, siteID string, threadRoomID string) (*int, error) {
 	if s.cipher != nil {
 		return s.saveThreadMessageEncrypted(ctx, msg, sender, siteID, threadRoomID)
@@ -412,51 +431,22 @@ func buildCassandraMessage(msg *model.Message) cassandra.Message {
 	return cm
 }
 
-// countThreadReplies returns the exact, soft-delete-aware reply count for the
-// thread. It delegates to pkg/threadcount so this add-path writer and the
-// history-service delete-path writer compute an identical value.
-func (s *CassandraStore) countThreadReplies(ctx context.Context, threadRoomID string) (int, error) {
-	return threadcount.Count(ctx, s.cassSession, threadRoomID)
-}
-
-// setParentTcountAndTlm co-SETs tcount and tlm on the parent row in both tables
-// (one UPDATE). Blind-SET from the authoritative COUNT → idempotent on redelivery.
-// On the add path tlm is the reply's own CreatedAt (always the newest).
-func (s *CassandraStore) setParentTcountAndTlm(ctx context.Context, msg *model.Message, n int, tlm *time.Time) error {
-	parentID := msg.ThreadParentMessageID
-	parentCreatedAt := *msg.ThreadParentMessageCreatedAt
-	parentBucket := s.bucket.Of(parentCreatedAt)
-	if err := s.cassSession.Query(
-		`UPDATE messages_by_id SET tcount = ?, thread_last_msg_at = ? WHERE message_id = ?`,
-		n, tlm, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_id: %w", parentID, err)
-	}
-	if err := s.cassSession.Query(
-		`UPDATE messages_by_room SET tcount = ?, thread_last_msg_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
-		n, tlm, msg.RoomID, parentBucket, parentCreatedAt, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_room: %w", parentID, err)
-	}
-	return nil
-}
-
-// countAndSetParentTcount recomputes tcount from the partition COUNT and co-sets
-// tcount+tlm on the parent (tlm = the reply's CreatedAt, newest on the add path).
-// Returns (nil, nil) when ThreadParentMessageCreatedAt is unset.
+// countAndSetParentTcount stamps the parent's reply count after this reply's
+// insert. The policy lives in pkg/threadcount so this add path, the bot add
+// path and the history-service delete path cannot drift apart. Returns
+// (nil, nil) when ThreadParentMessageCreatedAt is unset.
 func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model.Message, threadRoomID string) (*int, error) {
 	if msg.ThreadParentMessageCreatedAt == nil {
 		return nil, nil
 	}
-	n, err := s.countThreadReplies(ctx, threadRoomID)
+	parent := threadcount.NewParent(msg.ThreadParentMessageID, msg.RoomID, threadRoomID,
+		*msg.ThreadParentMessageCreatedAt, s.bucket)
+	res, err := threadcount.Maintain(ctx, s.cassSession, parent, s.threadPolicy,
+		+1, &msg.CreatedAt, natsutil.IsRedelivery(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("count thread replies: %w", err)
+		return nil, fmt.Errorf("maintain parent tcount: %w", err)
 	}
-	tlm := msg.CreatedAt
-	if err := s.setParentTcountAndTlm(ctx, msg, n, &tlm); err != nil {
-		return nil, fmt.Errorf("set parent tcount/tlm: %w", err)
-	}
-	return &n, nil
+	return &res.Count, nil
 }
 
 // IF EXISTS prevents phantom rows on missing parents; misses log at ERROR

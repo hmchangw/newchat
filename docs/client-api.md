@@ -2947,7 +2947,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `card` | [MessageCard](#messagecard) | Optional. |
 | `cardAction` | [MessageCardAction](#messagecardaction) | Optional. |
 | `tshow` | boolean | Optional. Whether a thread reply is also shown in the parent room. |
-| `tcount` | number | Optional. Exact number of non-deleted replies on a thread parent. |
+| `tcount` | number | Optional. Number of non-deleted replies on a thread parent. Exact when the server can recount the thread within its scan limit; when it cannot — the thread is longer than the limit, or its deleted replies alone fill it — the count is adjusted per reply without recounting, so it is approximate, off by at most the replies that raced or retried since the last re-anchor, and periodically re-derived from an exact count. |
 | `threadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent reply in the thread. Absent if no replies or not a thread parent. |
 | `threadParentId` | string | Optional. Set when this message is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
@@ -5876,7 +5876,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `hasMention` | boolean | The user was @-mentioned in the thread. |
 | `unread` | boolean | `true` when `lastMsgAt` is newer than `lastSeenAt` (or the thread was never opened). |
 | `lastMsgAt` | number | UTC ms of the thread's last activity — the global sort key. |
-| `tcount` | number | Exact non-deleted reply count. Always present; `0` also covers threads whose count was never written — migrated threads, and briefly a just-created thread whose first reply has not yet been counted. During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
+| `tcount` | number | Non-deleted reply count — exact when the server can recount the thread within its scan limit; when it cannot (the thread is longer than the limit, or its deleted replies alone fill it) the count is adjusted per reply without recounting, so it is approximate and periodically re-derived from an exact count. Always present; `0` also covers threads whose count was never written — migrated threads, and briefly a just-created thread whose first reply has not yet been counted. During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
 | `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message. |
 | `lastMessage` | [Message](#message-schema) | Optional. The hydrated last reply. |
 | `truncated` | boolean | Optional. `true` when the row's `parentMessage` and `lastMessage` were dropped because the row alone exceeded the transport's `max_payload`. Identifiers and `lastMsgAt` are kept so pagination still advances. |
@@ -6646,8 +6646,8 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 | `roomId` | string | The room the thread lives in. |
 | `siteId` | string | |
 | `parentMessageId` | string | The thread parent message's ID. Clients use this to locate the message in their cache and update its badge. |
-| `newTcount` | number | Authoritative exact reply count for the parent message. Replaces any locally-computed count — do not delta. |
-| `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0 (all replies deleted). |
+| `newTcount` | number | Reply count for the parent message. Replaces any locally-computed count — do not delta. Exact when the server can recount the thread within its scan limit; when it cannot (the thread is longer than the limit, or its deleted replies alone fill it) the count is adjusted per reply without recounting, so it is approximate and periodically re-derived from an exact count (same contract as `tcount` on [Message](#message-schema)). |
+| `newThreadLastMsgAt` | string (ISO 8601) | Optional. The thread's stamped last-reply time — normally the most recent surviving reply. Absent only when no reply survives. On `reply_deleted` past the scan limit the server does not re-derive it — resolving the new newest reply needs the recount that path skips — so it repeats the timestamp already stamped, which may still name the deleted reply until the next re-anchor. |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 | `replyMessageId` | string | The reply that was added or deleted. |
 | `timestamp` | number | Milliseconds since Unix epoch (UTC). When broadcast-worker published this event. |

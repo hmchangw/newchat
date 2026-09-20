@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/threadcount"
 )
 
@@ -54,10 +55,33 @@ type CassandraStore struct {
 	sess   *gocql.Session
 	bucket msgbucket.Sizer
 	cipher atrest.Cipher
+	// threadPolicy tunes where exact counting stops and how often an
+	// approximate count is re-derived. Operator-set; tests override it.
+	threadPolicy threadcount.Policy
 }
 
-func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{sess: sess, bucket: bucket, cipher: cipher}
+func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher, opts ...StoreOption) *CassandraStore {
+	s := &CassandraStore{
+		sess:         sess,
+		bucket:       bucket,
+		cipher:       cipher,
+		threadPolicy: threadcount.DefaultPolicy(),
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// StoreOption overrides a CassandraStore default at construction.
+type StoreOption func(*CassandraStore)
+
+// WithThreadPolicy replaces the compiled-in thread-count tuning with the
+// operator's. main.go is the only caller — it is an option rather than a
+// parameter so the existing call sites, nearly all of them tests, stay as they
+// are. Tests that want a different limit set the field directly.
+func WithThreadPolicy(p threadcount.Policy) StoreOption {
+	return func(s *CassandraStore) { s.threadPolicy = p }
 }
 
 // SaveMessage inserts into messages_by_room + messages_by_id via one UnloggedBatch.
@@ -138,7 +162,8 @@ func (s *CassandraStore) saveEncrypted(ctx context.Context, msg *model.Message, 
 }
 
 // SaveThreadMessage inserts into messages_by_id + thread_messages_by_thread, mirroring to
-// messages_by_room when TShow is true, then blind-SETs tcount/tlm from a bounded partition COUNT.
+// messages_by_room when TShow is true, then stamps the parent's tcount/tlm
+// (exact below the scan limit, incremental past it — see countAndSetParentTcount).
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, siteID, threadRoomID string) error {
 	if s.cipher != nil {
 		return s.saveThreadEncrypted(ctx, msg, siteID, threadRoomID)
@@ -241,31 +266,18 @@ func (s *CassandraStore) saveThreadEncrypted(ctx context.Context, msg *model.Mes
 	return s.countAndSetParentTcount(ctx, msg, threadRoomID)
 }
 
-// countAndSetParentTcount blind-SETs tcount/thread_last_msg_at on the parent from an
-// authoritative partition COUNT (idempotent on redelivery); no-op for legacy replies without ThreadParentMessageCreatedAt.
+// countAndSetParentTcount stamps the parent's reply count after this reply's
+// insert; the policy lives in pkg/threadcount, shared with the other tcount
+// writers. No-op for legacy replies without ThreadParentMessageCreatedAt.
 func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model.Message, threadRoomID string) error {
 	if msg.ThreadParentMessageCreatedAt == nil {
 		return nil
 	}
-	n, err := threadcount.Count(ctx, s.sess, threadRoomID)
-	if err != nil {
-		return fmt.Errorf("count bot thread replies: %w", err)
-	}
-	tlm := msg.CreatedAt
-	parentID := msg.ThreadParentMessageID
-	parentCreatedAt := *msg.ThreadParentMessageCreatedAt
-	parentBucket := s.bucket.Of(parentCreatedAt)
-	if err := s.sess.Query(
-		`UPDATE messages_by_id SET tcount = ?, thread_last_msg_at = ? WHERE message_id = ?`,
-		n, tlm, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_id: %w", parentID, err)
-	}
-	if err := s.sess.Query(
-		`UPDATE messages_by_room SET tcount = ?, thread_last_msg_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
-		n, tlm, msg.RoomID, parentBucket, parentCreatedAt, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_room: %w", parentID, err)
+	parent := threadcount.NewParent(msg.ThreadParentMessageID, msg.RoomID, threadRoomID,
+		*msg.ThreadParentMessageCreatedAt, s.bucket)
+	if _, err := threadcount.Maintain(ctx, s.sess, parent, s.threadPolicy,
+		+1, &msg.CreatedAt, natsutil.IsRedelivery(ctx)); err != nil {
+		return fmt.Errorf("maintain bot parent tcount: %w", err)
 	}
 	return nil
 }

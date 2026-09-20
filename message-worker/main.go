@@ -29,6 +29,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/threadcount"
 	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -64,6 +65,7 @@ type config struct {
 	DEKL2              atrest.TTLConfig
 	Breaker            mongoutil.BreakerConfig
 	DEKBreaker         atrest.BreakerConfig
+	Thread             threadcount.Policy
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
@@ -92,6 +94,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := cfg.Breaker.Validate(""); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Thread.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
@@ -199,7 +205,7 @@ func main() {
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 	}
 
-	store := NewCassandraStore(cassSession, bucketSizer, cipher)
+	store := NewCassandraStore(cassSession, bucketSizer, cipher, WithThreadPolicy(cfg.Thread))
 	threadStore := newThreadStoreMongo(db)
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)
 	if err := threadStore.EnsureIndexes(ensureCtx); err != nil {
@@ -299,6 +305,9 @@ func main() {
 				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msg = tracked
 				msgCtx = tracked.Context(msgCtx)
+				// Mark retries so the thread-reply writer can tell a redelivery
+				// from a first delivery: its tcount increment is not idempotent.
+				msgCtx = natsutil.StampRedelivery(msgCtx, msg)
 				defer func() {
 					tracked.Finish(msgCtx)
 					<-sem

@@ -21,6 +21,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/threadcount"
 )
 
 type config struct {
@@ -51,6 +52,8 @@ type config struct {
 	Atrest         atrest.Config
 	Vault          atrest.VaultConfig `envPrefix:"VAULT_"`
 
+	Thread threadcount.Policy
+
 	HealthAddr   string          `env:"HEALTH_ADDR"   envDefault:":8081"`
 	PProfEnabled bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap    bootstrapConfig `envPrefix:"BOOTSTRAP_"`
@@ -68,6 +71,9 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.Thread.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
 	}
 
 	if err := cfg.Pool.Validate(); err != nil {
@@ -135,7 +141,7 @@ func run() error {
 		return fmt.Errorf("bootstrap streams: %w", err)
 	}
 
-	store := NewCassandraStore(cassSess, bucket, cipher)
+	store := NewCassandraStore(cassSess, bucket, cipher, WithThreadPolicy(cfg.Thread))
 	h := newHandler(store, cfg.SiteID)
 
 	streamCfg := stream.BotMessagesCanonical(cfg.SiteID)
