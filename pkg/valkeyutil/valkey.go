@@ -95,7 +95,8 @@ type clusterClient struct {
 	c *redis.ClusterClient
 }
 
-// ConnectCluster dials a Valkey cluster via the provided seed addresses, verifies connectivity with PING, and returns a Client.
+// ConnectCluster dials a Valkey cluster via the provided seed addresses and returns a Client.
+// It probes connectivity with PING but does not gate on it — see WithRequireReachable.
 func ConnectCluster(ctx context.Context, addrs []string, password string, opts ...Option) (Client, error) {
 	c, err := dialCluster(ctx, addrs, password, opts...)
 	if err != nil {
@@ -104,37 +105,48 @@ func ConnectCluster(ctx context.Context, addrs []string, password string, opts .
 	return &clusterClient{c: c}, nil
 }
 
+// pingTimeout is the ceiling on the startup reachability probe.
+const pingTimeout = 5 * time.Second
+
 // dialCluster is the shared dial: construct, instrument, PING, or clean up. Both
 // the Client-returning and the raw-*redis.ClusterClient-returning entry points
 // go through it, so a caller that needs the concrete type does not re-implement
 // the setup — three services had, each with its own instrumentation.
 func dialCluster(ctx context.Context, addrs []string, password string, opts ...Option) (*redis.ClusterClient, error) {
+	cc := newConnectConfig(opts...)
 	c := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:    addrs,
 		Password: password,
 	})
-	if err := instrumentCluster(c, newConnectConfig(opts...)); err != nil {
+	if err := instrumentCluster(c, &cc); err != nil {
 		if closeErr := c.Close(); closeErr != nil {
 			slog.Warn("valkey cluster close after failed instrument", "error", closeErr)
 		}
 		return nil, err
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// The probe is a diagnostic, not a gate — see WithRequireReachable for why
+	// unreachability is non-fatal by default.
+	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
-	if err := c.Ping(pingCtx).Err(); err != nil {
+	switch pingErr := c.Ping(pingCtx).Err(); {
+	case pingErr == nil:
+		slog.Info("connected to Valkey cluster", "addrs", addrs)
+	case cc.requireReachable:
 		// Close the half-constructed client on the ping-failure path so unreachable addrs don't leak internal go-redis pool state.
 		if closeErr := c.Close(); closeErr != nil {
 			slog.Warn("valkey cluster close after failed connect", "error", closeErr)
 		}
-		return nil, fmt.Errorf("valkey cluster connect: %w", err)
+		return nil, fmt.Errorf("valkey cluster connect: %w", pingErr)
+	default:
+		slog.Warn("valkey cluster unreachable at startup; continuing with lazy connect",
+			"addrs", addrs, "error", pingErr)
 	}
-	slog.Info("connected to Valkey cluster", "addrs", addrs)
 	return c, nil
 }
 
 // instrumentCluster attaches o11y/redis tracing+metrics hooks when observability is configured.
 // o11yredis.Wrap mutates the client in place and is idempotent, registering its own teardown — Disconnect needs no extra handling.
-func instrumentCluster(c *redis.ClusterClient, cc connectConfig) error {
+func instrumentCluster(c *redis.ClusterClient, cc *connectConfig) error {
 	if cc.obs == nil {
 		return nil
 	}
