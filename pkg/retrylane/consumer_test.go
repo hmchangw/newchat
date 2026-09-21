@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/retrylane"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 func TestSlowBackoffIsTheTailOfTheFullSchedule(t *testing.T) {
@@ -61,15 +62,15 @@ func TestConsumerConfigFiltersToItsOwnConsumer(t *testing.T) {
 		FastSteps: 3,
 		Consumer: retrylane.ConsumerSettings{
 			AckWait: 30 * time.Second, MaxDeliver: 3, MaxWaiting: 512,
-			MaxAckPending: 4000, BackOffSteps: 3, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+			MaxAckPending: 40000, BackOffSteps: 3, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
 		},
 	}
-	cfg := retrylane.ConsumerConfig("site1", "message-worker", &s)
+	cfg := retrylane.ConsumerConfig("site1", "message-worker", &s, retrylane.SlowBackoff(3, jsretry.DefaultBackoff))
 
 	assert.Equal(t, "message-worker-retry", cfg.Durable)
 	assert.Equal(t, []string{"chat.retry.site1.message-worker.>"}, cfg.FilterSubjects,
 		"a retry consumer must never drain another service's escalations")
-	assert.Equal(t, 4000, cfg.MaxAckPending,
+	assert.Equal(t, 40000, cfg.MaxAckPending,
 		"the retry lane holds the long waits, so it needs its own large budget")
 }
 
@@ -87,8 +88,8 @@ func TestSettingsConsumerDefaultsThroughEnvParse(t *testing.T) {
 	cfg, err := env.ParseAs[wrapperConfig]()
 	require.NoError(t, err)
 
-	assert.Equal(t, 4000, cfg.Retry.Consumer.MaxAckPending,
-		"the retry lane must default to its own 4000 budget, not the hot lane's 1000")
+	assert.Equal(t, 40000, cfg.Retry.Consumer.MaxAckPending,
+		"the retry lane must default to its own 40000 budget, not the hot lane's 1000")
 	assert.Equal(t, 3, cfg.Retry.Consumer.MaxDeliver, "MaxDeliver counts retry-lane attempts only")
 }
 
@@ -201,5 +202,43 @@ func TestSettingsValidate(t *testing.T) {
 		s := base()
 		s.Enabled, s.FastSteps = false, 0
 		assert.NoError(t, s.Validate(), "FastSteps is unused while the lane is off")
+	})
+}
+
+// Relocating the wait must not shorten it. The hot consumer's MaxDeliver is
+// derived from stream.OutageRetryWindow, but once a message escalates, the
+// retry consumer's own MaxDeliver is the only budget left — at the package
+// default of 3 that is ~12m against the hot lane's ~2h, so enabling the lane
+// would make an outage lossier than leaving it off.
+func TestConsumerConfigPreservesTheOutageRetryBudget(t *testing.T) {
+	slow := retrylane.SlowBackoff(3, jsretry.DefaultBackoff) // {2m, 10m}
+
+	t.Run("raises the package default to cover the outage window", func(t *testing.T) {
+		s := retrylane.Settings{Enabled: true, FastSteps: 3,
+			Consumer: retrylane.ConsumerSettings{MaxDeliver: 3, MaxWorkers: 10}}
+		cc := retrylane.ConsumerConfig("site1", "message-worker", &s, slow)
+
+		want := jsretry.DeliveriesFor(slow, stream.OutageRetryWindow)
+		assert.Equal(t, want, cc.MaxDeliver,
+			"the retry lane must carry the budget the hot lane handed it")
+		assert.Greater(t, cc.MaxDeliver, 3, "the package default cannot ride out an hour")
+	})
+
+	// Same shape as stream.WithOutageRetryBudget: an operator who set the knob
+	// explicitly wins, because only the untouched default is safe to reinterpret.
+	t.Run("leaves an explicitly configured cap alone", func(t *testing.T) {
+		s := retrylane.Settings{Enabled: true, FastSteps: 3,
+			Consumer: retrylane.ConsumerSettings{MaxDeliver: 5, MaxWorkers: 10}}
+		cc := retrylane.ConsumerConfig("site1", "message-worker", &s, slow)
+		assert.Equal(t, 5, cc.MaxDeliver)
+	})
+
+	t.Run("never lowers the cap", func(t *testing.T) {
+		s := retrylane.Settings{Enabled: true, FastSteps: 3,
+			Consumer: retrylane.ConsumerSettings{MaxDeliver: 3, MaxWorkers: 10}}
+		// A schedule whose tail alone already outlasts the window.
+		long := []time.Duration{2 * stream.OutageRetryWindow}
+		cc := retrylane.ConsumerConfig("site1", "message-worker", &s, long)
+		assert.GreaterOrEqual(t, cc.MaxDeliver, 3)
 	})
 }

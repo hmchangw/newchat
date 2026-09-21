@@ -378,10 +378,14 @@ func main() {
 		retryConsumerMetrics *natsmetrics.Consumer
 		retryCons            o11ynats.Consumer
 		retryConsumerCfg     jetstream.ConsumerConfig
+		slowBackoff          []time.Duration
 	)
 	if cfg.Mode == "default" {
 		retryStreamCfg := stream.Retry(cfg.SiteID)
-		retryConsumerCfg = retrylane.ConsumerConfig(cfg.SiteID, defaultConsumerDurable, &cfg.Retry)
+		// Derived before the consumer config: ConsumerConfig sizes the retry lane's
+		// MaxDeliver against this schedule so the outage budget survives escalation.
+		slowBackoff = retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)
+		retryConsumerCfg = retrylane.ConsumerConfig(cfg.SiteID, defaultConsumerDurable, &cfg.Retry, slowBackoff)
 		retryConsumerMetrics = sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 			Site:   cfg.SiteID,
 			Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
@@ -403,7 +407,6 @@ func main() {
 	if retryCons != nil {
 		// The retry lane does not escalate again in phases 0-3, so it settles with
 		// plain jsretry.Settle on the slow-rung schedule relocated off the hot consumer.
-		slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)
 		retryProcess := retryProcessor(handler, slowBackoff)
 
 		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.Retry.Consumer.MaxWorkers))

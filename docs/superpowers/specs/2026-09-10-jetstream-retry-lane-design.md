@@ -48,7 +48,15 @@ rises from ~1.3/s to **~27/s** (`1000/36`). `LowLatencyBackoff` is `{200ms, 1s, 
 **756.2s**, essentially identical. Its fast rungs are far cheaper, though, so the same
 3-step split drops 756.2s → 6.2s (~1.3/s → **~161/s**), a ~122× gain rather than ~21×.
 The total patience per message is unchanged, which makes the change easy to reason about
-and to roll back.
+and to roll back — but only because the retry consumer carries the budget the hot lane
+hands it. Escalation Acks the hot message, so the hot consumer's own
+`stream.WithOutageRetryBudget`-derived `MaxDeliver` stops applying and whatever the retry
+consumer is configured with becomes the *entire* remaining budget. Left at the package
+default of 3 that is ~12m against the hot lane's ~2h, so `retrylane.ConsumerConfig`
+reinterprets the untouched default against the slow schedule
+(`jsretry.DeliveriesFor(slow, stream.OutageRetryWindow)` = 14 on `DefaultBackoff`'s tail,
+15 on `LowLatencyBackoff`'s). Without that, switching the lane on would make an outage
+*lossier* than leaving it off.
 
 ## 3. Design
 
@@ -368,8 +376,8 @@ Per the `caarlos0/env` convention, opt-in by default like `BOOTSTRAP_STREAMS`:
 |---|---|---|
 | `RETRY_LANE_ENABLED` | `false` | Opt in per service |
 | `RETRY_LANE_FAST_STEPS` | `3` | Split index into `jsretry.DefaultBackoff` |
-| `RETRY_CONSUMER_MAX_DELIVER` | `3` | Retry-lane attempts before DLQ; the loop guard |
-| `RETRY_CONSUMER_MAX_ACK_PENDING` | `4000` | Sized for 5/s escalation × 720s slow-lane occupancy |
+| `RETRY_CONSUMER_MAX_DELIVER` | `3` (sentinel) | Retry-lane attempts before DLQ; the loop guard. The default is **reinterpreted**, not used: `ConsumerConfig` raises it to cover `stream.OutageRetryWindow` under the slow schedule (14 / 15). Set it explicitly to override. |
+| `RETRY_CONSUMER_MAX_ACK_PENDING` | `40000` | Sized for 5/s escalation × the slow lane's full occupancy (~7320s ⇒ ~36,600, rounded). Under-sizing only slows redelivery of parked messages — publishes are not gated by it, and the hot lane is unaffected. |
 | `RETRY_CONSUMER_MAX_WORKERS` | `10` | Deliberately small — doubles as the recovery herd damper |
 
 The surface exposes a **split index, not a schedule**. A raw `[]time.Duration` env knob

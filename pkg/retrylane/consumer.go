@@ -9,6 +9,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -47,9 +48,19 @@ type Settings struct {
 // MaxDeliver=6) here regardless of what this struct wants — the retry lane
 // would silently inherit the hot lane's budget instead of its own.
 //
-// MaxAckPending defaults high: this lane deliberately holds the long waits,
-// sized for ~5 escalations/s against ~720s of slow-rung occupancy.
-// MaxDeliver counts retry-lane attempts only.
+// MaxAckPending defaults high: this lane deliberately holds the long waits.
+// It is sized for the documented ~5 escalations/s against the slow lane's own
+// occupancy — which is now the full outage window, not the 720s two rungs used
+// to give (see ConsumerConfig). At ~2h of nominal occupancy that is
+// 5/s x 7320s ~= 36,600, rounded to 40,000.
+//
+// Under-sizing it degrades gracefully rather than losing anything: publishes to
+// RETRY-{siteID} are not gated by consumer ack-pending, so a saturated ceiling
+// only slows redelivery of already-parked messages, and the hot lane — the
+// resource this whole design protects — is unaffected either way.
+//
+// MaxDeliver counts retry-lane attempts only, and its default is a sentinel:
+// ConsumerConfig reinterprets it against the slow schedule.
 //
 // MaxWorkers is the mirror image, and deliberately small. The retry loop runs
 // in the SAME process as the hot loop, so sizing it off the hot lane's
@@ -62,7 +73,7 @@ type ConsumerSettings struct {
 	MaxWorkers    int           `env:"MAX_WORKERS"     envDefault:"10"`
 	MaxDeliver    int           `env:"MAX_DELIVER"     envDefault:"3"`
 	MaxWaiting    int           `env:"MAX_WAITING"     envDefault:"512"`
-	MaxAckPending int           `env:"MAX_ACK_PENDING" envDefault:"4000"`
+	MaxAckPending int           `env:"MAX_ACK_PENDING" envDefault:"40000"`
 	BackOffSteps  int           `env:"BACKOFF_STEPS"  envDefault:"3"`
 	BackOffFactor float64       `env:"BACKOFF_FACTOR" envDefault:"2"`
 	BackOffMax    time.Duration `env:"BACKOFF_MAX"    envDefault:"8m"`
@@ -139,13 +150,39 @@ func jsretryFallback() []time.Duration {
 	return []time.Duration{2 * time.Minute, 10 * time.Minute}
 }
 
+// DefaultMaxDeliver is ConsumerSettings.MaxDeliver's envDefault, repeated here
+// as a sentinel so ConsumerConfig can tell "operator left it alone" from
+// "operator chose 3". The two must not drift.
+const DefaultMaxDeliver = 3
+
 // ConsumerConfig is the retry lane's durable consumer for one service, filtered
 // to its own escalations. Built through stream.DurableConsumerDefaults so the
 // derived BackOff and AckWait cannot disagree (a hardcoded cc.BackOff is a
 // blocking semgrep finding). s is read-only, taken by pointer only because
 // Settings is large enough to copy needlessly.
-func ConsumerConfig(siteID, consumer string, s *Settings) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s.Consumer.streamSettings())
+//
+// slow is the schedule this service's retry consumer settles with — the tail
+// SlowBackoff relocated off the hot lane — and it is what makes the cap
+// meaningful. Escalation hands the message over completely: the hot consumer
+// Acks, so its own MaxDeliver (raised by stream.WithOutageRetryBudget to cover
+// stream.OutageRetryWindow) no longer applies, and whatever is configured here
+// becomes the entire remaining budget. Left at the package default of 3 that is
+// ~12 minutes against the hot lane's ~2 hours, which would make enabling the
+// lane strictly lossier than leaving it off — the opposite of relocating a wait.
+//
+// So the untouched default is reinterpreted against slow, exactly as
+// stream.WithOutageRetryBudget does for the hot lane. It cannot reuse that
+// helper: that one keys off stream.DefaultMaxDeliver, a different sentinel from
+// this package's. An explicitly configured cap always wins, and the budget is
+// only ever raised.
+func ConsumerConfig(siteID, consumer string, s *Settings, slow []time.Duration) jetstream.ConsumerConfig {
+	settings := s.Consumer
+	if settings.MaxDeliver == DefaultMaxDeliver && len(slow) > 0 {
+		if n := jsretry.DeliveriesFor(slow, stream.OutageRetryWindow); n > settings.MaxDeliver {
+			settings.MaxDeliver = n
+		}
+	}
+	cc := stream.DurableConsumerDefaults(settings.streamSettings())
 	cc.Durable = DurableName(consumer)
 	cc.FilterSubjects = []string{subject.RetryConsumerWildcard(siteID, consumer)}
 	return cc

@@ -242,7 +242,10 @@ func main() {
 	// rollback-asymmetry note above. The one tolerated failure is the stream
 	// simply not being provisioned while the lane is off: phase 1 ships dark,
 	// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
-	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, &cfg.Retry)
+	// Derived before the consumer config: ConsumerConfig sizes the retry lane's
+	// MaxDeliver against this schedule so the outage budget survives escalation.
+	slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)
+	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, &cfg.Retry, slowBackoff)
 	retryConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
 		Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
@@ -258,7 +261,6 @@ func main() {
 	}
 	// The retry lane does not escalate again in phases 0-3, so it settles with plain
 	// jsretry.Settle on the slow-rung schedule SlowBackoff relocated off the hot consumer.
-	slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)
 
 	// The broker advertises max_payload in its INFO on connect, so this is
 	// always in step with the server. An env var was a second source of truth

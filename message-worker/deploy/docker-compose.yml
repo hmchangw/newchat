@@ -33,7 +33,7 @@ services:
       # by default. The retry consumer still binds and drains regardless of this
       # flag — see pkg/retrylane.
       - RETRY_LANE_ENABLED=${RETRY_LANE_ENABLED:-false}
-      - RETRY_CONSUMER_MAX_ACK_PENDING=${RETRY_CONSUMER_MAX_ACK_PENDING:-4000}
+      - RETRY_CONSUMER_MAX_ACK_PENDING=${RETRY_CONSUMER_MAX_ACK_PENDING:-40000}
       - RETRY_CONSUMER_MAX_DELIVER=${RETRY_CONSUMER_MAX_DELIVER:-3}
       # Deliberately small, and separate from MAX_WORKERS: the retry loop runs in the
       # same process as the hot loop, so reusing MAX_WORKERS would double the in-flight

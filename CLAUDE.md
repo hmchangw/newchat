@@ -378,7 +378,9 @@ where the wait happens once the fast rungs are spent. Set all four.
   so the long waits stop occupying the hot consumer's ack-pending budget — a Nak'd-with-delay
   message holds its slot for the whole backoff, so at ~5 failures/s the default 1000-slot
   budget is exhausted in ~200s and the consumer stalls for healthy traffic too. The total
-  retry budget is unchanged; only the occupancy moves. Opt-in per service via
+  retry budget is unchanged — the retry consumer's `MaxDeliver` default is reinterpreted
+  against the slow schedule to cover `stream.OutageRetryWindow`, because escalation Acks
+  the hot message and ends the hot consumer's budget — only the occupancy moves. Opt-in per service via
   `RETRY_LANE_ENABLED` (`pkg/retrylane.Settings`, envPrefix `RETRY_`, default `false` —
   disabling stops new escalations but the retry consumer keeps draining what's already
   parked); excluded by design from the FIFO lanes (`outbox-worker` ordered consumers,
