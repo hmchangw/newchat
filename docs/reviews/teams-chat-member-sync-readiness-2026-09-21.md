@@ -75,3 +75,25 @@ Coverage reads 60.3%, but the number understates the service: the whole store la
 - [medium] Bound the scan — `store_mongo.go:36` — add a configurable limit plus a stable `_id` sort, matching `teams-room-creation`; a backlog then drains over several runs with a short CAS window each.
 - [low] Delete the unused `syncer.users` field — `syncer.go:26,32` — pass `TeamsUserStore` only to `newUserRefCache`.
 - [low] Serve `ListChatsToSync` from the primary — `main.go:112` — or document the lag/waste trade-off; keep `UsersByIDs` on the secondary, where staleness is harmless.
+
+## 4. Test coverage — score 2
+
+### Evidence
+
+- [high] coverage below repo minimum 80%, currently 60.3% — `teams-chat-member-sync/main.go:61` — `go test -race -covermode=atomic` reports 60.3% of statements (79/131). Per-file from the provided profile: `syncer.go` 73/74 (98.6%), `main.go` 5/33 (15.2%), `store_mongo.go` 1/24 (4.2%). CLAUDE.md §4 sets 80% as a MUST-NOT-merge floor.
+- [medium] the 60.3% number understates real coverage: the whole store layer is exercised only under the `integration` tag, which the profile does not include — `teams-chat-member-sync/integration_test.go:30` — `ListChatsToSync`, `SetMembersSynced` (incl. the `errSuperseded` optimistic-write path), `UsersByIDs` and `newMongoStore` all have real testcontainer tests (`:30`, `:56`, `:86`, `:114`). Discounting `main.go`'s wiring, the tested surface is ~98%. The gate still fails, but the remedy is a tagged/merged profile plus a few unit gaps, not a rewrite.
+- [medium] no test covers SIGTERM/context cancellation, and the dispatch loop has no `ctx.Done()` arm — `teams-chat-member-sync/syncer.go:154` — `for _, chat := range chats { jobs <- chat }` dispatches every remaining chat after `ctx` is cancelled; each then fails in `graph.ListChatMembers`, increments `sum.Failed`, and `run` returns `"%d of %d chats failed"` (`:165`), so a routine pod eviction is recorded as a CronJob failure. `grep -n "ctx.Done\|WithCancel"` over the package returns nothing — the behaviour is neither implemented nor asserted.
+- [medium] empty member list from Graph is an untested boundary — `teams-chat-member-sync/syncer.go:175` — no test returns `[]msgraph.ChatMemberDetail{}` from `ListChatMembers`. `syncChat` would write `members: []` and flip `needCreateRoom=true` (`store_mongo.go:65`), handing the room-creation stage a 0-member chat. CLAUDE.md §4 requires empty-collection edge cases explicitly.
+- [medium] `main.go`'s `run` is 0% and untestable as written — `teams-chat-member-sync/main.go:85` — config parse, two `mongoutil.Connect*` calls, `msgraph.NewChatMembersClient` and `newSyncer` are one 53-line function, so 28 of its statements can never be unit-covered. `validateConfig` (`:73`) was correctly split out and is at 100%; the client/store construction was not.
+- [low] the only uncovered statement in `syncer.go` is `syncChat`'s `buildMembers` error branch — `teams-chat-member-sync/syncer.go:181` — the wrap is tested directly (`syncer_test.go:121`) but never through `run`, so nothing asserts that a `teams_user` lookup failure marks the chat failed rather than superseded.
+- [low] the run-summary counters are never asserted — `teams-chat-member-sync/syncer.go:160` — `chatsSucceeded`/`chatsFailed`/`chatsSuperseded`/`membersWritten` are the job's only observability, and `log_test.go:72` asserts only the per-chat `"members set"` record. A miscounted `MembersWritten.Add` (`:187`) would pass the suite.
+- [nitpick] three variations of one function are three separate tests instead of a table — `teams-chat-member-sync/syncer_test.go:98,121,132` — `TestBuildMembers_*` share one shape; CLAUDE.md §4 prefers table-driven with `t.Run`. Only `TestValidateConfig` (`main_test.go:59`) is table-driven.
+
+### Recommendations
+
+- [high] Raise measured coverage over 80% — merge the integration profile into the gate (`go test -tags=integration -coverprofile`) or exclude `main.go`'s wiring, then close the unit gaps below. — Without this the service is un-mergeable under CLAUDE.md §4 despite genuinely good tests.
+- [medium] Add a cancellation test: cancel `ctx` mid-run and assert dispatch stops — `syncer.go:154` — pair it with a `select { case jobs <- chat: case <-ctx.Done(): }` arm so graceful shutdown no longer reports a CronJob failure.
+- [medium] Add `TestSyncChat_EmptyMemberList` asserting the intended behaviour for a 0-member Graph response — `syncer.go:175` — decide and pin down whether the chat advances to room creation or stays flagged; today it silently advances.
+- [medium] Extract the dependency wiring out of `run` into a `newApp(cfg)`-style constructor — `main.go:85` — makes ~28 statements reachable and removes the largest single block of dead coverage.
+- [low] Extend `TestRun_GraphFailureKeepsFlagAndFailsRun` (`worker_test.go:53`) to also assert the summary counters and add a `buildMembers`-fails-inside-`run` case — covers `syncer.go:181` and the counters at `syncer.go:160` in one pass.
+- [nitpick] Fold `TestBuildMembers_*` into one table with `t.Run` subtests — `syncer_test.go:98` — same coverage, one place to add the next case.
