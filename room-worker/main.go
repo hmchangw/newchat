@@ -279,7 +279,8 @@ func main() {
 		return nil
 	}
 	handler.dekProvisioner = dekProvisioner
-	handler.valkey = metaValkey
+	// Fenced so a dead Valkey stops costing a CallBudget per invalidation.
+	handler.valkey = valkeyutil.Breakered(metaValkey, cfg.Valkey.Breaker.New(ctx, "roomworkermetal2"))
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
 	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard,

@@ -216,7 +216,8 @@ func main() {
 	// gates botDM fan-out on, so the shared entry must be busted on the spot.
 	var memberOpts []service.Option
 	if valkeyClient != nil {
-		memberOpts = append(memberOpts, service.WithMemberCache(roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))))
+		memberOpts = append(memberOpts, service.WithMemberCache(roomsubcache.NewValkeyCache(
+			valkeyutil.Breakered(valkeyutil.WrapClusterClient(valkeyClient), cfg.Valkey.Breaker.New(ctx, "usersvcroomsubl2")))))
 	} else {
 		slog.Warn("roomsubcache invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}

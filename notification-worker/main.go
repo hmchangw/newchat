@@ -154,7 +154,9 @@ func main() {
 
 	// Built here rather than inside the loader: the tier's closures escape to the
 	// heap, so constructing one per L1 miss would allocate on every cold room.
-	metaTier := roommetacache.NewL2Tier(valkeyClient, roomsCol, cfg.RoomMetaL2.TTL,
+	// Separate breakers: room metadata and room subscriptions are different key
+	// shapes, and one timing out must not switch the other off.
+	metaTier := roommetacache.NewL2Tier(valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "notifmetal2")), roomsCol, cfg.RoomMetaL2.TTL,
 		nil, cachemetrics.For("roommeta", "l2"))
 	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL, metaTier.Get)
 	if err != nil {
@@ -162,7 +164,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cache := roomsubcache.NewValkeyCache(valkeyClient)
+	cache := roomsubcache.NewValkeyCache(valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "notifroomsubl2")))
 	// The shared loader stamps each member's HOME site for the per-site badge
 	// RPC. It has to: the cache key is shared, so whichever service fills it
 	// first decides what every other service reads — a loader that skipped the

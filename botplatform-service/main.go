@@ -100,7 +100,9 @@ func run() error {
 	// rather than each re-learning the outage.
 	mongoBreaker := cfg.Breaker.New(ctx, "mongo",
 		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
-	st := newStoreMongo(db, mongoBreaker, valkey, cfg.SessionCache.TTL)
+	// One breaker per tier: the session L2 and the bot rate limiter fail
+	// independently, and a bypassed rate limit must not also blind session lookups.
+	st := newStoreMongo(db, mongoBreaker, valkeyutil.Breakered(valkey, cfg.Valkey.Breaker.New(ctx, "botsessionl2")), cfg.SessionCache.TTL)
 	subStore := newMongoSubscriptionStore(db, mongoBreaker)
 	h := newHandler(st, &cfg)
 	h.subs = subStore
@@ -124,7 +126,7 @@ func run() error {
 	r.Use(cfg.HTTP.Middleware())
 	r.Use(accessLogMiddleware())
 	registerRoutes(r, h)
-	registerBotRoutes(r, valkey, &cfg, h)
+	registerBotRoutes(r, valkeyutil.Breakered(valkey, cfg.Valkey.Breaker.New(ctx, "botcontrols")), &cfg, h)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

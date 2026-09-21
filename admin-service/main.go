@@ -122,7 +122,8 @@ func run() error {
 	// bot-room-service and inbox-worker. Without it a revoked token keeps
 	// authenticating from cache until its refresh window elapses.
 	if vk := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "session revocation", valkeyutil.Instrumented(sdk)); vk != nil {
-		h.valkey = vk
+		// Fenced so a dead Valkey stops costing a CallBudget per revocation check.
+		h.valkey = valkeyutil.Breakered(vk, cfg.Valkey.Breaker.New(ctx, "adminsession"))
 		defer valkeyutil.Disconnect(vk)
 		slog.Info("session revocation invalidation enabled")
 	}

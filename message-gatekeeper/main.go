@@ -153,7 +153,10 @@ func main() {
 		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	metaBreaker := cfg.Breaker.New(ctx, "roommeta",
 		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
-	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2.TTL, cfg.SubL2.TTL, subBreaker, metaBreaker)
+	// Fenced: the gatekeeper is on the message hot path, where a held handler
+	// slot per call is what turns a degraded cache into shed traffic.
+	mongoStore := NewMongoStore(db, valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "gatekeeperl2")),
+		cfg.RoomMetaL2.TTL, cfg.SubL2.TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)
