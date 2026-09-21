@@ -163,3 +163,19 @@ Verified clean: explicit projections on both finds (`store_mongo.go:37,83`); no 
 - [low] Wrap the teams_user lookup in a single-flight keyed on the missing-id set, or seed the cache once from the first batch — `syncer.go:70` — removes duplicate `$in` queries during cache warm-up.
 - [low] Clamp `MAX_WORKERS` to a sane maximum in `validateConfig` — `main.go:74` — one bound protects both the goroutine count and the idle-connection pool.
 - [nitpick] Set `MONGO_MAX_POOL_SIZE` to roughly `MAX_WORKERS + headroom` in the job's deployment — `deploy/docker-compose.yml` — the per-client ceiling doubles here because the job opens two clients.
+
+## 8. Prioritized action list
+
+Ordered by severity (`critical` first), then by the dimension most likely to carry a correctness or contract cost (integration, architecture, coverage, code quality, performance, maintainability). Each item is a recommendation from the chapter named; the `file:line` and rationale are quoted from it.
+
+1. **[high]** _Integration_ — Move the Graph knobs into an env-tagged struct in `pkg/msgraph` (mirroring `mongoutil.PoolConfig`) and mount it as `Graph msgraph.EnvConfig` — `main.go:37-58` — so one default governs all six Graph consumers.
+2. **[high]** _Integration_ — Flip `GRAPH_TLS_INSECURE_SKIP_VERIFY` to `envDefault:"false"` — `main.go:44` — matching the owning package's own guidance ("Opt-in, dev/on-prem only… Never enable in production", `pkg/msgraph/msgraph.go:131-133`) and this service's Compose file.
+3. **[high]** _Architecture_ — Replace the CAS guard with one that only fails on a real membership change — `store_mongo.go:53` — filter on `{_id, needMemberSync: true, lastUpdatedDateTime: seen}` (the Graph-side change token) instead of the write stamp, and/or track a per-chat supersession count so a chat that loses the CAS repeatedly fails the run. Removes the silent-stall path.
+4. **[high]** _Test coverage_ — Raise measured coverage over 80% — merge the integration profile into the gate (`go test -tags=integration -coverprofile`) or exclude `main.go`'s wiring, then close the unit gaps below. — Without this the service is un-mergeable under CLAUDE.md §4 despite genuinely good tests.
+5. **[high]** _Code quality_ — Flip `GRAPH_TLS_INSECURE_SKIP_VERIFY` to `envDefault:"false"` — `main.go:44` — restores fail-closed behaviour and stops `GRAPH_CLIENT_SECRET` (and `GRAPH_PROXY_PASSWORD` on a Basic-auth proxy) riding an unverified connection to Azure AD. Update `main_test.go:29` with it.
+6. **[high]** _Code quality_ — Move the Graph TLS and proxy knobs into a `pkg/msgraph` config struct mounted as a named field, deleting the per-service `env`/`envDefault` tags in all five services — `main.go:44,49,57,58` — resolves the CLAUDE.md §Configuration violation and makes the default unfalsifiable.
+7. **[high]** _Maintainability_ — Move the Graph knobs into `pkg/msgraph` as an embeddable `msgraph.EnvConfig` (tenant/client/secret/TLS/proxy) and mount it as a named field in all six services — `main.go:37-58` — one place owns the env names, defaults and the proxy comment, and the `true`/`false` TLS split cannot recur.
+8. **[medium]** _Integration_ — Recompute the site from the authoritative roster: project `siteId` in `UsersByIDs` (`store_mongo.go:83`), re-run the `voteSiteID` plurality, and either write it or log a `site_vote_changed` WARN when it differs — `store_mongo.go:65`. Even log-only closes the blind spot.
+9. **[medium]** _Integration_ — Count and log unresolved members per chat in `buildMembers` (`syncer.go:99`) and add `membersUnresolved` to the run summary (`syncer.go:160`) so `teams-user-sync` lag is visible at the source.
+10. **[medium]** _Integration_ — Wire `pkg/obs.Init` in `run()` (`main.go:85`) with a shutdown in the deferred chain, or at minimum add the explicit "one-shot job, no obs" comment `teams-hr-sync/main.go:141` carries, so the omission is a decision rather than an oversight.
+
