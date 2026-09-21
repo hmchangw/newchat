@@ -114,7 +114,7 @@ const pingTimeout = 5 * time.Second
 // the setup — three services had, each with its own instrumentation.
 func dialCluster(ctx context.Context, addrs []string, password string, opts ...Option) (*redis.ClusterClient, error) {
 	cc := newConnectConfig(opts...)
-	c := redis.NewClusterClient(ClusterOptionsFor(addrs, password, cc.profile))
+	c := newProfiledClusterClient(ClusterOptionsFor(addrs, password, cc.profile), cc.profile)
 	if err := instrumentCluster(c, &cc); err != nil {
 		if closeErr := c.Close(); closeErr != nil {
 			slog.Warn("valkey cluster close after failed instrument", "error", closeErr)
