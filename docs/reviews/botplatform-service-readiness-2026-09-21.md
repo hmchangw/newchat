@@ -175,3 +175,19 @@ botplatform-service is competently built — clean logging, projected reads, a c
 - [medium] Either use `cfg.BcryptCost` (rehash-on-verify when the stored cost differs) or delete it and its validation (`config.go:37`, `main.go:44`).
 - [medium] Put the rate limiter before `requireBot` keyed on `x-user-id`/client IP (`routes.go:24`), so token-spray traffic is shed before it reaches Valkey and Mongo.
 - [low] Cache the bot's room→siteID routing decision behind a short-TTL L2 (pattern: `pkg/subauthcache`), removing one Mongo round trip from every bot message.
+
+## 8. Prioritized action list
+
+Ordered by severity (`critical` first), then by the dimension most likely to carry a correctness or contract cost (integration, architecture, coverage, code quality, performance, maintainability). Each item is a recommendation from the chapter named; the `file:line` and rationale are quoted from it.
+
+1. **[critical]** _Test coverage_ — Add `bot_forwarder` tests mirroring the existing `fakeRequester` pattern for `createRoom`/`addMembers`/`removeMembers` — `bot_forwarder.go:94-104` — asserting subject, `HeaderBotIdentity`, absence of message-ID headers, timeout→`handler_timeout`, and errcode pass-through.
+2. **[critical]** _Test coverage_ — Add a `natsDMEnsurer` unit test and a handler test driving `FindDMForBot` → `model.ErrSubscriptionNotFound` → ensure → forward — `dm_ensurer.go:35`, `bot_handlers.go:73-85` — covering ensure success, ensure errcode reply, ensure timeout, and the `default:` store-error branch.
+3. **[high]** _Integration_ — Pick one member-endpoint shape and make code and doc agree — `routes.go:69,72` vs `docs/client-api.md:8591-8592,8709-8710`. The design spec (`docs/superpowers/specs/2026-07-15-bot-messaging-pipeline-design.md:33-34`) matches the code, so amend §10.3/§10.7 to `/members/add` + `/members/remove`.
+4. **[high]** _Integration_ — Add `&& ee.Code.Valid()` (with an `errcode.Internal` fallback) at `bot_forwarder.go:87,146` and `dm_ensurer.go:66`, matching `broadcast-worker/parent_fetcher.go:68`. Removes a panic path and a recovered bare-500.
+5. **[high]** _Integration_ — Move `SessionsMaxPerAccount` into `pkg/session` as a `CapConfig`-style named field mounted by both botplatform-service and admin-service; delete the two duplicated tags (`config.go:34`, `admin-service/config.go:44`).
+6. **[high]** _Architecture_ — Make revocation bust the cache structurally: have `DeactivateAndRevoke`/`UpdateUserPasswordAndRevoke` route their deletes through `session.Store` (or return the deleted `_id`s) and call `sessioncache.BustMany` at `admin-service/handler.go:483`/`:701` — otherwise the whole L2 tier is a ~68-minute revocation hole for bots.
+7. **[high]** _Architecture_ — Replace the three hand-rolled transport switches with `natsutil.RequestFailure` — `bot_forwarder.go:79`, `:136`, `dm_ensurer.go:58` — and add an `ErrNoResponders` test case; a down bot-room-service should be a retryable 503, not a 500.
+8. **[high]** _Architecture_ — Split probes: keep `/healthz` unconditional and add `/readyz` doing the Mongo ping, mirroring `admin-service/routes.go`. Cite `handler.go:56`.
+9. **[high]** _Test coverage_ — Add integration coverage for `mongoSubscriptionStore` against `testutil.MongoDB` — `subscription_store.go:46-76` — seeding a real subscription doc so the `u._id` filter, the DM `idgen.BuildDMRoomID` key and the projection are pinned.
+10. **[high]** _Test coverage_ — Add a handler test with `sub.SiteID = "site-b"` ≠ `cfg.SiteID` asserting the forwarder receives the remote site — `bot_handlers.go:51`, `:168-170` — and a `FindForBot` → sentinel case asserting 403 `not_a_room_member` (`bot_handlers.go:180`).
+
