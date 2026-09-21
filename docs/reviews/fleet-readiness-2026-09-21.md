@@ -51,14 +51,19 @@ handling bug repeated in six jobs, index ownership that sits with readers
 instead of writers, and no per-operation timeouts anywhere.
 
 **On the score movement**: 17 services score lower than on 2026-09-01, 10 higher
-and 8 flat. Read that with care. Very little code got worse in three weeks; what
-changed is that this pass went deeper — several regressions are a reviewer
-finding a defect that existed in August and was missed, and the coverage
-dimension is now applied mechanically against the CLAUDE.md floor where the
-first pass was more lenient. The two movements that do reflect real change are
-`bot-message-worker` (−0.7), where the thread-partition bug was newly traced end
-to end, and `media-service`/`upload-service` (+0.2 each), which absorbed real
-fixes. Treat the deltas as a change in visibility, not a trend line.
+and 8 flat. Read that as a change in visibility, not a trend line — the deltas
+do not track the code. Ten services had no change at all in their own directory
+between the two audit trees, and seven of them still moved, including two of the
+four −0.3 drops. Mean absolute movement is 0.15 for untouched services against
+0.20 for substantially reworked ones: near-identical, which is the signature of
+reviewer variance rather than of the fleet getting worse. Total findings rose
+from 1,441 to 1,731, but `critical` went 24 → 23 and `high` 239 → 247 — all the
+growth is in `medium` and below, i.e. the same code read more closely. The
+dimension that did move for a real reason is **performance, +0.20 with 10
+services up**, tracking the `pkg/jsretry` ack-deadline heartbeat and the
+user-service, room-worker and broadcast-worker fixes that landed in between.
+Test coverage was *not* re-scored more strictly: its mean went 1.54 → 1.51 and
+only one service's grade changed.
 
 ## Scores
 
