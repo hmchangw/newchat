@@ -1389,3 +1389,21 @@ func TestUserInboxPrefix(t *testing.T) {
 	assert.Panics(t, func() { subject.UserInboxPrefix(">") })
 	assert.Panics(t, func() { subject.UserInboxPrefix("") })
 }
+
+func TestRetrySubjects(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"slow tier", subject.Retry("site1", "message-worker", subject.RetryTierSlow), "chat.retry.site1.message-worker.slow"},
+		{"replay tier", subject.Retry("site1", "message-worker", subject.RetryTierReplay), "chat.retry.site1.message-worker.replay"},
+		{"consumer wildcard", subject.RetryConsumerWildcard("site1", "broadcast-worker"), "chat.retry.site1.broadcast-worker.>"},
+		{"stream wildcard", subject.RetryWildcard("site1"), "chat.retry.site1.>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.got)
+		})
+	}
+}
