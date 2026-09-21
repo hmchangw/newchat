@@ -3419,7 +3419,7 @@ func TestHandlerEscalatesWhenFastBudgetSpent(t *testing.T) {
 		numDelivered: 4, // past FastSteps=3
 	}
 
-	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff[:3], errors.New("cassandra unavailable"))
+	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff, errors.New("cassandra unavailable"))
 
 	require.True(t, published, "delivery 4 must escalate rather than park another 12 minutes")
 	assert.Equal(t, "chat.retry.site1.message-worker.slow", gotSubj)
@@ -3441,7 +3441,7 @@ func TestHandlerStillNaksWithinFastBudget(t *testing.T) {
 		stream: "MESSAGES-CANONICAL-site1", seq: 1, numDelivered: 2,
 	}
 
-	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff[:3], errors.New("cassandra unavailable"))
+	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff, errors.New("cassandra unavailable"))
 
 	assert.True(t, msg.naked)
 	assert.False(t, msg.acked)
@@ -3483,7 +3483,7 @@ func TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane(t *testing.T) {
 	var escalated bool
 	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
-		withRetryLane(lane, jsretry.DefaultBackoff[:3]))
+		withRetryLane(lane, jsretry.DefaultBackoff))
 
 	msg := &fakeJSMsg{data: data, numDelivered: 4} // past FastSteps=3
 	h.HandleJetStreamMsg(context.Background(), msg, func() { escalated = true })

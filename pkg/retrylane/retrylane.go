@@ -70,8 +70,15 @@ func (l *Lane) WithEscalationHook(fn func()) *Lane {
 //   - within FastSteps      → NakWithDelay, in place
 //   - budget spent          → republish to RETRY, then Ack
 //
-// A failed republish falls back to a Nak: acking a message that was never
-// handed on would lose it silently.
+// backoff is the FULL schedule, never a pre-truncated prefix. Callers must not
+// slice it to FastSteps: jsretry.backoffFor walks only as far as this delivery,
+// so an in-place nak inside the fast budget already draws from the fast rungs
+// alone — truncating buys nothing there, and it silently shortens the one path
+// that does read past them. A failed republish falls back to a Nak (acking a
+// message that was never handed on would lose it silently) and must ride the
+// schedule the message would have had without the lane; on a prefix,
+// backoffFor would instead reuse the last fast rung for every later delivery
+// and burn the consumer's MaxDeliver long before its outage budget intends.
 func (l *Lane) Settle(ctx context.Context, msg Msg, backoff []time.Duration, err error) {
 	if !l.shouldEscalate(msg, err) {
 		jsretry.Settle(ctx, msg, backoff, err)

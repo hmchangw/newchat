@@ -3,6 +3,7 @@ package retrylane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -79,6 +80,32 @@ func (c ConsumerSettings) streamSettings() stream.ConsumerSettings {
 		BackOffFactor: c.BackOffFactor,
 		BackOffMax:    c.BackOffMax,
 	}
+}
+
+// Validate rejects a retry-lane configuration whose failure mode is silent.
+// Call it right after env.Parse, before anything binds: both errors below
+// produce a lane that looks configured and does not work, which an operator
+// only discovers from a backlog that never moves.
+//
+// MaxWorkers is checked whether or not the lane is enabled. The retry consumer
+// binds and drains regardless of the flag — that asymmetry is the rollback
+// story, since disabling the lane must not strand what is already parked — so a
+// worker count that wedges the drain is a fault in either state. message-worker
+// and notification-worker size their own semaphore from it, where 0 is an
+// unbuffered channel the consume loop blocks on forever and a negative value
+// panics in make; every service also derives PullMaxMessages from it.
+//
+// FastSteps is checked only when the lane is on, because nothing reads it when
+// the lane is off. A non-positive split short-circuits Lane.shouldEscalate, so
+// the service would report retry_lane_enabled=true and never escalate.
+func (s *Settings) Validate() error {
+	if s.Consumer.MaxWorkers < 1 {
+		return fmt.Errorf("RETRY_CONSUMER_MAX_WORKERS must be at least 1, got %d", s.Consumer.MaxWorkers)
+	}
+	if s.Enabled && s.FastSteps < 1 {
+		return fmt.Errorf("RETRY_LANE_FAST_STEPS must be at least 1 when the retry lane is enabled, got %d", s.FastSteps)
+	}
+	return nil
 }
 
 // DurableName is the retry consumer's durable for a service.

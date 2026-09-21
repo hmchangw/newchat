@@ -149,3 +149,57 @@ func TestSettingsConsumerMaxWorkersIsNotTheHotLaneDefault(t *testing.T) {
 		"reusing the hot loop's MAX_WORKERS default would make the process-wide "+
 			"in-flight cap 2×MaxWorkers, reached precisely during an incident")
 }
+
+// Validate is the guard against a retry lane that is configured "on" but cannot
+// do its job. Both failure modes are silent at runtime, which is why they are
+// startup errors rather than clamps.
+func TestSettingsValidate(t *testing.T) {
+	base := func() retrylane.Settings {
+		return retrylane.Settings{Enabled: true, FastSteps: 3,
+			Consumer: retrylane.ConsumerSettings{MaxWorkers: 10}}
+	}
+
+	t.Run("accepts a sane configuration", func(t *testing.T) {
+		s := base()
+		assert.NoError(t, s.Validate())
+	})
+
+	// message-worker and notification-worker size their retry semaphore from this
+	// value: make(chan struct{}, 0) is unbuffered, so the consume loop blocks on
+	// its first send and nothing parked on RETRY-{siteID} ever drains again.
+	t.Run("rejects a zero worker count", func(t *testing.T) {
+		s := base()
+		s.Consumer.MaxWorkers = 0
+		require.Error(t, s.Validate())
+		assert.Contains(t, s.Validate().Error(), "RETRY_CONSUMER_MAX_WORKERS")
+	})
+
+	t.Run("rejects a negative worker count", func(t *testing.T) {
+		s := base()
+		s.Consumer.MaxWorkers = -1
+		assert.Error(t, s.Validate(), "make(chan struct{}, negative) panics outright")
+	})
+
+	// The retry consumer binds and drains regardless of Enabled — that asymmetry is
+	// the rollback story — so an unusable worker count must fail even with the lane off.
+	t.Run("checks the worker count even when the lane is disabled", func(t *testing.T) {
+		s := base()
+		s.Enabled, s.Consumer.MaxWorkers = false, 0
+		assert.Error(t, s.Validate(), "a disabled lane still has to drain what is already parked")
+	})
+
+	// FastSteps <= 0 short-circuits Lane.shouldEscalate, so the lane reports itself
+	// enabled and silently never escalates — the worst of both configurations.
+	t.Run("rejects a non-positive fast-step split when enabled", func(t *testing.T) {
+		s := base()
+		s.FastSteps = 0
+		require.Error(t, s.Validate())
+		assert.Contains(t, s.Validate().Error(), "RETRY_LANE_FAST_STEPS")
+	})
+
+	t.Run("ignores the fast-step split when the lane is disabled", func(t *testing.T) {
+		s := base()
+		s.Enabled, s.FastSteps = false, 0
+		assert.NoError(t, s.Validate(), "FastSteps is unused while the lane is off")
+	})
+}

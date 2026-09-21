@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -153,6 +154,69 @@ func TestSettleNaksWhenPublishFails(t *testing.T) {
 	require.True(t, pub.called)
 	assert.False(t, msg.acked, "acking after a failed republish would silently lose the message")
 	assert.True(t, msg.naked, "fall back to in-place redelivery")
+}
+
+// fullBackoff mirrors jsretry.DefaultBackoff's shape: the three rungs the lane
+// keeps in place, plus the tail it relocates. Settle is documented to take the
+// FULL schedule — these three tests are that contract.
+var fullBackoff = []time.Duration{time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+
+// A failed republish must fall back onto the schedule the message would have
+// ridden without the lane. Naking on a pre-truncated fast slice instead makes
+// jsretry.backoffFor reuse the last fast rung (30s) for every later delivery,
+// which burns the consumer's MaxDeliver roughly ten times faster than the
+// outage budget it was sized for — and it does so exactly when the dependency
+// AND the retry stream are both failing.
+func TestSettlePublishFailureNaksOnTheFullSchedule(t *testing.T) {
+	pub := &capturedPublish{err: errors.New("stream unavailable")}
+	msg := newMsg(4) // first delivery past FastSteps=3
+	newLane(pub.fn()).Settle(context.Background(), msg, fullBackoff, errors.New("mongo down"))
+
+	require.True(t, msg.naked, "a failed republish must never Ack")
+	// jsretry jitters into [d/2, d]: the 2m rung gives [1m, 2m], the 30s rung [15s, 30s].
+	assert.Greater(t, msg.nakDelay, 30*time.Second,
+		"the fallback must ride the full schedule's 2m rung, not the last fast rung")
+	assert.LessOrEqual(t, msg.nakDelay, 2*time.Minute)
+}
+
+// The other half of the contract: handing Settle the full schedule must not
+// lengthen the in-place waits. It does not, because jsretry.backoffFor walks
+// only as far as NumDelivered — which is why passing the full schedule is safe
+// and pre-truncating it was never buying anything.
+func TestSettleInPlaceNaksStayOnTheFastRungs(t *testing.T) {
+	for _, tt := range []struct {
+		delivered uint64
+		want      time.Duration
+	}{
+		{1, time.Second},
+		{2, 5 * time.Second},
+		{3, 30 * time.Second},
+	} {
+		t.Run(fmt.Sprintf("delivery_%d", tt.delivered), func(t *testing.T) {
+			pub := &capturedPublish{}
+			msg := newMsg(tt.delivered)
+			newLane(pub.fn()).Settle(context.Background(), msg, fullBackoff, errors.New("mongo down"))
+
+			require.True(t, msg.naked)
+			require.False(t, pub.called, "still inside the fast budget")
+			assert.LessOrEqual(t, msg.nakDelay, tt.want, "reaching into the relocated tail would defeat the split")
+			assert.GreaterOrEqual(t, msg.nakDelay, tt.want/2, "equal jitter floors each wait at half the rung")
+		})
+	}
+}
+
+// With the lane off the message must ride the unmodified schedule, exactly as
+// it did before the lane existed — the flag is the rollback.
+func TestSettleDisabledNaksOnTheFullSchedule(t *testing.T) {
+	pub := &capturedPublish{}
+	lane := newLane(pub.fn())
+	lane.Enabled = false
+	msg := newMsg(4)
+	lane.Settle(context.Background(), msg, fullBackoff, errors.New("mongo down"))
+
+	require.True(t, msg.naked)
+	assert.False(t, pub.called)
+	assert.Greater(t, msg.nakDelay, 30*time.Second, "a disabled lane must not shorten the schedule")
 }
 
 func TestSettleDisabledIsPureJsretry(t *testing.T) {

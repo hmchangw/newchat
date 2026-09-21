@@ -135,6 +135,13 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
+	// A retry lane that cannot drain is worse than none: the failure is silent, and
+	// the consumer binds even with the lane off. See retrylane.Settings.Validate.
+	if err := cfg.Retry.Validate(); err != nil {
+		slog.Error("invalid retry lane config", "error", err)
+		os.Exit(1)
+	}
+
 	if err := cfg.Pool.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
@@ -488,7 +495,7 @@ func main() {
 	var wg sync.WaitGroup
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		guardedProcessor(broadcastProcessor(handler, retryLane, cfg.Retry.FastSteps)))
+		guardedProcessor(broadcastProcessor(handler, retryLane)))
 
 	// The retry consumer binds and drains regardless of cfg.Retry.Enabled (the rollback
 	// asymmetry from spec §4): disabling the lane stops new escalations onto RETRY-{siteID},
@@ -609,7 +616,7 @@ type messageProcessor func(msgCtx context.Context, msg jetstream.Msg)
 // broadcastProcessor builds the per-message processing closure: stamp the request ID, run
 // the handler, then settle via the retry lane (short first retry; malformed events Ack-drop;
 // budget-spent deliveries escalate to RETRY-{siteID} when the lane is enabled).
-func broadcastProcessor(handler *Handler, lane *retrylane.Lane, fastSteps int) messageProcessor {
+func broadcastProcessor(handler *Handler, lane *retrylane.Lane) messageProcessor {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		// X-Migration: live events are NOT filtered here — during the legacy→new backend release
 		// switch we still need broadcast to fan them out so live clients see the messages.
@@ -627,14 +634,11 @@ func broadcastProcessor(handler *Handler, lane *retrylane.Lane, fastSteps int) m
 		}
 		// The schedule is chosen from the error, not fixed: a downstream that is
 		// shedding must not be retried at LowLatencyBackoff's 200ms first rung.
-		// See settleBackoff. The retry lane then keeps only that schedule's fast
-		// rungs in place — truncating whichever curve settleBackoff picked, so a
-		// shedding downstream still gets its slower first rung.
+		// See settleBackoff. Settle takes the FULL curve: it walks only as far as
+		// this delivery, so the fast rungs are already what an in-place nak gets,
+		// and a failed republish can still fall back onto the relocated tail.
 		err := handler.HandleMessage(handlerCtx, msg.Data())
 		sched := settleBackoff(err)
-		if lane.Enabled && fastSteps > 0 && fastSteps < len(sched) {
-			sched = sched[:fastSteps]
-		}
 		// Derived per message: the hook closes over this delivery's own metrics
 		// recorder, so setting OnEscalate on the shared lane would race across the
 		// worker's message goroutines. msg is always the *natsmetrics.Message that

@@ -101,6 +101,13 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
+	// A retry lane that cannot drain is worse than none: the failure is silent, and
+	// the consumer binds even with the lane off. See retrylane.Settings.Validate.
+	if err := cfg.Retry.Validate(); err != nil {
+		slog.Error("invalid retry lane config", "error", err)
+		os.Exit(1)
+	}
+
 	if cfg.Mode != "default" && cfg.Mode != "teams" {
 		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
 		os.Exit(1)
@@ -248,20 +255,6 @@ func main() {
 			return err
 		},
 	}
-	// The fast rungs stay in place on the hot consumer; SlowBackoff's tail runs on the
-	// retry lane instead. Disabled (or misconfigured to a non-positive FastSteps, which
-	// also disables escalation in Lane.shouldEscalate), the handler keeps running the
-	// full schedule in place. The clamp on the upper bound guards the slice so a
-	// FastSteps above len(DefaultBackoff) cannot panic on the handler's first failure.
-	fastBackoff := jsretry.DefaultBackoff
-	if cfg.Retry.Enabled && cfg.Retry.FastSteps > 0 {
-		steps := cfg.Retry.FastSteps
-		if steps > len(jsretry.DefaultBackoff) {
-			steps = len(jsretry.DefaultBackoff)
-		}
-		fastBackoff = jsretry.DefaultBackoff[:steps]
-	}
-
 	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
 		// verbose-tracing intent ride onto downstream badge/inbox events.
@@ -280,7 +273,7 @@ func main() {
 			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 		}
 		return nil
-	}, withPersistenceMetrics(domainMetrics), withRetryLane(retryLane, fastBackoff))
+	}, withPersistenceMetrics(domainMetrics), withRetryLane(retryLane, jsretry.DefaultBackoff))
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)

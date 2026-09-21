@@ -96,6 +96,12 @@ func main() {
 		slog.Error("invalid valkey config", "error", err)
 		os.Exit(1)
 	}
+	// A retry lane that cannot drain is worse than none: the failure is silent, and
+	// the consumer binds even with the lane off. See retrylane.Settings.Validate.
+	if err := cfg.Retry.Validate(); err != nil {
+		slog.Error("invalid retry lane config", "error", err)
+		os.Exit(1)
+	}
 	if err := cfg.Pool.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
@@ -232,20 +238,6 @@ func main() {
 			return err
 		},
 	}
-	// The fast rungs stay in place on the hot consumer; SlowBackoff's tail runs on the
-	// retry lane instead. Disabled (or misconfigured to a non-positive FastSteps, which
-	// also disables escalation in Lane.shouldEscalate), the hot consumer keeps running
-	// the full schedule in place. The clamp on the upper bound guards the slice so a
-	// FastSteps above len(DefaultBackoff) cannot panic.
-	fastBackoff := jsretry.DefaultBackoff
-	if cfg.Retry.Enabled && cfg.Retry.FastSteps > 0 {
-		steps := cfg.Retry.FastSteps
-		if steps > len(jsretry.DefaultBackoff) {
-			steps = len(jsretry.DefaultBackoff)
-		}
-		fastBackoff = jsretry.DefaultBackoff[:steps]
-	}
-
 	// The retry consumer binds whenever RETRY-{siteID} exists — see the
 	// rollback-asymmetry note above. The one tolerated failure is the stream
 	// simply not being provisioned while the lane is off: phase 1 ships dark,
@@ -436,9 +428,9 @@ func main() {
 						return
 					}
 					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
-					// perMsgLane escalates to RETRY-{siteID} once fastBackoff is spent (when enabled);
+					// perMsgLane escalates to RETRY-{siteID} once the fast rungs are spent (when enabled);
 					// disabled, this is exactly jsretry.Settle over the full schedule.
-					perMsgLane.Settle(handlerCtx, msg, fastBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
+					perMsgLane.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 				})
 			}(msgCtx, msg)
 		}
