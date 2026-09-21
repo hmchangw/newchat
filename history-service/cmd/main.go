@@ -190,9 +190,9 @@ func main() {
 	// budget, not any error path, that then sheds requests Cassandra could have
 	// served. Separate instances because a tier whose values are large can time
 	// out against a healthy Valkey, and must not switch off the others.
-	subAuthL2 := valkeyutil.Breakered(subValkey, cfg.ValkeyBreaker.New(ctx, "subauthl2"))
-	dekL2 := valkeyutil.Breakered(subValkey, cfg.ValkeyBreaker.New(ctx, "atrestdekl2"))
-	roomTimesL2 := valkeyutil.Breakered(subValkey, cfg.ValkeyBreaker.New(ctx, "roomtimesl2"))
+	subAuthL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "subauthl2"))
+	dekL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "atrestdekl2"))
+	roomTimesL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "roomtimesl2"))
 
 	var (
 		cipher        atrest.Cipher

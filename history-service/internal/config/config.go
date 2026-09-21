@@ -128,14 +128,6 @@ type Config struct {
 	// room repository, each with its own instance off these shared knobs.
 	Breaker mongoutil.BreakerConfig `envPrefix:"HISTORY_"`
 
-	// ValkeyBreaker fences the L2 reads themselves, which the Mongo breakers
-	// above deliberately do not: those sit inside Load, on the far side of the
-	// cache, so an open one skips Mongo while the Valkey read still happens.
-	// Each tier gets its own instance off these shared knobs — one breaker
-	// across tiers would let a single tier's oversized values switch the whole
-	// cache off and dump its read load onto Mongo.
-	ValkeyBreaker valkeyutil.BreakerConfig `envPrefix:"HISTORY_"`
-
 	// DEKL2 is the Valkey L2 retention for Vault-wrapped at-rest DEKs — the
 	// outage buffer for decrypting history. The in-process DEK cache expires on
 	// a fixed TTL stamped at fetch time, so without this L2 an active room loses
@@ -299,9 +291,6 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2.TTL)
 	}
 	if err := cfg.Breaker.Validate("HISTORY_"); err != nil {
-		return err
-	}
-	if err := cfg.ValkeyBreaker.Validate("HISTORY_"); err != nil {
 		return err
 	}
 	if cfg.RoomTimesL2.TTL < 0 {

@@ -55,11 +55,19 @@ func (b BreakerConfig) Validate(envPrefix string) error {
 // unlike a Mongo store there is no per-call-site question here: a cache miss is
 // never evidence of an unwell Valkey.
 func (b BreakerConfig) New(ctx context.Context, name string, opts ...circuitbreaker.Option) *circuitbreaker.Breaker {
+	// Clamp rather than trust Validate: it is opt-in and only three of the
+	// fourteen Valkey consumers call it, so this is the one place that sees
+	// every configured value. A negative budget degrades to no fencing — the
+	// behaviour before this existed — instead of to something undefined.
+	fails, cooldown := b.Fails, b.Cooldown
+	if fails < 0 || cooldown < 0 {
+		fails = 0
+	}
 	base := []circuitbreaker.Option{
 		circuitbreaker.Tracked(ctx, name),
 		circuitbreaker.WithFailurePredicate(BreakerFailure()),
 	}
-	return circuitbreaker.New(b.Fails, b.Cooldown, append(base, opts...)...)
+	return circuitbreaker.New(fails, cooldown, append(base, opts...)...)
 }
 
 // BreakerFailure is the failure predicate for a Valkey tier: every error counts
