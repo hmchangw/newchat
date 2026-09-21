@@ -204,6 +204,18 @@ Content access is not absent, it is **relocated to a privileged, audited action*
 `dlqreplay inspect` reads the body from the DLQ stream for an operator who has stream
 access, rather than every DLQ reader seeing a stored copy.
 
+That sentence is only true if the stream boundary enforces it, so phase 4 must ship the
+boundary with the tool — "ordinary admin authz" protects the content-free Mongo triage
+record, not `DLQ-{siteID}`, which holds plaintext for the whole recovery window:
+
+- NATS permissions on `DLQ-{siteID}` **deny direct human subscribe/get**; only the
+  `dlq-worker` and `dlqreplay` credentials may read it.
+- `dlqreplay inspect` authorizes the operator and emits an audit record (operator, record
+  id, timestamp) **before** fetching the body, so every plaintext read has a trail.
+
+Without both, a reader with generic stream access sees every dead-lettered body and the
+"privileged, audited" claim above is aspirational rather than enforced.
+
 ### 3.8 Dead-letter: stream first, Mongo second
 
 `DLQ-{siteID}` is its own stream, separate from RETRY. RETRY is fully consumed; a DLQ is
@@ -317,8 +329,16 @@ specified, not left implied.
    2. direct-get the DLQ stream message at that sequence → body + `X-Retry-*` headers
    3. republish the **unmodified body** to `chat.retry.{siteID}.{consumer}.replay`,
       `X-Retry-Attempt` reset to 0, origin headers and `requestID`/traceparent preserved,
-      operator identity stamped
-   4. mark the record `replayed` with timestamp and operator
+      operator identity stamped. The `Nats-Msg-Id` **must be replay-specific** — the
+      escalation id of §3.5 is `{origin stream}:{origin seq}:{consumer}`, which a replay
+      would reproduce exactly, so inside the `Duplicates` window JetStream would answer
+      with a duplicate ack and queue nothing. Derive it from the replay operation
+      (`…:{consumer}:replay:{record id}`) so an intentional replay is never mistaken for
+      the crash-retry the dedup id exists to suppress.
+   4. **only if the publish ack reports a new message**, mark the record `replayed` with
+      timestamp and operator. A duplicate ack means nothing was queued and the handler
+      will not run again; recording success there would report a replay that never
+      happened.
 7. **The existing retry consumer picks it up** — already bound to
    `chat.retry.{siteID}.{consumer}.>`, so a replay is an ordinary message to it, same
    handler, no special path. Success acks; failure runs the normal slow schedule and returns
@@ -397,8 +417,11 @@ replication and dedup are ops-owned, as with OUTBOX's `R3 + file` at
 `docs/design/2026-07-05-membership-federation-durability.md:39`. These cannot be enforced
 from this repo:
 
-1. **`RETRY-{siteID}` `Duplicates` ≥ the escalation window.** §3.5's exactly-once escalation
-   silently degrades to at-least-once if this is set too short.
+1. **`RETRY-{siteID}` `Duplicates` ≥ the escalation window.** §3.5's **duplicate-suppression
+   guarantee** silently degrades if this is set too short: a crash between publish and Ack
+   re-escalates, and only the dedup window makes that second publish a no-op. Handler
+   processing is at-least-once either way — nothing here claims exactly-once, and §10 says
+   so explicitly.
 2. **`DLQ-{siteID}` `MaxAge` = the recovery window. Proposed default: 90 days.** This is the
    one number in the design that is a **data-governance decision, not an engineering one** —
    it is how long dead-lettered user message content is retained, and it must be signed off
@@ -459,9 +482,13 @@ Coverage floor 80%, 90%+ for `pkg/retrylane` per CLAUDE.md.
 
 ## 9. Documentation changes in the same PR
 
-- `tools/observability/METRICS.md:101` — the "Not healed — abandoned … no DLQ" row becomes
-  false for participating consumers and would actively mislead an on-call engineer.
-- CLAUDE.md §6 "JetStream Redelivery Backoff" — documents two levers; there are now three.
+- `tools/observability/METRICS.md` — the "Not healed — abandoned … no DLQ" row stays
+  **true and must stay documented** until phase 4 ships. This PR adds the retry lane but
+  no DLQ, so a message that exhausts the retry lane's own `MaxDeliver` is still abandoned
+  with no dead-letter record. Removing the row while that remains the case is what would
+  mislead an on-call engineer. Mark it phase 4; revisit when `dlq-worker` lands.
+- CLAUDE.md §6 "JetStream Redelivery Backoff" — add `pkg/retrylane` to the levers listed
+  there (four once `jsretry.Heartbeat` from #501 is counted).
 - No `docs/client-api.md` change: nothing client-facing moves.
 
 ## 10. Non-goals
