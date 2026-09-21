@@ -39,6 +39,11 @@ const (
 	OutcomeTerm             Outcome = "term"
 	OutcomeLeftPending      Outcome = "left_pending"
 	OutcomeHandlerCancelled Outcome = "handler_cancelled"
+
+	// OutcomeEscalated is an Ack that handed the message to the RETRY lane
+	// rather than completing it. It must not be counted as `ack`: the work is
+	// not done, it moved. See pkg/retrylane.
+	OutcomeEscalated Outcome = "escalated"
 )
 
 type EventType string
@@ -465,6 +470,11 @@ func (m *Message) NakWithDelay(delay time.Duration) error {
 	return err
 }
 func (m *Message) Term() error { err := m.Msg.Term(); m.finish(OutcomeTerm, err); return err }
+
+// Escalated records that this delivery was Acked because pkg/retrylane
+// republished it onto the RETRY stream. The caller Acks the message itself;
+// this only fixes the label, so the escalation does not read as a success.
+func (m *Message) Escalated() { m.finishWithOutcome(m.ctx, OutcomeEscalated) }
 
 // TermWithReason forwards the caller's free-text reason to JetStream but never
 // to a label — the terminal metric uses the bounded `permanent` reason.
