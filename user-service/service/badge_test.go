@@ -510,3 +510,59 @@ func TestNew_WiresBadgeSeedFanoutFromConfig(t *testing.T) {
 
 	assert.Equal(t, 3, svc.badgeSeedFanout())
 }
+
+// A budget spent while a seed is already PAST its local aggregate leaves
+// unreadRooms degraded: every remaining cross-site RPC is skipped, so the ids
+// are local-only. That is an UNDERCOUNT, not a partial-but-honest answer —
+// stamped into the push it shows a badge missing every cross-site unread room.
+// Absence is the correct degradation here (the client refreshes the true count
+// on open), and it is what every other failure in this path already does.
+func TestBadgeCountBatch_BudgetSpentDuringSeed_CrossSiteUndercountAbsent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomClient(ctrl)
+	cctx, cancel := context.WithCancel(context.Background())
+	c := ctx("", "site-a")
+	c.SetContext(cctx)
+	// The aggregate lands, then the handler deadline elapses — so unreadRooms
+	// skips site-b and returns the local room only, flagged degraded.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]models.ActiveSubscription, error) {
+			cancel()
+			return []models.ActiveSubscription{
+				localUnreadSub("alice", "r-local", "site-a"),
+				crossSiteSub("r-remote", "site-b"),
+			}, nil
+		})
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	badge := &fakeBadgeCache{}
+	svc := newBadgeService(t, subs, badge)
+	svc.rooms = rooms
+
+	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r-trigger", Accounts: []string{"alice"}})
+	require.NoError(t, err, "one account's degradation must not fail the batch")
+	assert.NotContains(t, resp.Counts, "alice",
+		"a cancellation-degraded result undercounts the cross-site rooms — it must degrade to absence, not ship a wrong badge")
+	assert.Empty(t, badge.seedCalls, "a degraded compute must not stamp the marker")
+}
+
+// The absence above is scoped to a DEGRADED result. An account whose rooms are
+// all local is complete even when the budget expires mid-seed, so it must still
+// answer — cancellation is not itself a reason to drop a correct count.
+func TestBadgeCountBatch_BudgetSpentDuringSeed_LocalOnlyStillAnswers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	cctx, cancel := context.WithCancel(context.Background())
+	c := ctx("", "site-a")
+	c.SetContext(cctx)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]models.ActiveSubscription, error) {
+			cancel()
+			return []models.ActiveSubscription{localUnreadSub("alice", "r-local", "site-a")}, nil
+		})
+	svc := newBadgeService(t, subs, &fakeBadgeCache{})
+
+	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r-trigger", Accounts: []string{"alice"}})
+	require.NoError(t, err)
+	assert.Equal(t, 2, resp.Counts["alice"], "a complete local-only result still answers (r-local ∪ r-trigger)")
+}

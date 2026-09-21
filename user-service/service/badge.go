@@ -49,11 +49,10 @@ func (s *UserService) BadgeCountBatch(c *natsrouter.Context, req model.BadgeCoun
 		// Once the shared request budget is spent, stop STARTING recomputes: run
 		// against a dead context they would only hit the heavy aggregate, fail at
 		// connection checkout with a misleading pool error, and degrade to absence
-		// anyway. Seeds already in flight are left to finish, and how far along
-		// they are decides the outcome: one past the aggregate still answers (a
-		// dead context only marks its cross-site half degraded), while one still
-		// inside the aggregate fails on it and degrades to absence — logging the
-		// same misleading pool error this guard avoids for the unstarted.
+		// anyway. Seeds already in flight are left to finish, and what they have
+		// resolved decides the outcome: an account whose rooms are all local holds
+		// a complete answer and still answers, while one still inside the aggregate
+		// — or left short of its cross-site half — degrades to absence.
 		if c.Err() != nil {
 			break
 		}
@@ -74,9 +73,16 @@ func (s *UserService) BadgeCountBatch(c *natsrouter.Context, req model.BadgeCoun
 				slog.WarnContext(c, "badge seed degraded", "account", account, "room_id", req.RoomID, "request_id", natsutil.RequestIDFromContext(c), "error", err)
 				return
 			}
-			// A partial result must not be cached (it would stamp the freshness
-			// marker); answer from it directly instead.
+			// Degraded drops some site's rooms, so it is never cached — that would
+			// stamp the freshness marker on a knowingly-partial set. A spent budget
+			// skipped EVERY remaining site unattempted, understating by an unknown
+			// amount, so absent it rather than ship a wrong badge to the device (the
+			// client refreshes on open); an unreachable peer under a live budget
+			// still answers best-effort, as before.
 			if degraded {
+				if c.Err() != nil {
+					return
+				}
 				counts[i], answered[i] = cappedUnion(ids, req.RoomID, s.badgeCap), true
 				return
 			}
