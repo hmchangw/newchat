@@ -213,7 +213,7 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 				lastAttempt.Store(attempt)
 				attemptVisible.Store(true)
 			}
-			process(msgCtx, tracked)
+			process(msgCtx, tracked, tracked.Escalated)
 			tracked.Finish(msgCtx)
 		}
 	}()
