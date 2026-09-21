@@ -101,16 +101,21 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
-	// A retry lane that cannot drain is worse than none: the failure is silent, and
-	// the consumer binds even with the lane off. See retrylane.Settings.Validate.
-	if err := cfg.Retry.Validate(); err != nil {
-		slog.Error("invalid retry lane config", "error", err)
-		os.Exit(1)
-	}
-
 	if cfg.Mode != "default" && cfg.Mode != "teams" {
 		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
 		os.Exit(1)
+	}
+
+	// A retry lane that cannot drain is worse than none: the failure is silent, and
+	// the consumer binds even with the lane off (see retrylane.Settings.Validate).
+	// Default mode only — teams mode neither binds the retry consumer nor settles
+	// through the lane, so failing it over a knob it never reads would take the
+	// Teams-migration worker down for a value that cannot affect it.
+	if cfg.Mode == "default" {
+		if err := cfg.Retry.Validate(); err != nil {
+			slog.Error("invalid retry lane config", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	if err := cfg.Pool.Validate(); err != nil {
@@ -399,6 +404,7 @@ func main() {
 		// The retry lane does not escalate again in phases 0-3, so it settles with
 		// plain jsretry.Settle on the slow-rung schedule relocated off the hot consumer.
 		slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)
+		retryProcess := retryProcessor(handler, slowBackoff)
 
 		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.Retry.Consumer.MaxWorkers))
 		if err != nil {
@@ -441,12 +447,7 @@ func main() {
 						<-retrySem
 						wg.Done()
 					}()
-					jobguard.Run(msg, func() {
-						handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-						handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-						logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
-						jsretry.Settle(handlerCtx, msg, slowBackoff, handler.process(handlerCtx, msg))
-					})
+					jobguard.Run(msg, func() { retryProcess(msgCtx, msg) })
 				}(msgCtx, msg)
 			}
 		}()
@@ -519,6 +520,27 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 	cc.Durable = defaultConsumerDurable
 	cc.FilterSubjects = []string{subject.MsgCanonicalCreated(siteID)}
 	return cc
+}
+
+// retryProcessor is the retry lane's per-message body, named rather than inlined
+// so the redelivery stamping below is covered by a test instead of living only
+// inside main.
+//
+// natsutil.WithRedelivery is unconditional, and StampRedelivery would be wrong
+// here. A message only reaches this lane after the hot consumer already ran the
+// handler FastSteps+1 times, but on the RETRY stream its own NumDelivered
+// restarts at 1 — so StampRedelivery, which reads that counter, would report a
+// first delivery. message-worker's thread-reply writer keys a NON-idempotent
+// tcount increment off natsutil.IsRedelivery (store_cassandra.go), so an
+// unstamped retry delivery counts the same reply a second time.
+func retryProcessor(handler *Handler, slowBackoff []time.Duration) func(context.Context, jetstream.Msg) {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+		handlerCtx = natsutil.WithRedelivery(handlerCtx)
+		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+		jsretry.Settle(handlerCtx, msg, slowBackoff, handler.process(handlerCtx, msg))
+	}
 }
 
 // canonicalProcessor returns the consume loop's per-message body: subject
