@@ -263,11 +263,8 @@ func TestHandler_ProcessMessage(t *testing.T) {
 					Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 				// Thread-sub inbox routing (single lookup); fanOutThreadUnread resolves
 				// its recipients in one batch.
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-2", gomock.Any(), now).Return(nil)
 				ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-1", "alice", now).Return(nil)
@@ -286,11 +283,8 @@ func TestHandler_ProcessMessage(t *testing.T) {
 					Return(&model.ThreadRoom{ID: "tr-1"}, false, nil)
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-1").
 					Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-2", gomock.Any(), now).Return(nil)
 				ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-1", "alice", now).Return(nil)
@@ -819,11 +813,8 @@ func TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent(t *testing.T) {
 		Return(&model.ThreadRoom{ID: "tr-99"}, false, nil)
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 	mockUserStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 		Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)
 	mockThreadStore.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-99", "alice", now).Return(nil)
@@ -929,10 +920,9 @@ func TestHandler_ProcessMessage_ThreadReply_AdvancesReplierLastSeen(t *testing.T
 		ts.EXPECT().EnsureThreadRoom(gomock.Any(), gomock.Any()).Return(&model.ThreadRoom{ID: "tr-77"}, false, nil)
 		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 		if !migration {
-			us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 			us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 				Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-			ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil).Times(2)
+			ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 			ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-parent", []string{"parent-user"}).Return(nil)
 		}
 		ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-77", "msg-reply", gomock.Any(), now).Return(nil)
@@ -1124,7 +1114,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:   "subsequent reply — upserts parent and replier subscriptions and updates last message",
+			name:   "subsequent reply — upserts the replier subscription only and updates last message",
 			msg:    msg,
 			siteID: "site-a",
 			setupMocks: func(store *MockStore, ts *MockThreadStore) {
@@ -1132,13 +1122,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 					Return(&model.ThreadRoom{ID: "tr-existing"}, false, nil)
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 					Return(parentSender, nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).
-					DoAndReturn(func(_ context.Context, sub *model.ThreadSubscription) error {
-						assert.Equal(t, "tr-existing", sub.ThreadRoomID)
-						assert.Equal(t, "u-parent", sub.UserID)
-						assert.Nil(t, sub.LastSeenAt, "parent's LastSeenAt should be nil on init")
-						return nil
-					})
+				// The parent author's subscription is NOT re-upserted: gomock fails the
+				// test on a second call, which is the assertion.
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, sub *model.ThreadSubscription) error {
 						assert.Equal(t, "tr-existing", sub.ThreadRoomID)
@@ -1149,13 +1134,9 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).
 					Return(nil)
 			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
-			},
 		},
 		{
-			name: "subsequent reply — same user as parent — upserts one subscription and updates last message",
+			name: "subsequent reply — same user as parent — writes no subscription and updates last message",
 			msg: &model.Message{
 				ID:                    "msg-reply",
 				RoomID:                "r1",
@@ -1171,17 +1152,10 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 					Return(&model.ThreadRoom{ID: "tr-existing"}, false, nil)
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 					Return(parentSender, nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).
-					DoAndReturn(func(_ context.Context, sub *model.ThreadSubscription) error {
-						assert.Equal(t, "u-parent", sub.UserID)
-						return nil
-					})
+				// Self-reply: the replier IS the parent author, whose subscription already
+				// exists from the first reply, so no thread_subscriptions write happens.
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).
 					Return(nil)
-			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 			},
 		},
 		{
@@ -1225,24 +1199,6 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:   "subsequent reply — UpsertThreadSubscription for parent fails — returns error",
-			msg:    msg,
-			siteID: "site-a",
-			setupMocks: func(store *MockStore, ts *MockThreadStore) {
-				ts.EXPECT().EnsureThreadRoom(gomock.Any(), gomock.Any()).
-					Return(&model.ThreadRoom{ID: "tr-existing"}, false, nil)
-				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
-					Return(parentSender, nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).
-					Return(errors.New("mongo: write error"))
-			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
-			},
-			wantErr: true,
-		},
-		{
 			name:   "subsequent reply — UpsertThreadSubscription for replier fails — returns error",
 			msg:    msg,
 			siteID: "site-a",
@@ -1251,13 +1207,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 					Return(&model.ThreadRoom{ID: "tr-existing"}, false, nil)
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 					Return(parentSender, nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).
 					Return(errors.New("mongo: write error"))
-			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 			},
 			wantErr: true,
 		},
@@ -1271,13 +1222,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 					Return(parentSender, nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).
 					Return(errors.New("mongo: write error"))
-			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 			},
 			wantErr: true,
 		},
@@ -1369,14 +1315,9 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 					Return(&model.ThreadRoom{ID: "tr-existing"}, false, nil)
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(parentSender, nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).Return(nil)
 				// No UpdateParentMessageThreadRoomID expectation: the stamp is immutable and
 				// written once on the first reply, so gomock fails the test if it is re-issued.
-			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 			},
 		},
 		{
@@ -1429,7 +1370,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			expectReplierInsert: true,
 		},
 		{
-			name:   "subsequent reply — parent user not found in userStore — still upserts parent + replier locally, skips parent inbox",
+			name:   "subsequent reply — a userStore outage cannot fail the reply — no parent owner-site lookup",
 			msg:    msg,
 			siteID: "site-a",
 			setupMocks: func(store *MockStore, ts *MockThreadStore) {
@@ -1437,13 +1378,6 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 					Return(&model.ThreadRoom{ID: "tr-existing"}, false, nil)
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 					Return(parentSender, nil)
-				// Parent upsert still runs (independent of owner-site lookup);
-				// only the cross-site inbox publish is gated.
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).
-					DoAndReturn(func(_ context.Context, sub *model.ThreadSubscription) error {
-						assert.Equal(t, "u-parent", sub.UserID)
-						return nil
-					})
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, sub *model.ThreadSubscription) error {
 						assert.Equal(t, "u-replier", sub.UserID)
@@ -1452,27 +1386,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).
 					Return(nil)
 			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(nil, fmt.Errorf("wrap: %w", userstore.ErrUserNotFound))
-			},
-		},
-		{
-			name:   "subsequent reply — parent user lookup DB error — returns error",
-			msg:    msg,
-			siteID: "site-a",
-			setupMocks: func(store *MockStore, ts *MockThreadStore) {
-				ts.EXPECT().EnsureThreadRoom(gomock.Any(), gomock.Any()).
-					Return(&model.ThreadRoom{ID: "tr-existing"}, false, nil)
-				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
-					Return(parentSender, nil)
-				// Lookup error short-circuits — no upserts, no UpdateThreadRoomLastMessage.
-			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(nil, errors.New("mongo: connection refused"))
-			},
-			wantErr: true,
+			// No extraUserStoreSetup at all: the parent owner-site lookup is gone, so a
+			// userStore that would have errored is never consulted on this path.
 		},
 		{
 			name:   "first reply — parent user lookup DB error — returns error",
@@ -1809,44 +1724,39 @@ func TestHandler_SubsequentReply_InboxPublishes(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	parentSender := &cassParticipant{ID: "u-parent", Account: "parent-user"}
-	parentUserAtA := &model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}
-	parentUserAtC := &model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-c"}
 
+	// Only the replier's subscription is written on this path, so only the replier's
+	// home site can draw an inbox publish — the parent author's site is irrelevant here
+	// (their subscription, and its inbox copy, were written on the first reply).
 	tests := []struct {
 		name              string
 		replierSite       string
-		parentUser        *model.User
+		parentSite        string
 		wantPublishToSite map[string]int
 	}{
 		{
-			name:              "both local — no publish",
+			name:              "replier local — no publish",
 			replierSite:       "site-a",
-			parentUser:        parentUserAtA,
+			parentSite:        "site-a",
 			wantPublishToSite: map[string]int{},
 		},
 		{
 			name:              "replier remote — one publish",
 			replierSite:       "site-b",
-			parentUser:        parentUserAtA,
+			parentSite:        "site-a",
 			wantPublishToSite: map[string]int{"site-b": 1},
 		},
 		{
-			name:              "parent remote — one publish",
+			name:              "parent remote, replier local — no publish",
 			replierSite:       "site-a",
-			parentUser:        parentUserAtC,
-			wantPublishToSite: map[string]int{"site-c": 1},
+			parentSite:        "site-c",
+			wantPublishToSite: map[string]int{},
 		},
 		{
-			name:              "both remote, different sites — two publishes",
+			name:              "both remote — one publish, to the replier's site only",
 			replierSite:       "site-b",
-			parentUser:        parentUserAtC,
-			wantPublishToSite: map[string]int{"site-b": 1, "site-c": 1},
-		},
-		{
-			name:              "both remote, same site — two publishes to that site",
-			replierSite:       "site-b",
-			parentUser:        &model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-b"},
-			wantPublishToSite: map[string]int{"site-b": 2},
+			parentSite:        "site-c",
+			wantPublishToSite: map[string]int{"site-b": 1},
 		},
 	}
 
@@ -1859,8 +1769,8 @@ func TestHandler_SubsequentReply_InboxPublishes(t *testing.T) {
 			ts.EXPECT().AddReplyAccounts(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 			store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(parentSender, nil)
-			us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").Return(tt.parentUser, nil)
-			ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
+			// No FindUserByAccount expectation for the parent: gomock fails the test if the
+			// dropped owner-site lookup comes back.
 			ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 			ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).Return(nil)
 
@@ -1880,6 +1790,7 @@ func TestHandler_SubsequentReply_InboxPublishes(t *testing.T) {
 				CreatedAt:             now,
 				ThreadParentMessageID: "msg-parent",
 			}
+			require.NotEmpty(t, tt.parentSite, "each case fixes the parent's home site to show it does not matter")
 
 			existingRoom := &model.ThreadRoom{ID: "tr-existing"}
 			roomID, _, err := h.handleSubsequentThreadReply(context.Background(), msg, "site-a", existingRoom, replier, now, false)
@@ -1905,8 +1816,6 @@ func TestHandler_SubsequentReply_InboxPublishError_NAKs(t *testing.T) {
 
 	store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-		Return(&model.User{ID: "u-parent", SiteID: "site-c"}, nil)
 	ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 
 	boom := errors.New("publish boom")
@@ -2396,11 +2305,9 @@ func TestHandler_ProcessMessage_LegacyThreadRoom_ParentAuthorGetsUnread(t *testi
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 	// Thread-sub path resolves the parent's home site; fanOutThreadUnread
 	// resolves its recipients in one batch.
-	us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "parent-user"}).
 		Return([]model.User{{ID: "u-bob", Account: "bob", SiteID: "site-a"}, {ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-	ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil).Times(2)
+	ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-legacy", "msg-reply", gomock.Any(), now).Return(nil)
 	ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-legacy", "alice", now).Return(nil)
 	// The unread mark must reach BOTH the pre-existing follower and the
@@ -2791,11 +2698,8 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 			Return(&model.ThreadRoom{ID: "tr-1"}, false, nil)
 		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 			Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-		us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-			Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 			Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-reply", gomock.Any(), now).Return(nil)
 		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-1", "alice", now).Return(nil)
@@ -2863,11 +2767,8 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 			Return(&model.ThreadRoom{ID: "tr-1"}, false, nil)
 		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 			Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-		us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-			Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 			Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-reply", gomock.Any(), now).Return(nil)
 		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-1", "alice", now).Return(nil)
@@ -3047,11 +2948,8 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 		Return(&model.ThreadRoom{ID: "tr-99"}, false, nil)
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 	mockUserStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 		Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
-	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)
 	mockThreadStore.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-99", "alice", now).Return(nil)
