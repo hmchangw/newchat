@@ -78,3 +78,29 @@ Coverage measures 78.9% — the closest of the family to the floor, and the enti
 - [medium] Bound the scan (`mongoutil.WithLimit` plus `_id`-keyset resume, reusing the existing sort) — `store_mongo.go:34-36` — caps per-run memory and run time independent of backlog size.
 - [low] Mount `Pool mongoutil.PoolConfig` and pass `mongoutil.WithPool(cfg.Pool)` to both connects — `config.go:14-30`, `main.go:74,80` — aligns with the sibling job and lets ops cap a CronJob that runs alongside live traffic.
 - [low] Fail startup when `TEAMS_VERIFY_SITE_URLS` omits a known peer, or lift the registry into a small shared package used by both this job and portal-service — `config.go:35-49` — converts a silent per-run skip into a deploy-time error.
+
+## 4. Test coverage — score 2
+
+### Evidence
+
+- [high] coverage below repo minimum 80%, currently 78.9% (135/171 stmts) — `teams-room-verify/main.go:30` — CLAUDE.md §4 sets an 80% floor. The entire shortfall is two files: `main.go` 8/31 (25.8%) and `store_mongo.go` 0/13. Every other file is 100%: `runner.go` 100/100, `client.go` 11/11, `config.go` 16/16.
+- [high] `run()`'s whole dependency-wiring half is 0% — `teams-room-verify/main.go:71` — cov.out shows blocks `71.2,75.16` through `95.2,96.12` all at count 0: signal context, both Mongo connects, `newMongoStore`, `newRunner`, `r.run(ctx)`, and both error wraps. The three `main_test.go` tests all bail in the first 15 lines (parse/validate/parseSiteURLs), so nothing ever proves the store and runner are wired to the right clients, DB name, or timeout. `testutil.MongoURI(t)` (`pkg/testutil/mongo.go:60`) plus an `httptest` inspector makes this directly testable — the pattern the data-migration pipelines describe as "start()/lifecycle … only reachable with real Mongo".
+- [high] the only tests for both store methods are integration-tagged and CI never runs them — `teams-room-verify/deploy/azure-pipelines.yml:45` — the step is `go test ./$(SERVICE_DIR)/... -v -race` with no `-tags=integration` and no coverage gate, so `ListChatsNeedingVerify` (`store_mongo.go:31`), `MarkVerified` (`store_mongo.go:45`) and `newMongoStore` (`store_mongo.go:22`) are never executed by any pipeline. `store_mongo_test.go` itself is fully compliant (build tag, `package main`, `testutil.MongoDB`, `TestMain → testutil.RunTests` at line 17) — it is just unreachable. `data-migration/oplog-connector/deploy/azure-pipelines.yml:48-55` already has the fix in-repo.
+- [medium] the documented SIGTERM-abort behaviour has no test — `teams-room-verify/runner.go:64` — `main.go:68-71` claims the run "aborts between operations instead of being killed mid-batch", but `run()` never checks `ctx.Err()` or selects on `ctx.Done()` between batches, and no test passes a canceled context. Whatever the real behaviour is (queued batches still dispatch and fail inside `verify`), it is unverified.
+- [low] unsynchronized shared state in a concurrent test — `teams-room-verify/runner_test.go:262` — the `DoAndReturn` closure appends to `marked` under no lock, and gomock runs actions *outside* `ctrl.mu` (`go.uber.org/mock@v0.6.0/gomock/controller.go:230-237`). With `MaxWorkers: 4` and two sites this is a data race; `-race` passes today only because site-a's verifier errors before reaching `MarkVerified`. The same pattern at lines 106, 138, 170, 326 is single-batch and safe by accident, not by construction.
+- [low] `planBatches` boundary conditions untested — `teams-room-verify/runner_test.go:399` — the one test uses `size: 1` only. Untested: `size >= len(group)`, exact multiples, and `size == 0`, which makes `i += size` (`runner.go:250`) spin forever appending batches. `validateConfig` guards the reachable path, but the function has no test asserting the boundary it depends on.
+- [low] the read/write client split is never exercised — `teams-room-verify/store_mongo_test.go:33` — both integration tests call `newMongoStore(db, db)`, so the secondary-read / primary-write separation that `store.go:22-24` and `config.go:10-13` justify is collapsed to one client in every test.
+- [nitpick] `disconnect` is 0% — `teams-room-verify/main.go:47` — 3 statements; an end-to-end `run()` integration test picks it up for free.
+
+### Recommendations
+
+- [high] Add `//go:build integration` `TestRun_EndToEnd` driving `run()` against `testutil.MongoURI(t)` and an `httptest` inspector, via `t.Setenv` — covers `main.go:71-96` + `disconnect`, the last 23 uncovered statements.
+- [high] Copy the data-migration pipeline shape into `teams-room-verify/deploy/azure-pipelines.yml:45`: `-tags=integration` plus the `go tool cover -func` 80%-floor gate (`data-migration/oplog-connector/deploy/azure-pipelines.yml:48-55`). Unit+integration alone reaches ~86.5% (148/171) before any new test.
+- [medium] Add a canceled-context test for `runner.run` — `runner.go:64` — pin the actual abort semantics and, if they are wrong, the `ctx.Err()` check between batches.
+- [low] Guard `marked` with a mutex in `runner_test.go:262-267` (and the sibling closures) so the assertions do not depend on one site failing.
+- [low] Make `TestPlanBatches` table-driven over sizes 1, group-size, oversize and exact-multiple — `runner_test.go:399`.
+- [nitpick] Give one integration test two distinct `*mongo.Database` handles so `newMongoStore`'s read/write split is at least structurally exercised — `store_mongo_test.go:33`.
+
+### Reviewer notes
+
+SYNTHESIZER NOTE: the reviewer scored 3 and explicitly deferred to the dimension rule; the <80% cap has been applied mechanically (3 -> 2) so this service is comparable with the other 34. The finding text is unchanged.
