@@ -43,9 +43,12 @@ long waits off the hot lane**:
 - terminal failures land in a dead-letter stream instead of vanishing
 
 On `DefaultBackoff` hot-lane occupancy drops 756s → 36s, so the sustainable failure rate
-rises from ~1.3/s to **~27/s** (`1000/36`). On `LowLatencyBackoff` the same 3-step split
-drops 66.2s → 6.2s (~15/s → ~161/s). The total patience per message is unchanged, which
-makes the change easy to reason about and to roll back.
+rises from ~1.3/s to **~27/s** (`1000/36`). `LowLatencyBackoff` is `{200ms, 1s, 5s, 30s,
+2m, 10m}` — it shares `DefaultBackoff`'s `{2m, 10m}` tail, so its full occupancy is
+**756.2s**, essentially identical. Its fast rungs are far cheaper, though, so the same
+3-step split drops 756.2s → 6.2s (~1.3/s → **~161/s**), a ~122× gain rather than ~21×.
+The total patience per message is unchanged, which makes the change easy to reason about
+and to roll back.
 
 ## 3. Design
 
@@ -60,11 +63,15 @@ injected function, not a connection:
 
 ```go
 type Lane struct {
-    Consumer string
-    SiteID   string
-    Publish  func(ctx context.Context, subj string, data []byte, msgID string) error
+    Consumer  string
+    SiteID    string
+    Enabled   bool
+    FastSteps int
+    Publish   func(ctx context.Context, subj string, data []byte, hdr nats.Header, msgID string) error
 }
 
+// backoff is the FULL schedule, never a prefix: jsretry walks only as far as the
+// current delivery, and a failed republish falls back onto the relocated tail.
 func (l *Lane) Settle(ctx context.Context, msg Msg, backoff []time.Duration, err error)
 ```
 
@@ -156,10 +163,11 @@ The lane is therefore opt-in, and excluded from:
 
 These keep their current semantics unchanged. First adopters are the concurrent hot-path
 workers where order is already not guaranteed: `message-worker`, `broadcast-worker`,
-`notification-worker`. The three are not equivalent adopters, though: `broadcast-worker`
-runs `LowLatencyBackoff`, so its occupancy was 66.2s rather than 756s (~15 failures/s
-sustainable) and it never had the stall this spec describes — the lane still buys it ~10×
-headroom, but as insurance rather than as a fix for a live problem.
+`notification-worker`. All three face the same stall: `LowLatencyBackoff` carries the same
+`{2m, 10m}` tail as `DefaultBackoff`, so `broadcast-worker`'s hot-lane occupancy is 756.2s
+against the others' 756s — a near-identical ~1.3 failures/s ceiling. What differs is what
+the split buys: its first three rungs total 6.2s rather than 36s, so the same `FastSteps=3`
+gives it ~122× headroom where `DefaultBackoff` gives ~21×.
 
 ### 3.7 The content rule
 
@@ -340,7 +348,7 @@ Per the `caarlos0/env` convention, opt-in by default like `BOOTSTRAP_STREAMS`:
 |---|---|---|
 | `RETRY_LANE_ENABLED` | `false` | Opt in per service |
 | `RETRY_LANE_FAST_STEPS` | `3` | Split index into `jsretry.DefaultBackoff` |
-| `RETRY_LANE_MAX_ATTEMPTS` | `3` | Retry-lane attempts before DLQ; the loop guard |
+| `RETRY_CONSUMER_MAX_DELIVER` | `3` | Retry-lane attempts before DLQ; the loop guard |
 | `RETRY_CONSUMER_MAX_ACK_PENDING` | `4000` | Sized for 5/s escalation × 720s slow-lane occupancy |
 | `RETRY_CONSUMER_MAX_WORKERS` | `10` | Deliberately small — doubles as the recovery herd damper |
 
