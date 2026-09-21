@@ -11,4 +11,8 @@ const (
 	AuthInvalidRequest Reason = "invalid_request"
 	AuthInvalidNKey    Reason = "invalid_nkey"
 	AuthMissingFields  Reason = "missing_fields"
+	// AuthSSONotConfigured: 503 when the service runs without an OIDC validator
+	// (DEV_MODE) but the caller presented an ssoToken. Lets a client distinguish
+	// "this deployment cannot do SSO" from "your token was rejected".
+	AuthSSONotConfigured Reason = "sso_not_configured"
 )
