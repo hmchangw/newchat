@@ -124,7 +124,7 @@ func run() error {
 	r.Use(ginutil.RequestID())
 	r.Use(cfg.HTTP.Middleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, h)
+	registerRoutes(r, h, cfg.Login, nil)
 	registerBotRoutes(r, valkeyutil.Breakered(valkey, cfg.Valkey.Breaker.New(ctx, "botcontrols")), &cfg, h)
 
 	srv := &http.Server{

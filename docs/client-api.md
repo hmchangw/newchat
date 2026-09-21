@@ -251,6 +251,8 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | 401 | `unauthenticated` | `invalid_sso_token` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid SSO token" }` |
 | 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — botplatform session token failed validation. Same envelope every service returns for a rejected session token. |
 | 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — auth-service cannot reach botplatform to validate a session token. |
+| 503 | `unavailable` | `sso_not_configured` | `{ "code": "unavailable", "reason": "sso_not_configured", "error": "SSO auth not configured" }` — the deployment runs without an OIDC validator (`DEV_MODE`) and the request carried an `ssoToken`. Distinguishes "this deployment cannot do SSO" from a rejected token; retrying with the same token will not help. |
+| 429 | `too_many_requests` | `overloaded` | `{ "code": "too_many_requests", "reason": "overloaded", "error": "server is at capacity, retry shortly" }` — in-flight requests exceeded `MAX_CONCURRENCY` on this unauthenticated endpoint. Carries `Retry-After: 1`; retry after that delay. |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — the real cause is logged server-side and never sent to the client. |
 
 The returned `natsJwt` has a server-configured lifetime (default 2h). Clients should re-call `POST /api/v1/auth` to refresh before it expires.
@@ -8535,6 +8537,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | 400 | `bad_request` | `missing_fields` | `username` or `password` empty. |
 | 401 | `unauthenticated` | `invalid_credentials` | Uniform: unknown account, wrong password, or account without `bot`/`admin` role. |
 | 500 | `internal` | — | Mongo failure; cause logged server-side. |
+| 429 | `too_many_requests` | `overloaded` | In-flight requests exceeded `MAX_CONCURRENCY` on this unauthenticated route. Carries `Retry-After: 1`. Authenticated bot endpoints are not capped. |
 
 #### Triggered events — success path
 

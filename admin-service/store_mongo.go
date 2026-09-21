@@ -352,14 +352,15 @@ func (s *storeMongo) withTransaction(ctx context.Context, fn func(ctx context.Co
 // exceptSessionID, when non-empty, is excluded from the revoke (self-service
 // change-password keeps the caller logged in); empty revokes every session
 // for the account (admin-forced password set). Requires a replica set.
-func (s *storeMongo) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) error {
+func (s *storeMongo) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) ([]string, error) {
 	userFilter := bson.M{"account": account, "siteId": siteID}
 	sessionFilter := bson.M{"siteId": siteID, "account": account}
 	if exceptSessionID != "" {
 		sessionFilter["_id"] = bson.M{"$ne": exceptSessionID}
 	}
 
-	return s.withTransaction(ctx, func(ctx context.Context) error {
+	var revoked []string
+	err := s.withTransaction(ctx, func(ctx context.Context) error {
 		result, err := s.users.UpdateOne(ctx, userFilter,
 			bson.M{"$set": bson.M{
 				"services.password.bcrypt": bcryptHash,
@@ -373,21 +374,28 @@ func (s *storeMongo) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, ac
 			return ErrUserNotFound
 		}
 		sessions := s.users.Database().Collection(session.Collection)
-		if _, err := sessions.DeleteMany(ctx, sessionFilter); err != nil {
-			return fmt.Errorf("revoke sessions: %w", err)
+		ids, err := revokeSessionsReturningIDs(ctx, sessions, sessionFilter)
+		if err != nil {
+			return err
 		}
+		revoked = ids
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return revoked, nil
 }
 
 // DeactivateAndRevoke atomically sets active=false on the user and
 // deletes every session for the account, so a disabled account can't keep a
 // live token. Requires a replica set. Returns the post-write doc projected to
 // the fanout fields.
-func (s *storeMongo) DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error) {
+func (s *storeMongo) DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, []string, error) {
 	filter := bson.M{"account": account, "siteId": siteID}
 
 	var updated *model.User
+	var revoked []string
 	err := s.withTransaction(ctx, func(ctx context.Context) error {
 		res := s.users.FindOneAndUpdate(ctx, filter, bson.M{"$set": bson.M{"active": false}},
 			options.FindOneAndUpdate().SetReturnDocument(options.After).SetProjection(fanoutProjection))
@@ -399,16 +407,18 @@ func (s *storeMongo) DeactivateAndRevoke(ctx context.Context, siteID, account st
 			return fmt.Errorf("deactivate user: %w", err)
 		}
 		sessions := s.users.Database().Collection(session.Collection)
-		if _, err := sessions.DeleteMany(ctx, filter); err != nil {
-			return fmt.Errorf("revoke sessions: %w", err)
+		ids, err := revokeSessionsReturningIDs(ctx, sessions, filter)
+		if err != nil {
+			return err
 		}
+		revoked = ids
 		updated = &u
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return updated, nil
+	return updated, revoked, nil
 }
 
 // auditProjection returns all audit entry fields.
@@ -660,4 +670,31 @@ func (s *storeMongo) AppendAuditMany(ctx context.Context, entries []*AuditEntry)
 
 func (s *storeMongo) Ping(ctx context.Context) error {
 	return s.users.Database().Client().Ping(ctx, nil)
+}
+
+// revokeSessionsReturningIDs deletes the matching sessions and reports their
+// ids. A session's _id IS its token hash, so those ids are exactly the
+// sessioncache keys the caller must evict — deleting the Mongo row alone leaves
+// the token authenticating from cache until its refresh window elapses.
+// Collect-then-delete rather than DeleteMany alone, and inside the caller's
+// transaction so the ids reported are the ids removed.
+func revokeSessionsReturningIDs(ctx context.Context, sessions *mongo.Collection, filter bson.M) ([]string, error) {
+	cur, err := sessions.Find(ctx, filter, options.Find().SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("revoke sessions (collect ids): %w", err)
+	}
+	var found []struct {
+		ID string `bson:"_id"`
+	}
+	if err := cur.All(ctx, &found); err != nil {
+		return nil, fmt.Errorf("revoke sessions (decode ids): %w", err)
+	}
+	if _, err := sessions.DeleteMany(ctx, filter); err != nil {
+		return nil, fmt.Errorf("revoke sessions: %w", err)
+	}
+	ids := make([]string, len(found))
+	for i, f := range found {
+		ids[i] = f.ID
+	}
+	return ids, nil
 }

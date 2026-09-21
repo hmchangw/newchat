@@ -198,10 +198,14 @@ func (h *Handler) handleChangePassword(c *gin.Context) {
 	// caller's own session is preserved via exceptSessionID so they stay
 	// logged in. A failure surfaces as a 500; there is no partial state where
 	// the password changed but stale sessions remain valid.
-	if err := h.store.UpdateUserPasswordAndRevoke(ctx, caller.SiteID, caller.Account, newHash, false, caller.ID); err != nil {
+	revoked, err := h.store.UpdateUserPasswordAndRevoke(ctx, caller.SiteID, caller.Account, newHash, false, caller.ID)
+	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("update user password and revoke sessions: %w", err))
 		return
 	}
+	// Sibling sessions are revoked; the caller's own id was excluded from the
+	// delete, so it is not in revoked and stays cached.
+	sessioncache.BustMany(ctx, h.valkey, revoked)
 
 	if err := h.store.AppendAudit(ctx, &AuditEntry{
 		ID:            idgen.GenerateID(),

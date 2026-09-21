@@ -415,7 +415,7 @@ func TestHandleChangePassword_Success(t *testing.T) {
 	// The password write and sibling-session revoke are one atomic store call
 	// now — assert the caller's own session id is passed as exceptSessionID
 	// so they stay logged in.
-	st.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-a", "p_alice", gomock.Any(), false, callerID).Return(nil)
+	st.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-a", "p_alice", gomock.Any(), false, callerID).Return(nil, nil)
 
 	r := changePasswordRouter(t, st, sessions, Config{SiteID: "site-a", SessionsMaxPerAccount: 100, BcryptCost: 4})
 	body := map[string]string{"oldPassword": "old-pw", "newPassword": "new-pw"}
@@ -539,7 +539,7 @@ func TestHandleChangePassword_UpdatePasswordAndRevokeError_Returns500(t *testing
 	}
 	st.EXPECT().GetUserForAuth(gomock.Any(), "site-a", "p_alice").Return(user, nil)
 	st.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-a", "p_alice", gomock.Any(), false, gomock.Any()).
-		Return(errors.New("mongo dead"))
+		Return(nil, errors.New("mongo dead"))
 	// no AppendAudit expectation — must not fire
 
 	sessions := &fakeSessionStore{}
@@ -568,7 +568,7 @@ func TestHandleChangePassword_AppendAuditError_StillReturns204(t *testing.T) {
 		Services: model.Services{Password: model.PasswordCredentials{Bcrypt: mustHash(t, "old-pw")}},
 	}
 	st.EXPECT().GetUserForAuth(gomock.Any(), "site-a", "p_alice").Return(user, nil)
-	st.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-a", "p_alice", gomock.Any(), false, gomock.Any()).Return(nil)
+	st.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-a", "p_alice", gomock.Any(), false, gomock.Any()).Return(nil, nil)
 	st.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(errors.New("mongo dead during audit"))
 
 	sessions := &fakeSessionStore{}

@@ -30,6 +30,9 @@ type config struct {
 	Pool mongoutil.PoolConfig
 	HTTP ginutil.TimeoutConfig
 
+	// Login caps in-flight requests on the unauthenticated /api/v1/login route.
+	Login ginutil.ConcurrencyConfig
+
 	// SessionsMaxPerAccount is the per-user FIFO cap; excess sessions are evicted oldest-first.
 	SessionsMaxPerAccount int `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
 

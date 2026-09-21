@@ -84,12 +84,13 @@ func (mr *MockAdminStoreMockRecorder) CreateUser(ctx, u any) *gomock.Call {
 }
 
 // DeactivateAndRevoke mocks base method.
-func (m *MockAdminStore) DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error) {
+func (m *MockAdminStore) DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, []string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeactivateAndRevoke", ctx, siteID, account)
 	ret0, _ := ret[0].(*model.User)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].([]string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // DeactivateAndRevoke indicates an expected call of DeactivateAndRevoke.
@@ -310,11 +311,12 @@ func (mr *MockAdminStoreMockRecorder) UpdateUser(ctx, siteID, account, fields an
 }
 
 // UpdateUserPasswordAndRevoke mocks base method.
-func (m *MockAdminStore) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) error {
+func (m *MockAdminStore) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) ([]string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateUserPasswordAndRevoke", ctx, siteID, account, bcryptHash, requireChange, exceptSessionID)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdateUserPasswordAndRevoke indicates an expected call of UpdateUserPasswordAndRevoke.

@@ -138,7 +138,7 @@ func run() error {
 	r.MaxMultipartMemory = maxMultipartMemory
 	obsMW := o11ygin.Middleware("admin-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())
 	applyBaseMiddleware(r, obsMW)
-	registerRoutes(r, h, sessStore, cfg.SiteID)
+	registerRoutes(r, h, sessStore, cfg.SiteID, cfg.Login, nil)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

@@ -20,6 +20,7 @@ import (
 	"go.uber.org/mock/gomock"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/sessiontoken"
@@ -64,7 +65,7 @@ func newTestRouter(t *testing.T) (*gin.Engine, *MockBotplatformStore, *handler) 
 	st := NewMockBotplatformStore(ctrl)
 	h := newHandler(st, testHandlerConfig())
 	r := gin.New()
-	registerRoutes(r, h)
+	registerRoutes(r, h, ginutil.ConcurrencyConfig{}, nil)
 	return r, st, h
 }
 
@@ -277,7 +278,7 @@ func TestHandleLogin_CapEviction(t *testing.T) {
 			h.tokenGen = fixedTokenGen(strings.Repeat("z", 43))
 			h.now = stubClock(1)
 			r := gin.New()
-			registerRoutes(r, h)
+			registerRoutes(r, h, ginutil.ConcurrencyConfig{}, nil)
 
 			u := botUser(t, "u1", "x.bot", "site-a", "p")
 			st.EXPECT().FindUserByAccount(gomock.Any(), "x.bot").Return(u, nil)

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -46,7 +47,7 @@ func TestAuthHandler_Integration(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, handler)
+	registerRoutes(r, handler, ginutil.ConcurrencyConfig{}, nil)
 
 	body := fmt.Sprintf(`{"ssoToken":"valid-token","natsPublicKey":"%s"}`, userPub)
 	w := httptest.NewRecorder()

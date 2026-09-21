@@ -3,13 +3,18 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-func registerRoutes(r *gin.Engine, h *handler) {
+// login takes the admission cap: it is unauthenticated and pays bcrypt before
+// the credential is known to be valid. /auth/validate resolves through the
+// cached, breaker-fenced store lookup and healthz must answer while login is
+// shedding, so neither is capped here.
+func registerRoutes(r *gin.Engine, h *handler, login ginutil.ConcurrencyConfig, onShed func()) {
 	r.GET("/healthz", h.HandleHealth)
 
-	r.POST("/api/v1/login", h.HandleLogin)
+	r.POST("/api/v1/login", login.Middleware(onShed), h.HandleLogin)
 	r.POST("/api/v1/auth/validate", h.HandleValidate)
 }
 
