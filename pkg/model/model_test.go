@@ -433,6 +433,20 @@ func TestThreadRoomJSON(t *testing.T) {
 	roundTrip(t, &tr, &model.ThreadRoom{})
 }
 
+// ParentStamped is internal bookkeeping for the parent thread_room_id stamp. It is
+// persisted to Mongo but must never reach a client payload, which is what keeps it
+// out of docs/client-api.md.
+func TestThreadRoomParentStampedIsNotSerializedToJSON(t *testing.T) {
+	data, err := json.Marshal(&model.ThreadRoom{ID: "tr-1", ParentStamped: true})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "parentStamped")
+	assert.NotContains(t, string(data), "ParentStamped")
+
+	var back model.ThreadRoom
+	require.NoError(t, json.Unmarshal(data, &back))
+	assert.False(t, back.ParentStamped, "the flag is bson-only; JSON must never carry it")
+}
+
 func TestThreadSubscriptionJSON(t *testing.T) {
 	ts := model.ThreadSubscription{
 		ID:              "ts-1",

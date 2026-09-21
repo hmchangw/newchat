@@ -976,6 +976,58 @@ func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFre
 	assert.True(t, mongo.IsDuplicateKeyError(err), "a second document for the same key must be refused, got: %v", err)
 }
 
+// The flag is what lets subsequent replies skip the parent stamp, so it has to
+// survive a real Mongo round trip — and be absent (false) on rooms written before
+// the field existed, so those repair themselves rather than silently staying unlinked.
+func TestThreadStoreMongo_MarkParentStamped(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	room := &model.ThreadRoom{
+		ID: "tr-stamp", ParentMessageID: "msg-parent-stamp", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, store.CreateThreadRoom(ctx, room))
+
+	t.Run("a freshly created room reads as not stamped", func(t *testing.T) {
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
+		require.NoError(t, err)
+		assert.False(t, got.ParentStamped, "nothing has confirmed the parent stamp yet")
+	})
+
+	t.Run("MarkParentStamped persists and round-trips", func(t *testing.T) {
+		require.NoError(t, store.MarkParentStamped(ctx, "tr-stamp"))
+
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
+		require.NoError(t, err)
+		assert.True(t, got.ParentStamped)
+	})
+
+	t.Run("re-marking is idempotent", func(t *testing.T) {
+		require.NoError(t, store.MarkParentStamped(ctx, "tr-stamp"))
+
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
+		require.NoError(t, err)
+		assert.True(t, got.ParentStamped)
+	})
+
+	t.Run("a document written without the field reads as not stamped", func(t *testing.T) {
+		_, err := db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+			"_id": "tr-legacy-stamp", "parentMessageId": "msg-parent-legacy", "roomId": "r-1",
+			"siteId": "site-a", "lastMsgAt": now, "lastMsgId": "m1",
+			"createdAt": now, "updatedAt": now,
+		})
+		require.NoError(t, err)
+
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-legacy")
+		require.NoError(t, err)
+		assert.False(t, got.ParentStamped, "an absent field must repair, not read as done")
+	})
+}
+
 func TestThreadStoreMongo_GetThreadRoomByParentMessageID(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)

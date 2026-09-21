@@ -31,6 +31,9 @@ type Store interface {
 // ThreadStore defines MongoDB operations for thread room and subscription management.
 type ThreadStore interface {
 	CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error
+	// MarkParentStamped records that the parent message's thread_room_id stamp
+	// landed for this thread, so subsequent replies stop re-issuing it.
+	MarkParentStamped(ctx context.Context, threadRoomID string) error
 	GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error)
 	InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
