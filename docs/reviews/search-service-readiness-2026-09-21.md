@@ -170,3 +170,19 @@ Verified clean: all five subjects and `subject.RoomsInfoBatch` come from `pkg/su
 - [low] Emit `now-<window>/h` (or `/d`) in `recentWindowToGte` — `query_messages.go:38, 238-257` — makes the range clause cacheable across requests.
 - [low] Drop `track_total_hits` from rooms/orgs bodies (or expose `total` in the response types) — `query_rooms.go:315`, `query_orgs.go:438`.
 - [low] Run the users/apps/room-name lookups in `enrichMessages` concurrently (`errgroup`, all best-effort) — `enrich.go:87-106` — cuts enrichment latency to the slowest lookup.
+
+## 8. Prioritized action list
+
+Ordered by severity (`critical` first), then by the dimension most likely to carry a correctness or contract cost (integration, architecture, coverage, code quality, performance, maintainability). Each item is a recommendation from the chapter named; the `file:line` and rationale are quoted from it.
+
+1. **[high]** _Integration_ — Gate `search.users` on the real third-party contract — `users_client.go:59-60` — finish the adapter against the actual spec (path, body, auth, response fields) with a recorded-fixture test, or unregister the subject and mark `docs/client-api.md:4509` "not yet available".
+2. **[high]** _Integration_ — Delete `SearchConfig.RequestTimeout` and `withRequestTimeout` — `main.go:71`, `handler.go:81` — rely solely on `cfg.Guard.TimeoutMiddleware()`; replace `SEARCH_REQUEST_TIMEOUT` with `REQUEST_TIMEOUT` in `deploy/docker-compose.yml:41`.
+3. **[high]** _Test coverage_ — Lift unit coverage over 80% under the CI filter — an `httptest`-backed unit test for `users_client.go:36-73` (token header, 2xx, non-2xx, transport error, bad body) needs no build tag, plus a zero-config `newHandler` test for `handler.go:58-69`; together ~25 statements, enough to clear the gate without touching integration.
+4. **[high]** _Code quality_ — Add a terminal `$project` limited to the fields `SearchAppsResponse` serialises — `query_apps.go:51-55` — MUST compliance; stops shipping full app documents (assistant config etc.) over the wire.
+5. **[high]** _Maintainability_ — Resolve the `search.users` placeholder: either land the real HR contract or stop registering the RPC (config-gated, `handler.go:77`) and drop the `required` on `USERS_API_URL` (`main.go:58`) — a deployed endpoint whose wire shape is admitted guesswork is unreviewable and misleads clients reading `docs/client-api.md`.
+6. **[medium]** _Integration_ — Implement subscription scoping for `search.apps` (a Go-side filter via `SubscriptionsByRoomIDs` avoids `$lookup`) — `query_apps.go:38-49` — then drop the "prototype" caveat at `docs/client-api.md:4411`.
+7. **[medium]** _Integration_ — Invalidate `searchservice:restrictedrooms:{account}` from search-sync-worker's membership/HSS handler (it already sees every change), or gate Clause A/B on the live ES doc — `handler.go:258`, `store_valkey.go:23` — and document the residual window.
+8. **[medium]** _Integration_ — Derive the message read pattern from config — `query_messages.go:18` — add an unprefixed `MSG_INDEX_PREFIX` (same name as the writer) and build `[]string{searchindex.IndexPattern(p), "*:"+searchindex.IndexPattern(p)}` at startup, as `SPOTLIGHT_INDEX` is handled at `main.go:179`.
+9. **[medium]** _Integration_ — Switch `store_mongo.go:37-46` to `mongoutil.WarnMissingIndexes` like `:47-50`; if `{u.account, roomId}` is truly needed, add it to room-service's owned set with a justification.
+10. **[medium]** _Architecture_ — Delete `SearchConfig.RequestTimeout` and `handler.withRequestTimeout`; rely solely on `Guard.RequestTimeout` via `natsrouter.DefaultGuarded(nc, "search-service", cfg.Guard, WithSiteID, WithMetrics)` — `main.go:71`, `main.go:292-297`, `handler.go:81-86` — one knob, standard middleware order, no half-applied guard.
+
