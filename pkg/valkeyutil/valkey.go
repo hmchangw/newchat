@@ -114,10 +114,7 @@ const pingTimeout = 5 * time.Second
 // the setup — three services had, each with its own instrumentation.
 func dialCluster(ctx context.Context, addrs []string, password string, opts ...Option) (*redis.ClusterClient, error) {
 	cc := newConnectConfig(opts...)
-	c := redis.NewClusterClient(&redis.ClusterOptions{
-		Addrs:    addrs,
-		Password: password,
-	})
+	c := redis.NewClusterClient(ClusterOptionsFor(addrs, password, cc.profile))
 	if err := instrumentCluster(c, &cc); err != nil {
 		if closeErr := c.Close(); closeErr != nil {
 			slog.Warn("valkey cluster close after failed instrument", "error", closeErr)
@@ -125,7 +122,9 @@ func dialCluster(ctx context.Context, addrs []string, password string, opts ...O
 		return nil, err
 	}
 	// The probe is a diagnostic, not a gate — see WithRequireReachable for why
-	// unreachability is non-fatal by default.
+	// unreachability is non-fatal by default. Note the effective deadline is
+	// min(pingTimeout, Profile.ReadTimeout): go-redis takes the earlier of the
+	// two, so the profile governs in practice and this is only a ceiling.
 	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
 	switch pingErr := c.Ping(pingCtx).Err(); {
