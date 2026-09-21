@@ -31,3 +31,25 @@ Coverage is 67.6%, but the more useful finding is that the service's pipeline ru
 
 **Repo-wide inputs used by every dimension:** `make generate` → no stale mocks; gosec (medium+) and the 20 repo-owned semgrep rules → 0 findings; govulncheck and the semgrep registry packs could not run (sandbox egress 403) so dependency-CVE status is unverified; unit coverage from one `go test -race -covermode=atomic ./...` run with 0 failing packages.
 
+
+## 2. Code quality — score 3
+
+### Evidence
+
+- [high] TLS verification is disabled by default, and the same transport carries the OAuth client-secret POST — `teams-chat-sync/main.go:51` — `GRAPH_TLS_INSECURE_SKIP_VERIFY` is `envDefault:"true"`, so production (which simply omits the var) fails *open*. `pkg/msgraph/msgraph.go:272-278` installs `InsecureSkipVerify: true` on the single `http.Client` that `pkg/msgraph/msgraph.go:506-513` also uses for the token request to the **public** `login.microsoftonline.com` endpoint (`msgraph.go:285-288`), so `GRAPH_CLIENT_SECRET` (and `GRAPH_PROXY_PASSWORD` on a Basic-auth proxy) traverse an unverified connection.
+- [high] That insecure default contradicts both the service's design plan and its own compose file — `teams-chat-sync/deploy/docker-compose.yml:18` — compose ships `false`, and the plan specified `envDefault:"false"`, "opt-in" (`docs/superpowers/plans/2026-07-14-teams-chat-sync.md:1801`). It reads as unreviewed drift, not a decision.
+- [high] A knob shared by five services is re-declared per service with divergent defaults — `teams-chat-sync/main.go:51` vs `teams-hr-sync/config.go:28` (`false`), `user-presence-service/sync/main.go:44` (`false`), `teams-user-sync/config.go:20` (`true`), `teams-chat-member-sync/main.go:44` (`true`). CLAUDE.md §Configuration MUSTs that such a knob be declared once in the owning package (`pkg/msgraph`) and mounted as a named field — "never re-declare the env tag and `envDefault` in a service".
+- [medium] A graceful SIGTERM is logged as a mass failure — `teams-chat-sync/syncer.go:161-176` — the dispatch loop sends on `jobs` without selecting on `ctx.Done()`, so on cancellation every remaining user drains through `syncUser`, fails with `context.Canceled`, and emits one `slog.Error("teams chat sync: user failed")` each plus an aggregate `"%d of %d users failed"` and exit 1. A routine eviction is indistinguishable from a Graph/Mongo outage.
+- [low] A defensive branch that production can never reach carries most of the worker tests — `teams-chat-sync/syncer.go:218-221` — the empty-`SiteID` skip is unreachable because `SYNC_DEFAULT_SITE_ID` is `required,notEmpty` (`main.go:39`), as its own comment concedes; yet `worker_test.go:32` builds every syncer with an empty `DefaultSiteID`, and `worker_test.go:202`/`:218` assert on the skip. The branch silently drops chats.
+- [low] `syncer.run` deadlocks instead of failing fast on a non-positive worker count — `teams-chat-sync/syncer.go:156` + `:175` — no goroutine drains the unbuffered `jobs` channel, so the send blocks forever. Only `validateConfig` (`main.go:82`) prevents it; `newSyncer` (`syncer.go:50`) accepts the value unchecked.
+- [nitpick] `fmt.Errorf` with no format verbs where `errors.New` belongs — `teams-chat-sync/main.go:83` and `:86`. Neither `go vet` nor the repo's golangci config catches it.
+- [nitpick] Five `//nolint:gocritic // hugeParam` suppressions in ~400 lines — `main.go:80`, `store_mongo.go:123`, `syncer.go:103`, `:194`, `:206`. The four non-startup ones sit on the per-user/per-chat path; pointers would remove both copy and suppression.
+
+### Recommendations
+
+- [high] Flip `GRAPH_TLS_INSECURE_SKIP_VERIFY` to `envDefault:"false"` — `main.go:51` — restores fail-closed behaviour, matches the design plan and compose, and stops the client secret riding an unverified connection to Azure AD.
+- [high] Move the knob into `pkg/msgraph` as a mounted config struct (alongside `ProxyURL`/`ProxyUsername`/`ProxyPassword`, which have the same problem) and delete the per-service `env`/`envDefault` tags in all five services — resolves the CLAUDE.md §Configuration violation and makes the default unfalsifiable.
+- [medium] Split the peer TLS decision from the Graph host: if an on-prem TLS-intercepting proxy is genuinely required, ship its CA via a `GRAPH_CA_BUNDLE` root pool rather than `InsecureSkipVerify` — keeps verification on for the token endpoint, which is never on-prem.
+- [medium] `select { case jobs <- u: case <-ctx.Done(): }` in the dispatch loop, and branch on `errors.Is(err, context.Canceled)` in the worker to log at `Info` and skip the `Failed` counter — `syncer.go:161-176` — so a graceful stop reads as a graceful stop.
+- [low] Validate `MaxWorkers > 0` in `newSyncer` (or buffer `jobs`) — `syncer.go:50` — turns a silent hang into an immediate error.
+- [low] Drop the unreachable empty-`SiteID` skip and give `newTestSyncer` a non-empty `DefaultSiteID` — `syncer.go:218`, `worker_test.go:32` — so the tests pin the production configuration instead of an impossible one.
