@@ -102,3 +102,27 @@ Otherwise the structure is sound: the `Store` interface is consumer-owned with e
 - [medium] Assert the returned `RunStats` in the four error subtests at `handler_test.go:221-268` (page-1 counters must survive a page-2 failure) — it is a one-line change per subtest and pins the idempotent-rerun contract that `handler.go:38-40` documents.
 - [medium] Add a `UpdateUsers` context-cancellation case and a `disconnect` test (`main.go:100`) driven by an already-canceled parent ctx, so the SIGTERM abort path the CronJob relies on is exercised.
 - [low] Extend `TestSplitUPN`-style table coverage to the page-size guard (0, 1, 999, 1000) at `main_test.go:18`, and move `TestMain` into a dedicated `main_integration_test.go` so cleanup cannot be deleted with a store file.
+
+## 5. Maintainability — score 4
+
+### Evidence
+
+- [medium] `splitUPN` is duplicated verbatim (body + doc comment) in two services that must agree — `teams-user-sync/handler.go:128` and `teams-hr-sync/transform/transform.go:87` — both derive the lowercased UPN local part that becomes `teams_user.account` / the `hr_employee.account` join key. Two independent copies of the key-derivation rule can drift silently and de-join the two collections; it belongs in `pkg/` (next to `msgraph.GraphUser`).
+- [low] The HR field list is restated in four unlinked places — `pkg/model/teamsuser.go:21-28`, `store.go:12-16` (`hrUser`), `store_mongo.go:26-31` (`hrRow`), `store_mongo.go:75` (the projection). Adding one HR field means editing all four; forgetting only the projection compiles, passes the unit tests (mocked `Store`), and silently writes an empty value — indistinguishable from the legitimate "no hr row" case at `handler.go:103`.
+- [low] The `*BulkResult` from the write is discarded — `store_mongo.go:86` (`if _, err := s.writeTeamsUsers.BulkUpsertByID(...)`). The end-of-run log line is this job's entire output, and its `upserted` counter (`handler.go:122`) counts candidates *submitted*, not Mongo's matched/upserted counts, which the helper already returns.
+- [low] One Info line per HR-unmatched user — `handler.go:106`. On the first run against an empty `teams_user` (or any HR outage) every user is unmatched, so a directory-scale tenant emits one log record per user, while the aggregate at `handler.go:117` already carries `requested/matched/unmatched`. The per-user detail is unbounded by anything the operator controls.
+- [low] `syncPage` is the whole service in one 74-line function with four phases (id diff, candidate build, HR join, write) plus pointer-mutated accounting — `handler.go:51-124`. Under the ~80-line bar, but each phase is only reachable through a full `UpdateUsers` run with three mock expectations (see `handler_test.go:221-268`), which is why the error-path tests all assert on substrings rather than behaviour.
+- [low] `disconnect` is copied into three services — `main.go:100`, `teams-hr-sync/main.go:252`, `teams-room-verify/main.go:47` — identical 10s-timeout-on-`context.Background()` shutdown helper; a `mongoutil` one-liner.
+- [nitpick] `handler.go` contains no handler — it holds the batch `Syncer`, while the sibling batch job names its parts by role (`teams-hr-sync/differ.go`, `emitter.go`, `publisher.go`). The layout convention in CLAUDE.md is written for request/message services.
+- [nitpick] Log level is hardcoded — `main.go:21` passes `nil` handler options, so raising verbosity on a failing CronJob run needs a rebuild. Also, unlike `teams-hr-sync/main.go:141`, the deliberate "one-shot job, no `obs.Init`" decision is not recorded anywhere in this service, so the next reader cannot tell it from an omission.
+- [nitpick] The only prose about this service is stale — `docs/superpowers/plans/2026-07-13-teams-user-sync.md:21` describes `robfig/cron` with `cron.SkipIfStillRunning` and an `hr` collection; the shipped binary is one-shot (K8s CronJob owns the schedule, `main.go:29-33`) and reads `hr_employee` (`store_mongo.go:16`).
+
+### Recommendations
+
+- [medium] Move `splitUPN` into a shared package (e.g. `pkg/msgraph`) and have both `teams-user-sync/handler.go:128` and `teams-hr-sync/transform/transform.go:87` call it — one definition of the account-join key, one test table.
+- [low] Collapse `hrUser` (`store.go:12`) and `hrRow` (`store_mongo.go:26`) into one type and derive the projection from its bson tags (or add a store integration assertion that every `hrUser` field round-trips) so a new HR field cannot be half-added.
+- [low] Use the returned `*BulkResult` at `store_mongo.go:86` to report real upserted/matched counts in the run summary — the job is unobservable apart from that line.
+- [low] Demote the per-user `hr id not found` log at `handler.go:106` to Debug (or cap it), keeping the aggregate at `handler.go:117` — a cold-start run currently logs the whole directory.
+- [low] Extract the four phases of `syncPage` (`handler.go:51-124`) into small functions returning candidates/stat deltas, so the HR-join and candidate-build rules are testable without mocking three store calls.
+- [nitpick] Hoist `disconnect` (`main.go:100`) into `pkg/mongoutil` and drop the three copies.
+- [nitpick] Add a `LOG_LEVEL` knob at `main.go:21` and a one-line comment recording the no-`obs.Init` choice, mirroring `teams-hr-sync/main.go:141`.
