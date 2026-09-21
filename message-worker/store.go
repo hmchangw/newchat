@@ -36,7 +36,6 @@ type ThreadStore interface {
 	// created is true iff this call inserted the room, i.e. this is the first reply.
 	EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (stored *model.ThreadRoom, created bool, err error)
 	InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
-	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// MarkThreadSubscriptionMention flags sub as mentioned, unless the account
 	// already read past sub.CreatedAt (the mentioning message's time) — otherwise
 	// an async mention write can clobber a read-clear that happened first (#467).
@@ -61,4 +60,11 @@ type ThreadStore interface {
 	// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
 	// redelivery; accounts not subscribed simply match nothing.
 	AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error
+	// UpsertThreadSubscriptionAdvancingLastSeen creates sub's (threadRoomId, userAccount)
+	// subscription when missing and advances its lastSeenAt to at, in a single write. It
+	// merges a $setOnInsert upsert with AdvanceThreadSubscriptionLastSeen for the replier
+	// on the hot path: replying implies the replier has seen up to their own reply (#396),
+	// so a new subscription is seeded with lastSeenAt=at and an existing one is moved
+	// forward, never backward.
+	UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error
 }

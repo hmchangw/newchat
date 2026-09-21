@@ -132,7 +132,7 @@ func (salvageThreads) EnsureThreadRoom(_ context.Context, room *model.ThreadRoom
 func (salvageThreads) InsertThreadSubscription(context.Context, *model.ThreadSubscription) error {
 	return nil
 }
-func (salvageThreads) UpsertThreadSubscription(context.Context, *model.ThreadSubscription) error {
+func (salvageThreads) UpsertThreadSubscriptionAdvancingLastSeen(context.Context, *model.ThreadSubscription, time.Time) error {
 	return nil
 }
 func (salvageThreads) MarkThreadSubscriptionMention(context.Context, *model.ThreadSubscription) error {
