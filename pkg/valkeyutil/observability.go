@@ -19,6 +19,10 @@ type Observability interface {
 type connectConfig struct {
 	obs       Observability
 	redisOpts []o11yredis.Option
+	profile   Profile
+	// requireReachable makes the startup probe fatal. Off by default: see
+	// WithRequireReachable.
+	requireReachable bool
 }
 
 // Option configures ConnectCluster. The zero config attaches no instrumentation
@@ -55,8 +59,27 @@ func WithIgnoredCommands(names ...string) Option {
 	return WithRedisOptions(o11yredis.WithIgnoredCommands(names...))
 }
 
+// WithRequireReachable makes the startup PING fatal, so an unreachable cluster
+// fails the dial instead of returning a usable client.
+//
+// It is off by default, and deliberately so. A shared datastore is the same for
+// every replica, so gating startup on its reachability means a Valkey outage
+// overlapping a rollout, autoscale or node drain crashloops every pod at once —
+// including the message path — and the crashloop outlives the outage. go-redis
+// dials lazily and self-heals per call, so a pod that starts during an outage
+// recovers on its own once Valkey returns.
+//
+// The caller that wants this is the one-shot CLI: tools/seed-sample-data has no
+// fallback and no next call to self-heal into, so aborting the run is right.
+func WithRequireReachable() Option {
+	return func(c *connectConfig) { c.requireReachable = true }
+}
+
 func newConnectConfig(opts ...Option) connectConfig {
-	var cfg connectConfig
+	// CacheProfile rather than the zero Profile: an unbounded client is the trap
+	// this package exists to close, so a caller that passes no profile still gets
+	// a bounded one.
+	cfg := connectConfig{profile: CacheProfile}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
