@@ -161,3 +161,19 @@ Verified clean, no finding: no N+1 — `RoomStates` answers any batch with exact
 - [low] Run the `rooms` find and the `subscriptions` aggregate concurrently via `errgroup` in `store_mongo.go:41-68`, or add one line stating the serialization is intentional.
 - [low] Consider `ginutil.MaxConcurrency` on the verify route (`routes.go:9`) so an unauthenticated burst sheds with 429 rather than queueing Mongo work.
 - [nitpick] Declare the Mongo-facing env knobs (`MONGO_MAX_POOL_SIZE`, `MONGO_SERVER_SELECTION_TIMEOUT`, `REQUEST_TIMEOUT`) in `teams-room-inspector/deploy/docker-compose.yml` once mounted, so local dev matches production tuning.
+
+## 8. Prioritized action list
+
+Ordered by severity (`critical` first), then by the dimension most likely to carry a correctness or contract cost (integration, architecture, coverage, code quality, performance, maintainability). Each item is a recommendation from the chapter named; the `file:line` and rationale are quoted from it.
+
+1. **[critical]** _Test coverage_ — Extract the dial/serve/shutdown wiring out of `run()` into a testable constructor the way `newServer` already is — `main.go:69` — unit-testing the resulting seam closes ~26 of the 46 uncovered statements and lifts the package over the 80% floor on its own.
+2. **[high]** _Test coverage_ — Add a golden-value test pinning `idgen.DeterministicID` output for a fixed Teams chat id to a literal string, referenced from both `teams-room-inspector` and `room-worker` — `handler_test.go:46`, `pkg/idgen/idgen_test.go:46` — turns the hand-maintained cross-service invariant into a failing test instead of a silent site-wide false "room missing".
+3. **[medium]** _Integration_ — Add `RoomIDFromChatID(chatID string) string` to `pkg/teamsmigrate` beside `EmployeeIDFromGraphID` and call it from both `handler.go:68` and `room-worker/teamsroomcreate.go:62`, with one table test in that package — makes the cross-service mapping a single compiled dependency instead of a comment.
+4. **[medium]** _Integration_ — Add `Pool mongoutil.PoolConfig` to `Config` (`main.go:29`), `Validate()` it at load, and pass `mongoutil.WithPool(cfg.Pool)` at `main.go:86` — brings the 2s server-selection bound and idle reaping in line with every sibling service.
+5. **[medium]** _Integration_ — Add `HTTP ginutil.TimeoutConfig` to `Config` and `r.Use(cfg.HTTP.Middleware())` in `newServer` (`main.go:57`) — gives the Mongo round trips a cancellable deadline so a slow batch releases its connection instead of pinning it.
+6. **[medium]** _Integration_ — Propagate correlation across the hop: have `teams-room-verify/client.go` set `natsutil.RequestIDHeader` from the context (or add the injection to `restyutil.New` once, for all callers) — the inspector already honours an inbound id via `idgen.ResolveRequestID`.
+7. **[medium]** _Architecture_ — Extract the derivation into `pkg/teamsmigrate` (e.g. `RoomIDFromTeamsChatID(chatID)`) and call it from both `room-worker/teamsroomcreate.go:62` and `teams-room-inspector/handler.go:68` — the mapping becomes one edit instead of a comment-enforced contract across two deployables.
+8. **[medium]** _Architecture_ — Pass `siteID` into `newMongoStore` (`main.go:92`) and add `"siteId": s.siteID` to both filters (`store_mongo.go:47,57`) — a wrong-site question then answers "room missing" (a reportable mismatch) instead of a plausible-looking partial count.
+9. **[medium]** _Architecture_ — Add `Pool mongoutil.PoolConfig` to `Config` (`main.go:29-39`), call `cfg.Pool.Validate()` after parse, and pass `mongoutil.WithPool(cfg.Pool)` at `main.go:86` — brings the 2s server-selection bound and an explicit pool ceiling in line with the rest of the fleet.
+10. **[medium]** _Test coverage_ — Add an integration stage (`go test -tags=integration ./teams-room-inspector/...`) on a Docker-enabled agent — `deploy/azure-pipelines.yml:45` — today the store's only tests never execute in CI.
+
