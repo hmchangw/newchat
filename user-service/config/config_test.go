@@ -460,6 +460,7 @@ func TestLoad_RejectsInvalidConfig(t *testing.T) {
 		{"fraction zero", "GOMEMLIMIT_FRACTION", "0", "GOMEMLIMIT_FRACTION"},
 		{"chunk above the history-service cap", "ROOM_BATCH_CHUNK", "101", "ROOM_BATCH_CHUNK"},
 		{"chunk below one", "ROOM_BATCH_CHUNK", "0", "ROOM_BATCH_CHUNK"},
+		{"badge seed fanout above the ceiling", "MAX_BADGE_SEED_FANOUT", "33", "MAX_BADGE_SEED_FANOUT"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
