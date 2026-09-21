@@ -30,8 +30,11 @@ type Store interface {
 
 // ThreadStore defines MongoDB operations for thread room and subscription management.
 type ThreadStore interface {
-	CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error
-	GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error)
+	// EnsureThreadRoom returns the thread room for room.ParentMessageID, creating it
+	// from room when absent — one upserting round trip, so the hot subsequent-reply
+	// path no longer pays a failed insert against the unique index followed by a read.
+	// created is true iff this call inserted the room, i.e. this is the first reply.
+	EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (stored *model.ThreadRoom, created bool, err error)
 	InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// MarkThreadSubscriptionMention flags sub as mentioned, unless the account

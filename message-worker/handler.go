@@ -348,9 +348,10 @@ func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
 		"message_id", messageID, "thread", thread)
 }
 
-// handleThreadRoomAndSubscriptions creates the ThreadRoom on first reply and
-// inserts ThreadSubscriptions for the parent author and replier. On subsequent
-// replies it upserts both subscriptions and bumps the room's last-message pointer.
+// handleThreadRoomAndSubscriptions resolves the ThreadRoom with a single upserting
+// EnsureThreadRoom call. On the first reply (the call inserted the room) it inserts
+// ThreadSubscriptions for the parent author and replier. On subsequent replies it
+// upserts both subscriptions and bumps the room's last-message pointer.
 // It returns the threadRoomID so the caller can pass it to SaveThreadMessage,
 // plus the thread's pre-existing followers (the accounts fanOutThreadUnread
 // should mark unread — the parent author alone on a first reply, or the room's
@@ -389,16 +390,15 @@ func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *mod
 		UpdatedAt:             now,
 	}
 
-	err := h.threadStore.CreateThreadRoom(ctx, &threadRoom)
-	switch {
-	case err == nil:
-		followers, ferr := h.handleFirstThreadReply(ctx, msg, eventSiteID, threadRoom.ID, replier, now, isMigration)
-		return threadRoom.ID, followers, ferr
-	case errors.Is(err, errThreadRoomExists):
-		return h.handleSubsequentThreadReply(ctx, msg, eventSiteID, replier, now, isMigration)
-	default:
-		return "", nil, fmt.Errorf("create thread room: %w", err)
+	stored, created, err := h.threadStore.EnsureThreadRoom(ctx, &threadRoom)
+	if err != nil {
+		return "", nil, fmt.Errorf("ensure thread room: %w", err)
 	}
+	if created {
+		followers, ferr := h.handleFirstThreadReply(ctx, msg, eventSiteID, stored.ID, replier, now, isMigration)
+		return stored.ID, followers, ferr
+	}
+	return h.handleSubsequentThreadReply(ctx, msg, eventSiteID, stored, replier, now, isMigration)
 }
 
 // handleFirstThreadReply runs after the thread room has just been created.
@@ -477,7 +477,9 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 	return []string{parentSender.Account}, nil
 }
 
-// handleSubsequentThreadReply runs when CreateThreadRoom reported an existing room.
+// handleSubsequentThreadReply runs when the thread room already existed. The caller's
+// EnsureThreadRoom already resolved it and passes it in as existingRoom, so this path
+// does no second fetch.
 // Upserts subscriptions for both the parent author and the replier (idempotent
 // on redelivery), then bumps the room's last-message pointer. Returns the
 // existing thread room ID so the caller can pass it to SaveThreadMessage, plus
@@ -490,11 +492,7 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 // filtered out there regardless of whether they were already a follower.
 // It deliberately writes no parent thread_room_id stamp — see the note at the
 // end of the body.
-func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
-	existingRoom, err := h.threadStore.GetThreadRoomByParentMessageID(ctx, msg.ThreadParentMessageID)
-	if err != nil {
-		return "", nil, fmt.Errorf("get existing thread room: %w", err)
-	}
+func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, existingRoom *model.ThreadRoom, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
 	followers := existingRoom.ReplyAccounts
 
 	// Migrated replies: resolve the parent for replyAccounts, but skip all thread_subscription writes (collections owns them).

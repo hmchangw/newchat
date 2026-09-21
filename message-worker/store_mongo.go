@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -12,11 +11,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-)
-
-var (
-	errThreadRoomExists   = errors.New("thread room already exists")
-	errThreadRoomNotFound = errors.New("thread room not found")
 )
 
 type threadStoreMongo struct {
@@ -54,39 +48,45 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 	return s.subIndex.Ready(ctx)
 }
 
-func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
-	// The duplicate-key branch is the thread's identity guarantee, so the index is confirmed first;
-	// a failure NAKs (see mongoutil.IndexGate). The subscriptions' key is confirmed here too: the room
-	// insert is the point of no return for a first reply (a redelivery takes the subsequent-reply path).
+// EnsureThreadRoom resolves the thread room for room.ParentMessageID in one round trip:
+// an upserting FindOneAndUpdate whose $setOnInsert seeds the room only when absent,
+// returning the post-image either way. The hot subsequent-reply path matches the existing
+// room — no insert, no duplicate key — where the previous insert-then-read pattern paid a
+// rejected write plus a follow-up find. created is reported by comparing the returned _id
+// to the candidate's: they match only when this call did the inserting, since the caller
+// mints a fresh id per attempt.
+func (s *threadStoreMongo) EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (*model.ThreadRoom, bool, error) {
+	// The unique parentMessageId index is what keeps one parent to one thread room: without
+	// it two concurrent first replies both miss the filter and both insert. So it is confirmed
+	// before the write, and a failure NAKs (see mongoutil.IndexGate). The subscriptions' key is
+	// confirmed here too: the room insert is the point of no return for a first reply (a
+	// redelivery takes the subsequent-reply path).
 	if err := s.parentIndex.Ready(ctx); err != nil {
-		return err
+		return nil, false, err
 	}
 	if err := s.subIndex.Ready(ctx); err != nil {
-		return err
+		return nil, false, err
 	}
-	toInsert := *room
-	if toInsert.ReplyAccounts == nil {
-		toInsert.ReplyAccounts = []string{}
+	candidate := *room
+	if candidate.ReplyAccounts == nil {
+		candidate.ReplyAccounts = []string{}
 	}
-	_, err := s.threadRooms.InsertOne(ctx, &toInsert)
+	filter := bson.M{"parentMessageId": candidate.ParentMessageID}
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+
+	var stored model.ThreadRoom
+	err := s.threadRooms.FindOneAndUpdate(ctx, filter, bson.M{"$setOnInsert": candidate}, opts).Decode(&stored)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("insert thread room: %w", errThreadRoomExists)
+			// Lost the insert race to a concurrent first reply: the room exists now, read it.
+			if ferr := s.threadRooms.FindOne(ctx, filter).Decode(&stored); ferr != nil {
+				return nil, false, fmt.Errorf("read thread room after upsert race for parent %s: %w", candidate.ParentMessageID, ferr)
+			}
+			return &stored, false, nil
 		}
-		return fmt.Errorf("insert thread room: %w", err)
+		return nil, false, fmt.Errorf("ensure thread room for parent %s: %w", candidate.ParentMessageID, err)
 	}
-	return nil
-}
-
-func (s *threadStoreMongo) GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error) {
-	var room model.ThreadRoom
-	if err := s.threadRooms.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}).Decode(&room); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, errThreadRoomNotFound)
-		}
-		return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
-	}
-	return &room, nil
+	return &stored, stored.ID == candidate.ID, nil
 }
 
 func (s *threadStoreMongo) InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
