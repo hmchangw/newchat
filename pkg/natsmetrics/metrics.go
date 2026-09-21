@@ -401,6 +401,10 @@ type Message struct {
 	started      time.Time
 	disposeOnce  sync.Once
 	terminalOnce sync.Once
+	// escalated marks that the Ack about to happen hands the message to the
+	// RETRY stream rather than completing it. Written and read on the one
+	// goroutine that owns this delivery, so it needs no synchronisation.
+	escalated bool
 }
 
 type messageContextKey struct{}
@@ -453,11 +457,20 @@ func (m *Message) IsFinalDelivery() bool {
 	return jsretry.IsLastAttempt(m.numDelivered, m.maxDeliver)
 }
 
-func (m *Message) Ack() error { err := m.Msg.Ack(); m.finish(OutcomeAck, err); return err }
+func (m *Message) Ack() error { err := m.Msg.Ack(); m.finish(m.ackOutcome(), err); return err }
 func (m *Message) DoubleAck(ctx context.Context) error {
 	err := m.Msg.DoubleAck(ctx)
-	m.finish(OutcomeAck, err)
+	m.finish(m.ackOutcome(), err)
 	return err
+}
+
+// ackOutcome is the label this delivery's Ack should carry when it succeeds.
+// finish downgrades it to left_pending if the Ack itself failed.
+func (m *Message) ackOutcome() Outcome {
+	if m.escalated {
+		return OutcomeEscalated
+	}
+	return OutcomeAck
 }
 
 // Nak instruments a bare -NAK. Production code must not call it — a bare -NAK
@@ -471,10 +484,15 @@ func (m *Message) NakWithDelay(delay time.Duration) error {
 }
 func (m *Message) Term() error { err := m.Msg.Term(); m.finish(OutcomeTerm, err); return err }
 
-// Escalated records that this delivery was Acked because pkg/retrylane
-// republished it onto the RETRY stream. The caller Acks the message itself;
-// this only fixes the label, so the escalation does not read as a success.
-func (m *Message) Escalated() { m.finishWithOutcome(m.ctx, OutcomeEscalated) }
+// Escalated marks that the Ack which follows hands this delivery to the RETRY
+// stream rather than completing it, so the escalation does not read as a
+// success. It deliberately does NOT finish the delivery: the Ack does. Were the
+// label recorded here, the disposeOnce guard would lock it in before the Ack
+// result was known, and an escalation whose Ack failed — a delivery still
+// holding its ack-pending slot until AckWait redelivers it — would be reported
+// as escalated instead of left_pending, masking the very slot-holding the retry
+// lane exists to prevent.
+func (m *Message) Escalated() { m.escalated = true }
 
 // TermWithReason forwards the caller's free-text reason to JetStream but never
 // to a label — the terminal metric uses the bounded `permanent` reason.
