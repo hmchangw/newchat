@@ -166,3 +166,19 @@ SYNTHESIZER NOTE: the reviewer scored 3 and explicitly deferred to the dimension
 - [low] Add `restyutil.WithMaxIdleConns(cfg.MaxWorkers)` to the verifier client — `client.go:23` — one line, removes per-call TLS handshakes for concurrent batches to the same site.
 - [low] Make the dispatch loop `select` on `ctx.Done()` before acquiring a slot — `runner.go:78` — so SIGTERM stops queuing work instead of fanning out doomed calls.
 - [nitpick] Compute `accountsPresent(c.Members)` once per chat and pass the int into `logMismatch` — `runner.go:156`, `:177`.
+
+## 8. Prioritized action list
+
+Ordered by severity (`critical` first), then by the dimension most likely to carry a correctness or contract cost (integration, architecture, coverage, code quality, performance, maintainability). Each item is a recommendation from the chapter named; the `file:line` and rationale are quoted from it.
+
+1. **[high]** _Integration_ — Add `"needCreateRoom": bson.M{"$ne": true}` to the filter at `store_mongo.go:34` so a chat awaiting (re-)creation is never audited, and have `teams-room-creation` bump `updatedAt` in `MarkRoomsCreated` so verify's CAS token actually covers that write.
+2. **[high]** _Integration_ — Make the comparison set-based: add `SubscribedAccounts []string` to `model.TeamsRoomVerifyResult` (`pkg/model/teams.go:130`) and diff it against the roster in `runner.go:156`, logging the symmetric difference. Cardinality equality cannot detect a swap, which is the most common roster change.
+3. **[high]** _Test coverage_ — Add `//go:build integration` `TestRun_EndToEnd` driving `run()` against `testutil.MongoURI(t)` and an `httptest` inspector, via `t.Setenv` — covers `main.go:71-96` + `disconnect`, the last 23 uncovered statements.
+4. **[high]** _Test coverage_ — Copy the data-migration pipeline shape into `teams-room-verify/deploy/azure-pipelines.yml:45`: `-tags=integration` plus the `go tool cover -func` 80%-floor gate (`data-migration/oplog-connector/deploy/azure-pipelines.yml:48-55`). Unit+integration alone reaches ~86.5% (148/171) before any new test.
+5. **[medium]** _Integration_ — Return `ModifiedCount` from `MarkVerified` (`store_mongo.go:45`) and count `ok` from it in `runner.go:166`, so the summary reports cleared chats rather than attempted ones.
+6. **[medium]** _Integration_ — Move the derivation to one exported helper (e.g. `model.TeamsRoomID(chatID)` in `pkg/model/teamsroom.go`) and call it from `room-worker/teamsroomcreate.go:62` and `teams-room-inspector/handler.go:68`.
+7. **[medium]** _Integration_ — Wire `obs.Init` in `main.go` (as `teams-hr-sync` and the inspector do) and generate a per-run id via `idgen.GenerateRequestID()` carried in the context, so the Resty hop propagates `traceparent` + `X-Request-ID` and a run is traceable end to end.
+8. **[medium]** _Integration_ — Bound the scan: page `ListChatsNeedingVerify` by `_id` (the `needVerify_pending` index at `teams-chat-sync/store_mongo.go:65` already supports it), and give a chat that has mismatched for N runs a terminal state so a permanently divergent live room stops being rescanned forever.
+9. **[medium]** _Architecture_ — Wire `obs.Init` and pass the SDK to `mongoutil.WithObservability` and the Resty client — `main.go:31,74,80,87` — gives the job the same trace/metric surface as its callee and makes the verify lane one trace instead of two.
+10. **[medium]** _Architecture_ — Stamp a per-run id into ctx and send it as `X-Request-ID` (plus trace headers) on the inspector POST — `client.go:26-30` — one grep then joins the job's mismatch WARNs to the inspector's access log.
+
