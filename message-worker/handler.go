@@ -488,6 +488,8 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 // this reply's unread mark. That combined list is the audience
 // fanOutThreadUnread should mark unread; it dedups, and the sender is
 // filtered out there regardless of whether they were already a follower.
+// It deliberately writes no parent thread_room_id stamp — see the note at the
+// end of the body.
 func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
 	existingRoom, err := h.threadStore.GetThreadRoomByParentMessageID(ctx, msg.ThreadParentMessageID)
 	if err != nil {
@@ -565,30 +567,11 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		followers = append(followers, parentSender.Account)
 	}
 
-	// Re-stamp handles redelivery: first attempt may have created the thread room
-	// but crashed before the stamp landed. IF EXISTS in the store prevents phantom rows.
-	switch {
-	case parentFound && msg.ThreadParentMessageCreatedAt != nil:
-		if err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, existingRoom.ID); err != nil {
-			return "", nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
-		}
-	case !parentFound:
-		slog.ErrorContext(ctx, "subsequent thread reply: parent not found in messages_by_id, thread_room_id stamp skipped",
-			"request_id", natsutil.RequestIDFromContext(ctx),
-			"replyID", msg.ID,
-			"parentMessageID", msg.ThreadParentMessageID,
-			"threadRoomID", existingRoom.ID,
-			"room_id", msg.RoomID,
-		)
-	default: // msg.ThreadParentMessageCreatedAt == nil
-		slog.ErrorContext(ctx, "subsequent thread reply: ThreadParentMessageCreatedAt is nil, parent thread_room_id stamp skipped",
-			"request_id", natsutil.RequestIDFromContext(ctx),
-			"replyID", msg.ID,
-			"parentMessageID", msg.ThreadParentMessageID,
-			"threadRoomID", existingRoom.ID,
-			"room_id", msg.RoomID,
-		)
-	}
+	// The parent's thread_room_id is immutable and already stamped once, on the first
+	// reply (handleFirstThreadReply), so re-stamping it here is a redundant Cassandra
+	// write on every subsequent reply. Trade-off: a first reply that created the room
+	// but crashed before its stamp landed leaves the parent unstamped for that thread —
+	// a narrow window, not worth a write on every reply to self-heal.
 
 	return existingRoom.ID, followers, nil
 }

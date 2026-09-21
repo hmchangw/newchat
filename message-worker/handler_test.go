@@ -816,7 +816,6 @@ func TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent(t *testing.T) {
 		Return(&model.ThreadRoom{ID: "tr-99"}, nil)
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
 	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
 		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 	mockUserStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
@@ -889,7 +888,6 @@ func TestHandler_ProcessMessage_MigratedThreadReply_SuppressesBadgeAndOutbox(t *
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 	// No UpsertThreadSubscription, no owner-site lookup. lastMsg pointer kept.
-	mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
 	mockThreadStore.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)
 	// SaveThreadMessage returns a non-nil tcount — in the live path this would trigger the badge.
 	mockStore.EXPECT().SaveThreadMessage(gomock.Any(), &threadMsg, &expectedSender, "site-a", "tr-99").
@@ -929,7 +927,6 @@ func TestHandler_ProcessMessage_ThreadReply_AdvancesReplierLastSeen(t *testing.T
 		ts.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(errThreadRoomExists)
 		ts.EXPECT().GetThreadRoomByParentMessageID(gomock.Any(), "msg-parent").Return(&model.ThreadRoom{ID: "tr-77"}, nil)
 		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-		store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-77").Return(nil)
 		if !migration {
 			us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 			us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
@@ -1371,7 +1368,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "subsequent reply — stamps thread_room_id on parent when parentCreatedAt known",
+			name: "subsequent reply — does not re-stamp thread_room_id on the parent",
 			msg: &model.Message{
 				ID:                           "msg-reply",
 				RoomID:                       "r1",
@@ -1390,11 +1387,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).Return(nil)
-				store.EXPECT().UpdateParentMessageThreadRoomID(
-					gomock.Any(), "msg-parent", "r1",
-					now.Add(-5*time.Minute),
-					"tr-existing",
-				).Return(nil)
+				// No UpdateParentMessageThreadRoomID expectation: the stamp is immutable and
+				// written once on the first reply, so gomock fails the test if it is re-issued.
 			},
 			extraUserStoreSetup: func(us *MockUserStore) {
 				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
@@ -1402,36 +1396,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			},
 		},
 		{
-			name: "subsequent reply — UpdateParentMessageThreadRoomID fails — returns error",
-			msg: &model.Message{
-				ID:                           "msg-reply",
-				RoomID:                       "r1",
-				UserID:                       "u-replier",
-				UserAccount:                  "replier",
-				CreatedAt:                    now,
-				ThreadParentMessageID:        "msg-parent",
-				ThreadParentMessageCreatedAt: ptrTime(now.Add(-5 * time.Minute)),
-			},
-			siteID: "site-a",
-			setupMocks: func(store *MockStore, ts *MockThreadStore) {
-				ts.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(errThreadRoomExists)
-				ts.EXPECT().GetThreadRoomByParentMessageID(gomock.Any(), "msg-parent").
-					Return(&model.ThreadRoom{ID: "tr-existing"}, nil)
-				store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(parentSender, nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
-				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
-				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).Return(nil)
-				store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
-					Return(errors.New("cassandra: write timeout"))
-			},
-			extraUserStoreSetup: func(us *MockUserStore) {
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
-			},
-			wantErr: true,
-		},
-		{
-			name: "subsequent reply — parent not found but parentCreatedAt known — skips UpdateParentMessageThreadRoomID",
+			name: "subsequent reply — parent not found but parentCreatedAt known — writes no parent stamp",
 			msg: &model.Message{
 				ID:                           "msg-reply",
 				RoomID:                       "r1",
@@ -1454,7 +1419,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 						return nil
 					})
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).Return(nil)
-				// UpdateParentMessageThreadRoomID must NOT be called — parent doesn't exist
+				// UpdateParentMessageThreadRoomID must NOT be called — the subsequent-reply
+				// path never stamps, and the parent doesn't exist here either.
 				// FindUserByAccount also not called — short-circuited by errMessageNotFound branch
 			},
 		},
@@ -2404,7 +2370,6 @@ func TestHandler_ProcessMessage_MigratedThreadReply_NoThreadUnreadFanout(t *test
 		Return(&model.ThreadRoom{ID: "tr-99", ReplyAccounts: []string{"parent-user", "someone-else"}}, nil)
 	store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
 	ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)
 	ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-99", "alice", now).Return(nil)
 	store.EXPECT().SaveThreadMessage(gomock.Any(), &threadMsg, gomock.Any(), "site-a", "tr-99").
@@ -2455,7 +2420,6 @@ func TestHandler_ProcessMessage_LegacyThreadRoom_ParentAuthorGetsUnread(t *testi
 		Return(&model.ThreadRoom{ID: "tr-legacy", ReplyAccounts: []string{"bob"}}, nil)
 	store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-legacy").Return(nil)
 	// Thread-sub path resolves the parent's home site; fanOutThreadUnread
 	// resolves its recipients in one batch.
 	us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
@@ -2863,10 +2827,6 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 		ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-reply", gomock.Any(), now).Return(nil)
 		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-1", "alice", now).Return(nil)
 		ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-parent", []string{"parent-user"}).Return(nil)
-		// parentFound && ThreadParentMessageCreatedAt != nil → stamps thread_room_id on parent.
-		store.EXPECT().UpdateParentMessageThreadRoomID(
-			gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-1",
-		).Return(nil)
 	}
 
 	t.Run("publishes MessageEvent to canonical thread reply subject", func(t *testing.T) {
@@ -2940,11 +2900,8 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 		ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-reply", gomock.Any(), now).Return(nil)
 		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-1", "alice", now).Return(nil)
 		ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-parent", []string{"parent-user"}).Return(nil)
-		// The stamp must use the EVENT value.
-		store.EXPECT().UpdateParentMessageThreadRoomID(
-			gomock.Any(), "msg-parent", "r1", eventValue, "tr-1",
-		).Return(nil)
-		// The persisted reply must carry the event value.
+		// The persisted reply must carry the EVENT value — the subsequent-reply path
+		// writes no parent stamp, so this is what proves the event value is trusted.
 		newTcount := 1
 		store.EXPECT().SaveThreadMessage(gomock.Any(), &carriedMsg, &expectedSender, "site-a", "tr-1").
 			Return(&newTcount, nil)
@@ -3119,7 +3076,6 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 		Return(&model.ThreadRoom{ID: "tr-99"}, nil)
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
 	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
 		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
 	mockUserStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
