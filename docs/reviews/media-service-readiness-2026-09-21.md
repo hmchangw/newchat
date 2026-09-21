@@ -156,3 +156,19 @@ media-service is well built for what it does — errcode discipline is textbook 
 - [medium] Add the projection to `Avatar` (`minioKey`, `etag`, `contentType`, `size`) — `store_mongo.go:109` — restores projection discipline on the hottest find.
 - [medium] Migrate `eidCache` onto `pkg/userstore`, or at minimum bound the detached fetch with its own timeout — `cache.go:22,50` — gains cross-pod warm start and invalidation, and stops a stalled query pinning the singleflight key.
 - [low] Emit a bounded `Cache-Control` (e.g. `CACHE_MAX_AGE_SECONDS`) on the 307 responses — `handler.go:209,108`, `emoji_serve.go:43` — removes the per-render round trip for the most common avatar outcome.
+
+## 8. Prioritized action list
+
+Ordered by severity (`critical` first), then by the dimension most likely to carry a correctness or contract cost (integration, architecture, coverage, code quality, performance, maintainability). Each item is a recommendation from the chapter named; the `file:line` and rationale are quoted from it.
+
+1. **[high]** _Test coverage_ — Extract `run`'s pre-flight validation into a pure `validateConfig(cfg config) error` and table-test it — `main.go:46-57` — recovers most of the 69 dead statements and turns four fail-fast production gates into asserted behaviour without needing a runnable `main`.
+2. **[high]** _Performance_ — Add a `DecodeConfig` + max-dimension pre-check to the bot-avatar upload, reusing the emoji validator's shape — `media-service/upload.go:66` — closes an authenticated 1 MiB→multi-GB OOM in ~10 lines; add `AVATAR_MAX_DIMENSION` beside `EMOJI_MAX_DIMENSION`.
+3. **[medium]** _Integration_ — Add a `GET /api/v1/drive.members` subsection to `docs/client-api.md` §7 (query params, the `{success,data:{members,count,roomName,roomType}}` body, the four `errorType` values) and mirror it into `docs/client-api/request-reply.md` — `media-service/drive.go:54-115`.
+4. **[medium]** _Integration_ — Add `wrong_cluster` to the §6 reason table and to the `409` row of PUT `/api/v1/avatar/bot/:botName`; make `upload.go:50-54` emit a message that omits "upload to …" when `clusterBaseURL` returns "".
+5. **[medium]** _Integration_ — Project `Avatar` to `{minioKey:1, etag:1, contentType:1}` — `store_mongo.go:109` — matching `EmojiDoc` at `:142`, on the hottest read in the service.
+6. **[medium]** _Integration_ — Call `mongoutil.WarnMissingIndexes` for `users` (`account_1`) and `subscriptions` (`roomId_1_u.account_1`) at startup — `store_mongo.go:27-34` — so a missing peer-owned index is loud, not a silent scan.
+7. **[medium]** _Integration_ — Move `BOTPLATFORM_URL` into a `botauth.Config` mounted as a named field in each consumer — `config.go:106` — so the four services stop disagreeing on requiredness and default; same for `ADMIN_ACCT_PREFIX` in `pkg/model`.
+8. **[medium]** _Architecture_ — Move `srv.Shutdown` to the first step of `shutdown.Wait` and fold `mongoutil.Disconnect` into the chain — `media-service/main.go:131-140` — matches upload-service/auth-service, guarantees the listener closes inside the budget, and removes the hang-until-SIGKILL path at `main.go:143`.
+9. **[medium]** _Architecture_ — Either route `drive.members` through `errcode`/`errhttp` or keep the legacy envelope with an inline `// legacy Drive contract: …` justification, and add the endpoint to `docs/client-api.md` §7 (fixing the "three GETs" count) — `drive.go:213-283`.
+10. **[medium]** _Architecture_ — Give `eidCache` a bounded negative-result TTL and shorten `EID_CACHE_TTL`, or subscribe to a user-updated signal — `cache.go:206-209`, `config.go:98` — removes a per-render Mongo query for every non-employee account and caps the stale window.
+
