@@ -104,3 +104,23 @@ Coverage measures 78.9% — the closest of the family to the floor, and the enti
 ### Reviewer notes
 
 SYNTHESIZER NOTE: the reviewer scored 3 and explicitly deferred to the dimension rule; the <80% cap has been applied mechanically (3 -> 2) so this service is comparable with the other 34. The finding text is unchanged.
+
+## 5. Maintainability — score 4
+
+### Evidence
+
+- [low] `verifyBatch` is the only oversized function and carries five responsibilities — `teams-room-verify/runner.go:96-170` — 75 lines covering URL lookup, id collection, the HTTP call, the misroute guard, the per-chat comparison, stats folding and the Mongo write. The pure part (response → refs + counters) cannot be tested without standing up a `verifyFunc` stub, which is why all comparison tests go through `run()`.
+- [low] `planBatches` and the `batch` type are duplicated verbatim across two services — `teams-room-verify/runner.go:237-259` vs `teams-room-creation/runner.go:97-119` — identical bodies including the `//nolint:gocritic` line, both over the shared `model.TeamsChat` type, each with its own test (`runner_test.go:399`). The fan-out skeleton in `run()` (`runner.go:76-89` vs `teams-room-creation/runner.go:57-68`) is likewise copy-identical, so a batching fix (e.g. honouring ctx cancellation in the dispatch loop) must be made twice.
+- [low] Stats aggregation is a manual field-by-field fold with no compile-time guard — `teams-room-verify/runner.go:190-203` — adding one outcome counter means editing five places in one file (`siteStats` 40-46, `checked()` 49, `addStats` 198-202, `logSummary` 211-218, the switch 152-162). Omitting the `addStats` line compiles, passes every test, and silently zeroes that counter in the only operator-facing output this job has.
+- [low] The summary log — the job's entire product — has no test, while the tests reach into unexported runner state instead — `teams-room-verify/runner_test.go:150,202,224,241,275,305,337` assert on `r.stats[...]`. The repo already has the better pattern for a log-only job (`teams-chat-member-sync/log_test.go:55` installs a recording `slog` handler). As written, changing the stats representation breaks seven tests while a regression in the emitted line breaks none.
+- [low] Mongo pool sizing is unconfigurable here, unlike every sibling job — `teams-room-verify/main.go:74,80` calls `ConnectRead`/`Connect` with no `mongoutil.WithPool`, and `config.go:14-30` has no `Pool mongoutil.PoolConfig` field. All five other jobs mount it (`teams-room-creation/config.go:19-20` + `validateConfig` calling `cfg.Pool.Validate()`, likewise teams-hr-sync, teams-user-sync, teams-chat-member-sync, teams-room-inspector). Two clients are opened against one URI, so the drift is doubled.
+- [nitpick] `parseSiteURLs` is a third-party-shaped near-duplicate of portal-service's — `teams-room-verify/config.go:35-49` vs `portal-service/handler.go:34` — differing only in the value type (`string` vs `siteURL`). The comment at `config.go:23` acknowledges the precedent. Two copies is tolerable; a third registry would justify a small shared decoder.
+- [nitpick] Chat-id collection is inlined here but a named helper next door — `teams-room-verify/runner.go:105-108` vs `teams-room-creation`'s `chatIDs(b.chats)` — small, but it is the kind of divergence that makes the two jobs read as unrelated when they are near-twins.
+
+### Recommendations
+
+- [low] Extract the pure comparison out of `verifyBatch` — `runner.go:128-164` — into `func compare(chats []model.TeamsChat, resp *model.TeamsRoomVerifyResponse) ([]VerifiedRef, siteStats)`. It drops `verifyBatch` to ~30 lines and lets the guest/duplicate-account/unanswered cases be table-tested directly instead of through a verifier stub.
+- [low] Give `siteStats` an `add(other siteStats)` method (or fold counters into a small map keyed by outcome) — `runner.go:190-203` — so a new outcome cannot be silently dropped from the summary.
+- [low] Add a `log_test.go` asserting the summary line's keys and values via a recording `slog` handler, modelled on `teams-chat-member-sync/log_test.go:55`, and drop the direct `r.stats` reads from `runner_test.go` — it pins the operator contract and unpins the tests from private state.
+- [low] Mount `Pool mongoutil.PoolConfig` in `Config` and validate it, matching `teams-room-creation/config.go:19-20`; pass `mongoutil.WithPool(cfg.Pool)` at `main.go:74,80`.
+- [nitpick] Lift `planBatches` + `batch` into a small named shared package (e.g. `pkg/teamsbatch`, never `utils`) consumed by both this job and `teams-room-creation`, retiring one of the two identical tests.
