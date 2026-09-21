@@ -95,3 +95,28 @@ Test hygiene is otherwise good: table-driven invalid-input cases with `t.Run` (`
 - [low] Extend `integration_test.go:18` into a table covering a 500-id batch and the two store error branches (`store_mongo.go:49`, `:60`).
 - [low] Cover the immediate-`ListenAndServe`-failure path and assert Mongo/obs cleanup still runs — `main.go:115`.
 - [nitpick] Add a `HandleVerify` case for the orphan-subscription shape — `handler.go:84`.
+
+## 5. Maintainability — score 4
+
+### Evidence
+
+- [medium] The chat-id → room-id derivation is duplicated across two services and synced only by comment — `teams-room-inspector/handler.go:68` — the identical `idgen.DeterministicID([]byte(chatID))` lives at `room-worker/teamsroomcreate.go:62`, and both files carry a hand-written "must be kept in step" note (`handler.go:44-46`, `teamsroomcreate.go:56-60`). Nothing links them at compile time or in a test; `pkg/teamsmigrate/teamsmigrate.go:66` (`EmployeeIDFromGraphID`) is the established home for exactly this kind of derivation. A change on one side makes every chat report `roomExists=false` and `teams-room-verify` mismatch forever instead of failing loudly.
+- [low] Two coupled timeouts live in two services as unlinked magic numbers — `teams-room-inspector/main.go:63` — `WriteTimeout: 30s` is exactly `teams-room-verify/main.go:28`'s `inspectorTimeout = 30s`, for a batch capped at 500 ids (`pkg/model/teams.go:110`). Neither constant references the other, so raising the client bound to ride out a slow site truncates the response server-side instead.
+- [low] `verifyRequestBodyMaxBytes` encodes an untested sizing assumption — `teams-room-inspector/handler.go:25` — the cap is `maxChatIDsPerRequest*256 + 4KiB`, justified by "each well under 256 bytes". `handler_test.go:108` only exercises a body *over* the cap; no test asserts the other direction, that a full 500-id batch of realistic Graph ids still binds. Raising `TeamsRoomVerifyMaxChatIDs` or meeting longer ids would 400 every batch silently.
+- [low] Mongo pool sizing is not an operator knob, diverging from the house pattern — `teams-room-inspector/main.go:86-87` — `ConnectRead` is called with `WithObservability` only, no `Pool mongoutil.PoolConfig` field on `Config` (contrast `room-service/main.go:57`, `media-service/config.go:68`, `teams-chat-sync/main.go:30`). Tuning is only reachable through the URI string.
+- [nitpick] Design doc predates the body cap — `docs/superpowers/specs/2026-08-01-teams-room-verify-design.md:190-200` — the handler section describes binding and the 1–500 check but not `http.MaxBytesReader` (`handler.go:50`), the one piece of handler behaviour a reader would not predict from the doc.
+- [nitpick] `RoomState.UserCount` is plumbed end-to-end but drives no decision — `teams-room-inspector/store.go:13`, `handler.go:93` — it is deliberate diagnostic context (`pkg/model/teams.go:119-129`) and `teams-room-verify` compares only `SubscriptionCount`; worth keeping, but it reads like logic.
+
+### Recommendations
+
+- [medium] Extract `teamsmigrate.RoomIDFromChatID(chatID string) string` and call it from both `teams-room-inspector/handler.go:68` and `room-worker/teamsroomcreate.go:62`, with a golden chat-id→room-id test in `pkg/teamsmigrate` — turns the only cross-service invariant here from a comment into something a compiler and a test defend.
+- [low] Give the 30s inspector/verifier pair one owner: either a shared constant beside `TeamsRoomVerifyMaxChatIDs` in `pkg/model/teams.go:110`, or reciprocal comments at `main.go:63` and `teams-room-verify/main.go:28` — stops a one-sided timeout bump from silently truncating replies.
+- [low] Add a handler test that posts a full `maxChatIDsPerRequest` batch of maximum-length Graph ids and expects 200 — `handler_test.go:97` — pins the 256-byte assumption behind `verifyRequestBodyMaxBytes` so a future cap change fails a test rather than production.
+- [low] Mount `Pool mongoutil.PoolConfig` on `Config` and pass `mongoutil.WithPool(cfg.Pool)` — `main.go:30-39,86` — brings the service in line with the rest of the fleet and makes its read pool tunable without editing the URI.
+- [nitpick] Refresh §3 of `docs/superpowers/specs/2026-08-01-teams-room-verify-design.md` with the request-body cap — the doc is otherwise an accurate, useful map of this service and is worth keeping that way.
+
+### Reviewer notes
+
+- Size/complexity checks are clean and do not merit findings: nine Go files, 774 lines total, largest file `handler_test.go` (149); longest functions are `run` (`main.go:69-120`, 51 lines) and `HandleVerify` (`handler.go:47-97`, 50) — both far under the 80-line bar. Zero TODO/FIXME/HACK, no dead code, no in-service duplication. `go vet ./teams-room-inspector/...` is clean. A new engineer could safely modify this in a day; the only trap is the out-of-service derivation above.
+- Per sast-summary.md, `govulncheck` and the semgrep registry packs were blocked by egress policy; not re-run, and no SAST finding falls under this service.
+- Branch hygiene the synthesizer may want to carry: the branch already contains nine `docs/reviews/*.md` files, including a prior `teams-room-inspector-readiness-2026-08-31.md` whose maintainability findings overlap mine. CLAUDE.md §5 requires deleting everything under `docs/reviews/` before the PR is opened.
