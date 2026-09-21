@@ -103,10 +103,10 @@ func TestBootstrapStreams(t *testing.T) {
 			wantErrSub: "verify stream MESSAGES-CANONICAL-test",
 		},
 		{
-			name:        "enabled - creates input + output streams",
+			name:        "enabled - creates input + output + retry streams",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"MESSAGES-CANONICAL-test", "PUSH-NOTIFICATION-test"},
+			wantCreated: []string{"MESSAGES-CANONICAL-test", "PUSH-NOTIFICATION-test", "RETRY-test"},
 		},
 		{
 			name:       "enabled - wraps input stream creator error",
@@ -124,11 +124,19 @@ func TestBootstrapStreams(t *testing.T) {
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create stream PUSH-NOTIFICATION-test",
 		},
+		{
+			name:       "enabled - wraps retry stream creator error",
+			enabled:    true,
+			existing:   map[string]bool{},
+			failOn:     "RETRY-test",
+			failErr:    errors.New("nats down"),
+			wantErrSub: "create stream RETRY-test",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing, dedup: tc.dedup, lookupErr: tc.lookupErr}
-			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.notification.test", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.notification.test", "RETRY-test", "chat.retry.test.>", tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -153,7 +161,8 @@ func TestBootstrapStreams(t *testing.T) {
 func TestBootstrapStreams_PushStreamDedupWindowCoversTheRetryBudget(t *testing.T) {
 	js := &fakeStreamManager{}
 	require.NoError(t, bootstrapStreams(context.Background(), js,
-		"MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.test.>", true))
+		"MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.test.>",
+		"RETRY-test", "chat.retry.test.>", true))
 	cfg, ok := js.configs["PUSH-NOTIFICATION-test"]
 	require.True(t, ok)
 	assert.GreaterOrEqual(t, cfg.Duplicates, stream.OutageRetryWindow)
