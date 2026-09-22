@@ -17,7 +17,6 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/mock/gomock"
 
-	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -182,8 +181,11 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 	})
 
 	store := &salvageStore{}
-	h := NewHandler(store, salvageUsers{}, salvageThreads{}, "site-salvage",
-		func(context.Context, string, []byte, string) error { return nil })
+	// historyStore mirrors main.go's wiring: the live handler always sees a store
+	// that tags its own Cassandra errors, so settle can classify them.
+	h := NewHandler(historyStore{store}, salvageUsers{}, salvageThreads{}, "site-salvage",
+		func(context.Context, string, []byte, string) error { return nil },
+		nil, testDegradeTracker(), testDropPolicy())
 
 	reader := sdkmetric.NewManualReader()
 	consumerMetrics := natsmetrics.NewFromProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))).
@@ -298,10 +300,11 @@ func TestRetryProcessor_MarksTheDeliveryAsARedelivery(t *testing.T) {
 		})
 
 	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
-		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &fakeJSMsg{data: data, numDelivered: 1} // first delivery ON THE RETRY STREAM
-	retryProcessor(h, jsretry.DefaultBackoff)(context.Background(), msg)
+	retryProcessor(h)(context.Background(), msg)
 
 	assert.True(t, sawRedelivery,
 		"the retry lane must hand the store a redelivery, or a non-idempotent write runs twice")

@@ -610,7 +610,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 
 			h := NewHandler(mockStore, mockUserStore, mockThreadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 			err := h.processMessage(context.Background(), tt.data, tt.migration)
 			if tt.wantErr {
 				require.Error(t, err)
@@ -644,7 +644,7 @@ func TestProcessMessage_UserLookupError_FailsOpenFromEvent(t *testing.T) {
 
 	h := NewHandler(store, users, threadStore, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	evt := model.MessageEvent{
 		Event:  model.EventCreated,
@@ -712,7 +712,7 @@ func TestProcessMessage_UserLookupError_FailsOpen_ThreadReply_CreatesReplierSubs
 
 	h := NewHandler(store, users, threadStore, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	evt := model.MessageEvent{
 		Event:  model.EventCreated,
@@ -764,7 +764,7 @@ func TestProcessMessage_MentionResolveError_PersistsWithoutMentions(t *testing.T
 
 	h := NewHandler(store, users, threadStore, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	evt := model.MessageEvent{
 		Event:  model.EventCreated,
@@ -840,7 +840,7 @@ func TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent(t *testing.T) {
 			capturedData = data
 			return nil
 		},
-	)
+		nil, testDegradeTracker(), testDropPolicy())
 	require.NoError(t, h.processMessage(context.Background(), data, false))
 
 	assert.Equal(t, subject.ServerBroadcastThreadTCount("site-a"), capturedSubj,
@@ -904,7 +904,7 @@ func TestHandler_ProcessMessage_MigratedThreadReply_SuppressesBadgeAndOutbox(t *
 			publishCalled = true
 			return nil
 		},
-	)
+		nil, testDegradeTracker(), testDropPolicy())
 	require.NoError(t, h.processMessage(context.Background(), data, true))
 
 	assert.False(t, publishCalled,
@@ -950,7 +950,7 @@ func TestHandler_ProcessMessage_ThreadReply_AdvancesReplierLastSeen(t *testing.T
 		setupSubsequentReply(store, us, ts, false)
 		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-77", "alice", now).Return(nil)
 
-		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h.processMessage(context.Background(), data, false))
 	})
 
@@ -961,7 +961,7 @@ func TestHandler_ProcessMessage_ThreadReply_AdvancesReplierLastSeen(t *testing.T
 		// Advance runs on migration too ($max only moves forward) — mliu33 review on #398.
 		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-77", "alice", now).Return(nil)
 
-		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h.processMessage(context.Background(), data, true))
 	})
 
@@ -973,7 +973,7 @@ func TestHandler_ProcessMessage_ThreadReply_AdvancesReplierLastSeen(t *testing.T
 		// in setupSubsequentReply still runs and processMessage returns nil (#398 CodeRabbit).
 		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-77", "alice", now).Return(errors.New("mongo down"))
 
-		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h.processMessage(context.Background(), data, false))
 	})
 }
@@ -1564,7 +1564,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 
 			h := NewHandler(mockStore, mockUserStore, mockThreadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 			replier := &model.User{ID: tt.msg.UserID, Account: tt.msg.UserAccount, SiteID: "site-a"}
 			_, _, err := h.handleThreadRoomAndSubscriptions(context.Background(), tt.msg, tt.siteID, replier, false)
 			if tt.wantErr {
@@ -1610,7 +1610,7 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 			func(_ context.Context, _ string, _ []byte, _ string) error {
 				called = true
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 
 		err := h.publishThreadSubInboxIfRemote(context.Background(), baseSub, "site-a", "msg-1")
 		require.NoError(t, err)
@@ -1624,7 +1624,7 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 			func(_ context.Context, _ string, _ []byte, _ string) error {
 				called = true
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 
 		err := h.publishThreadSubInboxIfRemote(context.Background(), baseSub, "", "msg-1")
 		require.NoError(t, err)
@@ -1646,7 +1646,7 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 				captured.msgID = msgID
 				captured.callCnt++
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 
 		err := h.publishThreadSubInboxIfRemote(context.Background(), baseSub, "site-b", "msg-1")
 		require.NoError(t, err)
@@ -1661,7 +1661,7 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 			func(_ context.Context, _ string, _ []byte, msgID string) error {
 				second = msgID
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h2.publishThreadSubInboxIfRemote(context.Background(), baseSub, "site-b", "msg-1"))
 		assert.Equal(t, captured.msgID, second, "dedup ID must be deterministic for the same (threadRoomID, userID, msgID) seed")
 
@@ -1671,7 +1671,7 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 			func(_ context.Context, _ string, _ []byte, msgID string) error {
 				third = msgID
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h3.publishThreadSubInboxIfRemote(context.Background(), baseSub, "site-b", "msg-2"))
 		assert.NotEqual(t, captured.msgID, third)
 
@@ -1698,7 +1698,7 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 		h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), NewMockThreadStore(ctrl), "site-a",
 			func(_ context.Context, _ string, _ []byte, _ string) error {
 				return boom
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 
 		err := h.publishThreadSubInboxIfRemote(context.Background(), baseSub, "site-b", "msg-1")
 		require.Error(t, err)
@@ -1774,7 +1774,7 @@ func TestHandler_FirstReply_InboxPublishes(t *testing.T) {
 			h := NewHandler(store, us, ts, "site-a", func(_ context.Context, subj string, data []byte, msgID string) error {
 				calls = append(calls, publishCall{subj: subj, data: data, msgID: msgID})
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 
 			replier := &model.User{ID: "u-replier", Account: "replier", SiteID: tt.replierSite}
 			msg := &model.Message{
@@ -1818,7 +1818,7 @@ func TestHandler_FirstReply_InboxPublishError_NAKs(t *testing.T) {
 	boom := errors.New("publish boom")
 	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return boom
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &model.Message{
 		ID: "msg-reply", RoomID: "r1", UserID: "u-replier", UserAccount: "replier",
@@ -1850,7 +1850,7 @@ func TestHandler_FirstReply_ReplierInboxPublishError_NAKs(t *testing.T) {
 	boom := errors.New("publish boom")
 	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return boom
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &model.Message{
 		ID: "msg-reply", RoomID: "r1", UserID: "u-replier", UserAccount: "replier",
@@ -1928,7 +1928,7 @@ func TestHandler_SubsequentReply_InboxPublishes(t *testing.T) {
 				_, outer := unwrapOutbox(t, data)
 				publishedDests = append(publishedDests, outer.DestSiteID)
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 
 			replier := &model.User{ID: "u-replier", Account: "replier", SiteID: tt.replierSite}
 			msg := &model.Message{
@@ -1972,7 +1972,7 @@ func TestHandler_SubsequentReply_InboxPublishError_NAKs(t *testing.T) {
 	boom := errors.New("publish boom")
 	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return boom
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &model.Message{
 		ID: "msg-reply", RoomID: "r1", UserID: "u-replier", UserAccount: "replier",
@@ -2061,7 +2061,7 @@ func TestHandler_MarkThreadMentions_InboxPublishes(t *testing.T) {
 					_, outer := unwrapOutbox(t, data)
 					publishedDests = append(publishedDests, outer.DestSiteID)
 					return nil
-				})
+				}, nil, testDegradeTracker(), testDropPolicy())
 
 			msg := &model.Message{
 				ID:                    "msg-reply",
@@ -2094,7 +2094,7 @@ func TestHandler_MarkThreadMentions_InboxPublishError_NAKs(t *testing.T) {
 
 	boom := errors.New("publish boom")
 	h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), ts, "site-a",
-		func(_ context.Context, _ string, _ []byte, _ string) error { return boom })
+		func(_ context.Context, _ string, _ []byte, _ string) error { return boom }, nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &model.Message{
 		ID: "msg-reply", RoomID: "r1", UserID: "u-sender", UserAccount: "sender",
@@ -2119,7 +2119,7 @@ func TestHandler_MarkThreadMentions_HasMentionInPayload(t *testing.T) {
 		func(_ context.Context, _ string, data []byte, _ string) error {
 			captured = data
 			return nil
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &model.Message{
 		ID: "msg-reply", RoomID: "r1", UserID: "u-sender", UserAccount: "sender",
@@ -2170,7 +2170,7 @@ func TestHandler_MarkThreadMentions_SkipsRestrictedAndNonMembers(t *testing.T) {
 	ts.EXPECT().AddReplyAccounts(gomock.Any(), "tr-1", []string{"alice"}).Return(nil)
 
 	h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), ts, "site-a",
-		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &model.Message{
 		ID: "msg-reply", RoomID: "r1", UserID: "u-sender", UserAccount: "sender",
@@ -2297,7 +2297,7 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 				func(_ context.Context, subj string, data []byte, _ string) error {
 					calls = append(calls, capturedCall{subj: subj, data: data})
 					return nil
-				})
+				}, nil, testDegradeTracker(), testDropPolicy())
 
 			err := h.fanOutThreadUnread(context.Background(), "r1", "p1", "msg-1", tt.sender, tt.recipients)
 			if tt.wantErr {
@@ -2349,7 +2349,7 @@ func TestHandler_FanOutThreadUnread_DedupID(t *testing.T) {
 			func(_ context.Context, _ string, _ []byte, msgID string) error {
 				*capture = msgID
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 	}
 
 	var first string
@@ -2418,7 +2418,7 @@ func TestHandler_ProcessMessage_MigratedThreadReply_NoThreadUnreadFanout(t *test
 	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		t.Fatal("publish must not be called for a migrated thread reply")
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 	require.NoError(t, h.processMessage(context.Background(), data, true))
 }
 
@@ -2473,7 +2473,7 @@ func TestHandler_ProcessMessage_LegacyThreadRoom_ParentAuthorGetsUnread(t *testi
 	store.EXPECT().SaveThreadMessage(gomock.Any(), &threadMsg, gomock.Any(), "site-a", "tr-legacy").
 		Return((*int)(nil), nil)
 
-	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 	require.NoError(t, h.processMessage(context.Background(), data, false))
 }
 
@@ -2578,7 +2578,7 @@ func TestHandler_HandleJetStreamMsg(t *testing.T) {
 
 			h := NewHandler(mockStore, mockUserStore, mockThreadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 				return nil
-			})
+			}, nil, testDegradeTracker(), testDropPolicy())
 
 			fakeMsg := &fakeJSMsg{data: tt.msgData}
 			h.HandleJetStreamMsg(context.Background(), fakeMsg, nil)
@@ -2649,7 +2649,7 @@ func TestHandler_ProcessMessage_Quote(t *testing.T) {
 
 		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 			return nil
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 		err := h.processMessage(context.Background(), quotedData, false)
 		require.NoError(t, err)
 	})
@@ -2715,7 +2715,7 @@ func TestHandler_ProcessMessage_Quote_Unverified(t *testing.T) {
 				return nil
 			})
 
-		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h.processMessage(context.Background(), buildEvt(clientFallback()), false))
 	})
 
@@ -2735,7 +2735,7 @@ func TestHandler_ProcessMessage_Quote_Unverified(t *testing.T) {
 				return nil
 			})
 
-		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h.processMessage(context.Background(), buildEvt(clientFallback()), false))
 	})
 
@@ -2764,7 +2764,7 @@ func TestHandler_ProcessMessage_Quote_Unverified(t *testing.T) {
 				return nil
 			})
 
-		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		require.NoError(t, h.processMessage(context.Background(), buildEvt(clientFallback()), false))
 	})
 
@@ -2778,7 +2778,7 @@ func TestHandler_ProcessMessage_Quote_Unverified(t *testing.T) {
 		store.EXPECT().GetQuotedParentSnapshot(gomock.Any(), "parent-msg-uuid").Return(nil, false, fmt.Errorf("cassandra down"))
 		// SaveMessage must NOT be called — the error short-circuits before persist.
 
-		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		h := NewHandler(store, userStore, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		err := h.processMessage(context.Background(), buildEvt(clientFallback()), false)
 		require.Error(t, err)
 	})
@@ -2892,7 +2892,7 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 			capturedData = data
 			capturedMsgID = msgID
 			return nil
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 
 		require.NoError(t, h.processMessage(context.Background(), threadData, false))
 
@@ -2953,7 +2953,7 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 
 		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 			return nil
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 
 		require.NoError(t, h.processMessage(context.Background(), carriedData, false))
 	})
@@ -2970,13 +2970,18 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 		store.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").
 			Return(time.Time{}, false, errors.New("gocql: no hosts available"))
 
-		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
+		// Wired through historyStore exactly as main.go wires it: the tag is applied
+		// by the store decorator, not by the call site, so a test asserting the tag
+		// has to exercise the same composition production runs.
+		h := NewHandler(historyStore{store}, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 			return nil
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 
 		err := h.processMessage(context.Background(), threadData, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "resolve thread parent createdAt")
+		assert.True(t, isHistoryWriteError(err),
+			"a Cassandra read failure on the persist path is a history failure: it must set the degraded marker and NAK")
 	})
 
 	t.Run("NAKs (returns error) when parent not yet in messages_by_id — no partial writes", func(t *testing.T) {
@@ -2993,11 +2998,14 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 
 		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 			return nil
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 
 		err := h.processMessage(context.Background(), threadData, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not yet persisted")
+		assert.False(t, isHistoryWriteError(err),
+			"a parent that has not landed yet is an ordering race between concurrent workers, not a "+
+				"Cassandra failure: it must NAK for redelivery without flipping the site-wide marker")
 	})
 
 	t.Run("publish error propagates for JetStream retry", func(t *testing.T) {
@@ -3013,7 +3021,7 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 
 		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 			return errors.New("nats: publish failed")
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 
 		// Publish failure propagates so the caller can log it; badge events are
 		// best-effort via core NATS so a transient error is expected to be swallowed
@@ -3035,7 +3043,7 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 		h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 			publishCount++
 			return nil
-		})
+		}, nil, testDegradeTracker(), testDropPolicy())
 
 		require.NoError(t, h.processMessage(context.Background(), threadData, false))
 		assert.Equal(t, 0, publishCount, "must not publish when CAS was skipped")
@@ -3059,7 +3067,7 @@ func TestHandler_PublishThreadReplyEvent(t *testing.T) {
 	h := NewHandler(nil, nil, nil, "site-a", func(_ context.Context, subj string, data []byte, msgID string) error {
 		captured = publishCall{subj: subj, data: data, msgID: msgID}
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	err := h.publishThreadReplyEvent(context.Background(), msg, 5)
 	require.NoError(t, err)
@@ -3083,7 +3091,7 @@ func TestHandler_PublishThreadReplyEvent_PublishError(t *testing.T) {
 	msg := &model.Message{ID: "msg-2", RoomID: "r1", ThreadParentMessageID: "msg-1"}
 	h := NewHandler(nil, nil, nil, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return errors.New("nats: connection closed")
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 	err := h.publishThreadReplyEvent(context.Background(), msg, 3)
 	require.Error(t, err)
 }
@@ -3135,7 +3143,7 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 		Return(&expectedTcount, nil)
 
 	h := NewHandler(mockStore, mockUserStore, mockThreadStore, "site-a",
-		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 	require.NoError(t, h.processMessage(context.Background(), data, false))
 }
 
@@ -3183,7 +3191,7 @@ func TestProcessMessage_UserLookupError_FailsOpen_DoesNotFabricateReplierHomeSit
 			outboxSubjects = append(outboxSubjects, subj)
 		}
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	// The room lives at site2 while this worker is site1, so a projected
 	// SiteID of evt.SiteID would read as "remote owner" and get published.
@@ -3243,7 +3251,7 @@ func TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery(t *test
 		store := NewMockStore(ctrl)
 		us := NewMockUserStore(ctrl)
 		ts := NewMockThreadStore(ctrl)
-		h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil })
+		h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 		return store, us, ts, h
 	}
 
@@ -3483,7 +3491,8 @@ func TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane(t *testing.T) {
 	var escalated bool
 	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
-		withRetryLane(lane, jsretry.DefaultBackoff))
+		nil, testDegradeTracker(), testDropPolicy(),
+		withRetryLane(lane, jsretry.DefaultBackoff, retrylane.SlowBackoff(2, jsretry.DefaultBackoff)))
 
 	msg := &fakeJSMsg{data: data, numDelivered: 4} // past FastSteps=3
 	h.HandleJetStreamMsg(context.Background(), msg, func() { escalated = true })
@@ -3515,11 +3524,119 @@ func TestHandler_HandleJetStreamMsg_NaksWhenNoLaneIsInjected(t *testing.T) {
 		Return(errors.New("cassandra unavailable"))
 
 	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
-		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		nil, testDegradeTracker(), testDropPolicy())
 
 	msg := &fakeJSMsg{data: data, numDelivered: 4}
 	h.HandleJetStreamMsg(context.Background(), msg, nil)
 
 	assert.True(t, msg.naked, "with no lane injected the default is in-place redelivery")
 	assert.False(t, msg.acked)
+}
+func TestHandler_ReprojectUnverifiedQuote_DegradedWindow(t *testing.T) {
+	quoted := &cassandra.QuotedParentMessage{MessageID: "parent-1"}
+
+	tests := []struct {
+		name        string
+		degraded    bool
+		found       bool
+		storeErr    error
+		wantErr     bool
+		wantQuote   bool
+		description string
+	}{
+		{
+			name: "degraded and parent not yet persisted retries", degraded: true, found: false,
+			wantErr: true, wantQuote: true,
+			description: "parent is very likely still in the replay backlog",
+		},
+		{
+			name: "healthy and parent absent drops the quote", degraded: false, found: false,
+			wantErr: false, wantQuote: false,
+			description: "existing behavior, unchanged",
+		},
+		{
+			name: "degraded and parent found applies the snapshot", degraded: true, found: true,
+			wantErr: false, wantQuote: true,
+		},
+		{
+			name: "healthy and parent found applies the snapshot", degraded: false, found: true,
+			wantErr: false, wantQuote: true,
+		},
+		{
+			name: "store error retries regardless of degraded state", degraded: false, found: false,
+			storeErr: errors.New("gocql: no connections"), wantErr: true, wantQuote: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+
+			var snap *cassandra.QuotedParentMessage
+			if tt.found {
+				snap = &cassandra.QuotedParentMessage{MessageID: "parent-1", Msg: "authoritative body"}
+			}
+			store.EXPECT().GetQuotedParentSnapshot(gomock.Any(), "parent-1").
+				Return(snap, tt.found, tt.storeErr)
+
+			h := newDegradeStateHandler(t, store, noopPublish, tt.degraded, testDropPolicy())
+			evt := &model.MessageEvent{
+				SiteID:                 "site-a",
+				QuotedParentUnverified: true,
+				Message: model.Message{
+					ID:                  "m1",
+					QuotedParentMessage: quoted,
+				},
+			}
+
+			err := h.reprojectUnverifiedQuote(context.Background(), evt)
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			if tt.wantQuote {
+				assert.NotNil(t, evt.Message.QuotedParentMessage)
+			} else {
+				assert.Nil(t, evt.Message.QuotedParentMessage)
+			}
+		})
+	}
+}
+
+func TestHandler_ThreadReplyBadge_SuppressedDuringDrain(t *testing.T) {
+	tests := []struct {
+		name        string
+		degraded    bool
+		wantPublish bool
+	}{
+		{name: "healthy site publishes the badge", degraded: false, wantPublish: true},
+		{name: "degraded site suppresses the stale badge", degraded: true, wantPublish: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var published []string
+			publish := func(_ context.Context, subj string, _ []byte, _ string) error {
+				published = append(published, subj)
+				return nil
+			}
+
+			h := newDegradeStateHandler(t, nil, publish, tt.degraded, testDropPolicy())
+			err := h.publishThreadReplyEventIfLive(context.Background(), &model.Message{
+				ID:     "reply-1",
+				RoomID: "room-1",
+			}, 3)
+			require.NoError(t, err)
+
+			if tt.wantPublish {
+				assert.Len(t, published, 1)
+			} else {
+				assert.Empty(t, published, "a badge replayed an hour late re-notifies users about old activity")
+			}
+		})
+	}
 }

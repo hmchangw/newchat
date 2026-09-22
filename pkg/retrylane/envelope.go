@@ -144,3 +144,20 @@ func OriginSubject(h nats.Header, fallback string) string {
 	}
 	return fallback
 }
+
+// PriorAttempts reports how many deliveries a message accumulated before it was
+// escalated onto RETRY, from the cumulative X-Retry-Attempt header BuildHeaders
+// stamps. Zero means the message is not a retry-lane delivery at all — a hot-lane
+// message carries no such header.
+//
+// This exists because a consumer's own NumDelivered restarts at 1 on
+// RETRY-{siteID}: any policy that measures elapsed retry time from the delivery
+// count alone silently resets when the lane escalates, and the message's real
+// retry history is only recoverable from this header.
+func PriorAttempts(h nats.Header) int {
+	n, err := strconv.ParseUint(h.Get(HeaderAttempt), 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int(n)
+}

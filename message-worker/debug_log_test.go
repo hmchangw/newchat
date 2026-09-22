@@ -64,6 +64,33 @@ func (h *recordingHandler) has(l slog.Level, msg string) bool {
 	return false
 }
 
+// all returns a copy of every captured record, for assertions about what must NOT
+// appear anywhere in the output.
+func (h *recordingHandler) all() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.recs...)
+}
+
+// fieldsOf returns the attributes of the first record matching level and message,
+// or nil when there is none.
+func (h *recordingHandler) fieldsOf(l slog.Level, msg string) map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.recs {
+		if h.recs[i].Level != l || h.recs[i].Message != msg {
+			continue
+		}
+		fields := make(map[string]string)
+		h.recs[i].Attrs(func(a slog.Attr) bool {
+			fields[a.Key] = a.Value.String()
+			return true
+		})
+		return fields
+	}
+	return nil
+}
+
 func installRecorder(t *testing.T) *recordingHandler {
 	t.Helper()
 	rec := &recordingHandler{}
@@ -99,7 +126,7 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 	us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil).AnyTimes()
 	store.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a").Return(nil).AnyTimes()
 
-	h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil })
+	h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 
 	rec := installRecorder(t)
 
@@ -177,7 +204,7 @@ func TestHandleJetStreamMsg_FlowBreadcrumbs(t *testing.T) {
 	ts := NewMockThreadStore(ctrl)
 	us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil).AnyTimes()
 	store.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a").Return(nil).AnyTimes()
-	h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil })
+	h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil }, nil, testDegradeTracker(), testDropPolicy())
 
 	rec := installRecorder(t)
 	msg := &debugJSMsg{

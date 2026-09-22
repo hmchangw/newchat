@@ -32,6 +32,38 @@ import (
 // Mirrors room-worker's PublishFunc signature so message-worker can plug into the same publish closure.
 type PublishFunc func(ctx context.Context, subj string, data []byte, msgID string) error
 
+// dropPolicy bounds how long a request-class Cassandra failure is retried before
+// message-worker destroys the message, whether it may destroy it at all, and how fast.
+// Grouped rather than passed as trailing scalars: dropping is the one irreversible
+// thing this service does, so its knobs are named at every call site.
+//
+// Build it with newDropPolicy — a zero-value literal has no rate limiter, and a
+// policy with no limiter never drops (see dropLimiter.Allow).
+type dropPolicy struct {
+	// RetryWindow (INVALID_RETRY_WINDOW) is how long a request-class failure is
+	// retried before the message is dropped, measured as accumulated NAK backoff —
+	// see settle.
+	RetryWindow time.Duration
+	// Enabled (HISTORY_DROP_ENABLED) is the operator's brake. When false a
+	// request-class failure past the window NAKs instead of dropping, so a schema
+	// migration that turns every write request-class can be survived without a deploy.
+	Enabled bool
+	// limiter caps drops per pod per minute (MAX_DROPS_PER_MINUTE) so a site-wide
+	// fault that presents as request class cannot destroy a whole feed before a human
+	// reacts.
+	limiter *dropLimiter
+}
+
+// newDropPolicy assembles the give-up policy. clock may be nil (real time); tests
+// inject one to roll the rate limiter's window without sleeping.
+func newDropPolicy(retryWindow time.Duration, enabled bool, maxDropsPerMinute uint64, clock func() time.Time) dropPolicy {
+	return dropPolicy{
+		RetryWindow: retryWindow,
+		Enabled:     enabled,
+		limiter:     newDropLimiter(maxDropsPerMinute, time.Minute, clock),
+	}
+}
+
 type Handler struct {
 	store       Store
 	userStore   userstore.UserStore
@@ -39,12 +71,20 @@ type Handler struct {
 	siteID      string
 	publish     PublishFunc
 	metrics     *persistenceMetrics
-	// lane and fastBackoff back HandleJetStreamMsg's Settle call. lane holds no
-	// per-message OnEscalate hook — HandleJetStreamMsg derives a per-delivery
-	// copy via WithEscalationHook so the hook (a metrics recorder closure)
-	// never mutates state shared across the worker's message goroutines.
+	// lane, fastBackoff and slowBackoff back the two dispositions in settle.go.
+	// lane holds no per-message OnEscalate hook — laneDisposition derives a
+	// per-delivery copy via WithEscalationHook so the hook (a metrics recorder
+	// closure) never mutates state shared across the worker's message goroutines.
+	// slowBackoff is also what retriedFor charges post-escalation deliveries at.
 	lane        *retrylane.Lane
 	fastBackoff []time.Duration
+	slowBackoff []time.Duration
+	// histMetrics carries the history-degradation series (write failures, drops,
+	// drop suppression, degraded gauge) — distinct from the persistence-outcome
+	// counter above, which labels every write by message kind.
+	histMetrics *metrics
+	degrade     *degradeTracker
+	drop        dropPolicy
 }
 
 type messageWorkerHandlerOption func(*messageWorkerHandlerOptions)
@@ -53,25 +93,30 @@ type messageWorkerHandlerOptions struct {
 	metrics     *persistenceMetrics
 	lane        *retrylane.Lane
 	fastBackoff []time.Duration
+	slowBackoff []time.Duration
 }
 
 func withPersistenceMetrics(metrics *persistenceMetrics) messageWorkerHandlerOption {
 	return func(opts *messageWorkerHandlerOptions) { opts.metrics = metrics }
 }
 
-// withRetryLane injects the base tiered-redelivery lane plus the fast-rung
-// backoff schedule it settles with in place before escalating. Omitted (as in
-// every pre-existing NewHandler call site), the handler falls back to a
-// disabled zero-value Lane and the full jsretry.DefaultBackoff schedule —
-// exactly today's behavior.
-func withRetryLane(lane *retrylane.Lane, fastBackoff []time.Duration) messageWorkerHandlerOption {
+// withRetryLane injects the base tiered-redelivery lane plus the two schedules it
+// settles with: fast rungs in place before escalating, slow rungs once parked on
+// RETRY-{siteID}. Omitted (as in every pre-existing NewHandler call site), the
+// handler falls back to a disabled zero-value Lane and jsretry.DefaultBackoff for
+// both — exactly today's behavior, since a disabled lane never escalates and so
+// never reaches the slow schedule.
+func withRetryLane(lane *retrylane.Lane, fastBackoff, slowBackoff []time.Duration) messageWorkerHandlerOption {
 	return func(opts *messageWorkerHandlerOptions) {
 		opts.lane = lane
 		opts.fastBackoff = fastBackoff
+		opts.slowBackoff = slowBackoff
 	}
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string, publish PublishFunc, options ...messageWorkerHandlerOption) *Handler {
+func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string,
+	publish PublishFunc, m *metrics, degrade *degradeTracker, drop dropPolicy,
+	options ...messageWorkerHandlerOption) *Handler {
 	var opts messageWorkerHandlerOptions
 	for _, option := range options {
 		option(&opts)
@@ -85,6 +130,9 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 	if opts.fastBackoff == nil {
 		opts.fastBackoff = jsretry.DefaultBackoff
 	}
+	if opts.slowBackoff == nil {
+		opts.slowBackoff = jsretry.DefaultBackoff
+	}
 	return &Handler{
 		store:       store,
 		userStore:   userStore,
@@ -94,6 +142,10 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 		metrics:     opts.metrics,
 		lane:        opts.lane,
 		fastBackoff: opts.fastBackoff,
+		slowBackoff: opts.slowBackoff,
+		histMetrics: m,
+		degrade:     degrade,
+		drop:        drop,
 	}
 }
 
@@ -117,24 +169,28 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg, onE
 
 	// Sole persister of message history to Cassandra: transient failures must
 	// retry with backoff (never drop); malformed events Ack-drop as poison.
-	// The per-message lane escalates to RETRY-{siteID} once h.fastBackoff is spent
-	// (when the lane is enabled); disabled, this is exactly jsretry.Settle over the
-	// full schedule.
-	lane := h.lane.WithEscalationHook(onEscalate)
-	lane.Settle(ctx, msg, h.fastBackoff, h.process(ctx, msg))
+	// settle owns the give-up decision on both lanes; laneDisposition only changes
+	// how a retry is handed back — in place on the fast rungs, or escalated to
+	// RETRY-{siteID} once they are spent. With the lane disabled this is exactly
+	// jsretry.Settle over the full schedule.
+	h.settle(ctx, msg, h.laneDisposition(onEscalate), h.process(ctx, msg))
 }
 
 // process decodes and persists one delivery, without settling it — the caller
-// decides how: HandleJetStreamMsg settles through the retry lane (it may
-// escalate to RETRY-{siteID}), while main.go's retry-consumer loop settles a
-// message already on RETRY with plain jsretry.Settle over the slow-rung
-// schedule (the retry lane does not escalate a second time). Both callers
-// share this one path so the two settling strategies can never diverge on
-// what "processed" means.
+// decides which disposition settle hands it back with. HandleJetStreamMsg uses
+// the retry lane's; main.go's retry-consumer loop uses the slow one. Both share
+// this one path so the two lanes can never diverge on what "processed" means.
 func (h *Handler) process(ctx context.Context, msg jetstream.Msg) error {
 	// Migrated (X-Migration: live) events are persisted, but downstream thread side-effects are suppressed (see processMessage).
 	isMigration := natsutil.IsMigrationLiveHeader(msg.Headers())
 	return h.processMessage(ctx, msg.Data(), isMigration)
+}
+
+// HandleRetryMsg is the retry-consumer entry point: the same policy, settled in
+// place on the slow schedule because a message already on RETRY-{siteID} is never
+// escalated a second time.
+func (h *Handler) HandleRetryMsg(ctx context.Context, msg jetstream.Msg) {
+	h.settle(ctx, msg, h.slowDisposition(), h.process(ctx, msg))
 }
 
 func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration bool) error {
@@ -221,8 +277,20 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		// The gatekeeper resolves the parent's createdAt best-effort at send time
 		// and ships it on the event; trust it when present. Otherwise resolve
 		// authoritatively from messages_by_id. A miss → parent's canonical write
-		// hasn't landed → NAK for redelivery (bounded by MaxDeliver) rather than
-		// persist a null, corrupting partition coords.
+		// hasn't landed → NAK for redelivery rather than persist a null, corrupting
+		// partition coords.
+		//
+		// Only the read *error* is tagged as a history failure. A failed Cassandra
+		// read is the same signal as a failed write — history is behind — and tagging
+		// it is what lets a thread reply mark the site degraded at the onset of an
+		// outage, before any plain message has failed its own write.
+		//
+		// A clean miss is not that signal. The canonical feed is consumed by
+		// MAX_WORKERS goroutines concurrently, so a reply overtaking its own parent is
+		// an ordering race between healthy workers, not evidence that Cassandra is
+		// unwell. Tagging it would let one routine race flip a site-wide marker that
+		// makes every room report incompleteSince and suppresses every thread badge
+		// until the drain grace elapses. It retries either way; only the marker differs.
 		if evt.Message.ThreadParentMessageCreatedAt == nil {
 			createdAt, found, err := h.store.GetMessageCreatedAt(ctx, evt.Message.ThreadParentMessageID)
 			if err != nil {
@@ -289,7 +357,7 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		// Suppress the live tcount badge for migrated replies: the source already delivered it, and the
 		// badge carries no migration header so broadcast-worker would re-notify. The count is persisted above.
 		if newTcount != nil && !isMigration {
-			if err := h.publishThreadReplyEvent(ctx, &evt.Message, *newTcount); err != nil {
+			if err := h.publishThreadReplyEventIfLive(ctx, &evt.Message, *newTcount); err != nil {
 				return fmt.Errorf("publish thread reply event: %w", err)
 			}
 		}
@@ -321,10 +389,12 @@ func messageKind(msg *model.Message) messageKindLabel {
 // reprojectUnverifiedQuote corrects an untrusted quoted-parent snapshot before the
 // durable write. When the gatekeeper set QuotedParentUnverified (it degraded to a
 // server-built placeholder during a transient history outage), re-read the
-// authoritative snapshot from Cassandra and overwrite the sensitive fields —
-// preserving the gatekeeper-built MessageLink — or drop the quote when the parent
-// can't be confirmed, so a fabricated snapshot never persists. No-op on the happy
-// path; a Cassandra failure NAKs and replays.
+// authoritative snapshot from Cassandra and overwrite the sensitive fields,
+// preserving the gatekeeper-built MessageLink, so a fabricated snapshot never
+// persists. A parent that cannot be confirmed bifurcates on site health: while the
+// marker is set the parent is very likely still in the replay backlog, so the
+// message retries; once history has caught up the quote is dropped and the message
+// persists without it. No-op on the happy path; a Cassandra failure NAKs and replays.
 func (h *Handler) reprojectUnverifiedQuote(ctx context.Context, evt *model.MessageEvent) error {
 	if !evt.QuotedParentUnverified || evt.Message.QuotedParentMessage == nil {
 		return nil
@@ -338,6 +408,14 @@ func (h *Handler) reprojectUnverifiedQuote(ctx context.Context, evt *model.Messa
 	// cleared regardless of whether the parent was found.
 	evt.QuotedParentUnverified = false
 	if !found {
+		if h.degrade.Degraded() {
+			// History is still catching up, so a not-found parent is very likely
+			// still in the replay backlog rather than genuinely absent. Retry
+			// instead of persisting a permanent defect. Bounded by the marker
+			// clearing: once history has caught up, the drop path below applies
+			// and the message persists without its quote rather than looping.
+			return fmt.Errorf("quoted parent %s not yet persisted during degraded window", q.MessageID)
+		}
 		// Accepted trade-off: MESSAGES-CANONICAL doesn't order the parent's persist
 		// relative to this reply, so a parent row still in flight reads as not-found
 		// and the quote is dropped permanently (no bounded retry). Quoting a parent
@@ -848,6 +926,20 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 		return fmt.Errorf("publish thread subscription outbox to %s: %w", ownerSiteID, err)
 	}
 	return nil
+}
+
+// publishThreadReplyEventIfLive publishes the thread-reply badge unless history is
+// still catching up. During a drain the handler replays an outage's worth of events,
+// and the badge is a live client notification: firing it hours late re-notifies users
+// about old activity. The tcount itself is already durable in Cassandra, so skipping
+// the badge loses nothing but the transient ping.
+func (h *Handler) publishThreadReplyEventIfLive(ctx context.Context, msg *model.Message, tcount int) error {
+	if h.degrade.Degraded() {
+		slog.DebugContext(ctx, "suppressing thread reply badge during history drain",
+			"message_id", msg.ID, "request_id", natsutil.RequestIDFromContext(ctx))
+		return nil
+	}
+	return h.publishThreadReplyEvent(ctx, msg, tcount)
 }
 
 // publishThreadReplyEvent fires a badge event via core NATS so broadcast-worker

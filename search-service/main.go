@@ -250,7 +250,8 @@ func main() {
 	usersClient := newHTTPUsersClient(usersRC, cfg.UsersAPI.Token)
 
 	store := newESStore(engine, cfg.UserRoomIndex)
-	cache := newValkeyCache(valkey)
+	// Fenced: it falls through to Elasticsearch, so slow is worse than missing.
+	cache := newValkeyCache(valkeyutil.Breakered(valkey, cfg.Valkey.Breaker.New(ctx, "searchrestrictedl2")))
 	mongoStore := newMongoStore(mongoDB)
 
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, mongoutil.IndexEnsureTimeout)

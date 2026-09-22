@@ -39,6 +39,21 @@ services:
       # same process as the hot loop, so reusing MAX_WORKERS would double the in-flight
       # cap during an incident. It also damps the recovery herd when a dependency returns.
       - RETRY_CONSUMER_MAX_WORKERS=${RETRY_CONSUMER_MAX_WORKERS:-10}
+      # JetStream must never terminate a message behind the handler's back: the
+      # give-up decision lives in settle.go, which drops only a request-class
+      # Cassandra failure (invalid / syntax) that outlived the window below.
+      - CONSUMER_MAX_DELIVER=${CONSUMER_MAX_DELIVER:--1}
+      # How long writes must keep failing before the site is marked degraded. The
+      # marker is site-wide and held 20m past the drain, so marking on the first
+      # failure turned any blip the retry resolves into a site-wide notice.
+      - DEGRADE_MARK_DELAY=${DEGRADE_MARK_DELAY:-30s}
+      # How long a request-class failure is retried (accumulated NAK backoff)
+      # before the message is destroyed. HISTORY_DROP_ENABLED=false is the brake.
+      - INVALID_RETRY_WINDOW=${INVALID_RETRY_WINDOW:-1h}
+      - HISTORY_DROP_ENABLED=${HISTORY_DROP_ENABLED:-true}
+      # Unattended brake: caps destruction per pod per minute so a site-wide fault
+      # that presents as a request error cannot destroy a whole feed unnoticed.
+      - MAX_DROPS_PER_MINUTE=${MAX_DROPS_PER_MINUTE:-10}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}

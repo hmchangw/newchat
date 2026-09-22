@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"sync"
 
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -40,6 +41,10 @@ func membershipLaneCap(maxAckPending int) int {
 // same (room, account), which is the one thing the sequential lane exists to
 // prevent. It is safe to block on because membershipLaneCap sizes the channel
 // past the delivery budget — see that function.
+//
+// It returns the error that ended the iterator so the caller can report the
+// loop's death to its pkg/loopguard Guard, the same way natsmetrics.Consume
+// does. Swallowing it would leave the pod ready and idle.
 func dispatchLanes(
 	iter natsmetrics.Iterator,
 	isMembership func(subject string) bool,
@@ -47,12 +52,16 @@ func dispatchLanes(
 	sem chan struct{},
 	wg *sync.WaitGroup,
 	process func(laneMsg),
-) {
+) error {
 	defer close(membershipCh)
 	for {
 		msgCtx, msg, err := iter.Next()
 		if err != nil {
-			return
+			if natsmetrics.Recoverable(err) {
+				slog.Warn("inbox dispatch stalled; retrying", "error", err)
+				continue
+			}
+			return err
 		}
 		m := laneMsg{ctx: msgCtx, msg: msg}
 		if isMembership(msg.Subject()) {

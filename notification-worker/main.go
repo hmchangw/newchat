@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -166,7 +167,8 @@ func main() {
 
 	// Built here rather than inside the loader: the tier's closures escape to the
 	// heap, so constructing one per L1 miss would allocate on every cold room.
-	metaTier := roommetacache.NewL2Tier(valkeyClient, roomsCol, cfg.RoomMetaL2.TTL,
+	// Separate breakers: one key shape timing out must not fence the other.
+	metaTier := roommetacache.NewL2Tier(valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "notifmetal2")), roomsCol, cfg.RoomMetaL2.TTL,
 		nil, cachemetrics.For("roommeta", "l2"))
 	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL, metaTier.Get)
 	if err != nil {
@@ -174,7 +176,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cache := roomsubcache.NewValkeyCache(valkeyClient)
+	cache := roomsubcache.NewValkeyCache(valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "notifroomsubl2")))
 	// The shared loader stamps each member's HOME site for the per-site badge
 	// RPC. It has to: the cache key is shared, so whichever service fills it
 	// first decides what every other service reads — a loader that skipped the
@@ -356,10 +358,19 @@ func main() {
 		slog.Error("canonical member event iterator failed", "error", err)
 		os.Exit(1)
 	}
+	// Armed before either consume loop starts: a dying loop raises SIGTERM on
+	// this process, and a signal raised before the handler exists is fatal.
+	sig := shutdown.Signals()
+	invalLoop := loopguard.New("invalidation-loop", loopguard.SelfShutdown)
 	go func() {
 		for {
 			_, msg, err := invalIter.Next()
 			if err != nil {
+				if natsmetrics.Recoverable(err) {
+					slog.Warn("consume loop stalled; retrying", "loop", "invalidation-loop", "error", err)
+					continue
+				}
+				invalLoop.Stopped(err)
 				return
 			}
 			var evt model.CanonicalMemberEvent
@@ -389,6 +400,7 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	wg.Add(1)
 	go func() {
 		// The loop itself is counted so shutdown, which stops the iterator and
@@ -398,7 +410,12 @@ func main() {
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				if natsmetrics.Recoverable(err) {
+					slog.Warn("consume loop stalled; retrying", "loop", "consume-loop", "error", err)
+					continue
+				}
 				consumerMetrics.LoopFailed(context.Background(), err)
+				loop.Stopped(err)
 				return
 			}
 			sem <- struct{}{}
@@ -497,6 +514,8 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
+		invalLoop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -514,7 +533,9 @@ func main() {
 		"retry_lane_enabled", cfg.Retry.Enabled,
 	)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
+		// Both guards, before either iterator is stopped below.
+		func(_ context.Context) error { loop.BeginShutdown(); invalLoop.BeginShutdown(); return nil },
 		func(_ context.Context) error {
 			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()

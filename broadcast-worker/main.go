@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -237,7 +238,8 @@ func main() {
 	// alongside subscriptions and rooms, as notification-worker already does.
 	usersPrimary := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 	store := NewMongoStore(roomsPrimaryStore, subsPrimary, db.Collection("thread_rooms"),
-		usersPrimary, valkeyClient, cfg.RoomMetaL2.TTL, cfg.RoomSubCache.TTL, mongoBreaker)
+		usersPrimary, valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "broadcastl2")),
+		cfg.RoomMetaL2.TTL, cfg.RoomSubCache.TTL, mongoBreaker)
 
 	var (
 		previewCipher atrest.Cipher
@@ -494,10 +496,13 @@ func main() {
 	}
 	consumerMetrics.LoopStarted(ctx)
 
+	sig := shutdown.Signals()
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	var wg sync.WaitGroup
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		guardedProcessor(broadcastProcessor(handler, retryLane)))
+		guardedProcessor(broadcastProcessor(handler, retryLane)),
+		loop.Stopped)
 
 	// The retry consumer binds and drains regardless of cfg.Retry.Enabled (the rollback
 	// asymmetry from spec §4): disabling the lane stops new escalations onto RETRY-{siteID},
@@ -527,11 +532,17 @@ func main() {
 			func(msg jetstream.Msg) natsmetrics.EventType {
 				return natsmetrics.EventTypeFromSubject(retrylane.OriginSubject(msg.Headers(), msg.Subject()))
 			},
-			guardedProcessor(retryProcessor(handler, slowBackoff)))
+			guardedProcessor(retryProcessor(handler, slowBackoff)),
+			// No loopguard: the retry loop draining is not a liveness condition for
+			// live fan-out, and SelfShutdown here would kill a healthy pod over a
+			// stalled drain. natsmetrics.Consume still records LoopFailed, so a dead
+			// retry loop is visible in metrics — matching notification-worker.
+			nil)
 	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -542,6 +553,7 @@ func main() {
 		"retry_lane_enabled", cfg.Retry.Enabled)
 
 	hooks := []func(context.Context) error{
+		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(_ context.Context) error {
 			return broadcastSub.Unsubscribe()
 		},
@@ -594,7 +606,7 @@ func main() {
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 
-	shutdown.Wait(ctx, 25*time.Second, hooks...)
+	shutdown.WaitOn(ctx, sig, 25*time.Second, hooks...)
 }
 
 // natsPublisher adapts *o11ynats.Conn to the Publisher interface.

@@ -80,8 +80,30 @@ func (l *Lane) WithEscalationHook(fn func()) *Lane {
 // backoffFor would instead reuse the last fast rung for every later delivery
 // and burn the consumer's MaxDeliver long before its outage budget intends.
 func (l *Lane) Settle(ctx context.Context, msg Msg, backoff []time.Duration, err error) {
+	l.settle(ctx, msg, backoff, err, jsretry.Settle)
+}
+
+// SettleQuiet is Settle without jsretry's own failure log, for a caller that has
+// already logged the failure itself. message-worker's drop suppression is the
+// one such caller: it logs a cql_code-labelled warning and deliberately keeps the
+// raw CQL error out of the log, because an "Invalid" message echoes the offending
+// value — untrusted message content. Letting jsretry log it would put that text
+// back, at the volume a schema-drift wave re-evaluates at.
+//
+// The escalation log is NOT suppressed: it is a state change on-call acts on,
+// built from bounded fields, not a restatement of the error.
+func (l *Lane) SettleQuiet(ctx context.Context, msg Msg, backoff []time.Duration, err error) {
+	l.settle(ctx, msg, backoff, err, jsretry.SettleQuiet)
+}
+
+// settle holds the body both variants share; inPlace is the jsretry entry point
+// used when this delivery is not escalated, so the two cannot drift on anything
+// but the logging they were chosen for.
+func (l *Lane) settle(ctx context.Context, msg Msg, backoff []time.Duration, err error,
+	inPlace func(context.Context, jsretry.Msg, []time.Duration, error),
+) {
 	if !l.shouldEscalate(msg, err) {
-		jsretry.Settle(ctx, msg, backoff, err)
+		inPlace(ctx, msg, backoff, err)
 		return
 	}
 	hdr, escErr := l.escalate(ctx, msg, err)
