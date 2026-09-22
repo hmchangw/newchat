@@ -26,6 +26,15 @@ services:
       - SESSION_CACHE_TTL=${SESSION_CACHE_TTL:-90m}
       - MONGO_SERVER_SELECTION_TIMEOUT=${MONGO_SERVER_SELECTION_TIMEOUT:-2s}
       - BCRYPT_COST=${BCRYPT_COST:-10}
+      # Admission caps. MAX_CONCURRENCY guards /api/v1/login (bcrypt before the
+      # password is known good); BOT_MAX_CONCURRENCY guards the bot routes,
+      # where requireBot's session lookup misses a positive-only cache on every
+      # invalid token and reaches MongoDB. Overflow is shed 429 + Retry-After,
+      # never queued. Raise BOT_MAX_CONCURRENCY if BOT_RATE_LIMIT_GLOBAL_PER_MIN
+      # is raised well above its default or set to 0, or where Valkey is absent
+      # — in those deployments this is the only ceiling on bot traffic.
+      - MAX_CONCURRENCY=${MAX_CONCURRENCY:-32}
+      - BOT_MAX_CONCURRENCY=${BOT_MAX_CONCURRENCY:-32}
       - DEV_MODE=${DEV_MODE:-true}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro

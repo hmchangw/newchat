@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/hmchangw/chat/pkg/ginutil"
@@ -40,9 +42,17 @@ func registerBotRoutes(r *gin.Engine, valkey valkeyutil.Client, cfg *config, h *
 		}
 	}
 
-	// chain composes auth + rate-limit + idempotency with nils elided.
+	// admit runs ahead of auth deliberately. requireBot's session lookup is the
+	// per-request cost paid before the token is known valid, and it cannot be
+	// rate-limited — botRateLimit needs the principal requireBot produces, so an
+	// invalid token is never metered. Shedding here costs no I/O (a channel
+	// select), whereas a rate limiter would need a Valkey round trip to decide
+	// to reject and fails open when Valkey is down.
+	admit := cfg.BotRoutes.Middleware(func() { botRequestsShed.Add(context.Background(), 1) })
+
+	// chain composes admission + auth + rate-limit + idempotency with nils elided.
 	chain := func(idem gin.HandlerFunc) []gin.HandlerFunc {
-		out := []gin.HandlerFunc{auth}
+		out := []gin.HandlerFunc{admit, auth}
 		if rateLimit != nil {
 			out = append(out, rateLimit)
 		}

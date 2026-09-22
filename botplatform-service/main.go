@@ -38,20 +38,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.SessionsMaxPerAccount <= 0 {
-		return fmt.Errorf("SESSIONS_MAX_PER_ACCOUNT must be positive, got %d", cfg.SessionsMaxPerAccount)
-	}
-	if cfg.BcryptCost < 4 || cfg.BcryptCost > 31 {
-		return fmt.Errorf("BCRYPT_COST must be in [4, 31], got %d", cfg.BcryptCost)
-	}
-	if err := cfg.Pool.Validate(); err != nil {
-		return fmt.Errorf("validate mongo pool: %w", err)
-	}
-	if err := cfg.Breaker.Validate(""); err != nil {
-		return fmt.Errorf("validate mongo breaker: %w", err)
-	}
-	if err := cfg.HTTP.Validate(); err != nil {
-		return fmt.Errorf("validate http timeout: %w", err)
+	if err := validateConfig(&cfg); err != nil {
+		return err
 	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
@@ -162,5 +150,36 @@ func run() error {
 		return fmt.Errorf("listen and serve: %w", err)
 	}
 	<-shutdownDone
+	return nil
+}
+
+// validateConfig rejects a config that would start the service in a state the
+// code cannot express safely. Extracted from run() so it is reachable from a
+// test without dialling MongoDB, NATS or Valkey — the negative-cap cases below
+// are the reason: MaxConcurrency reads a negative value as "disabled", so an
+// unvalidated typo silently removes an admission control rather than failing
+// the boot.
+func validateConfig(cfg *config) error {
+	if cfg.SessionsMaxPerAccount <= 0 {
+		return fmt.Errorf("SESSIONS_MAX_PER_ACCOUNT must be positive, got %d", cfg.SessionsMaxPerAccount)
+	}
+	if cfg.BcryptCost < 4 || cfg.BcryptCost > 31 {
+		return fmt.Errorf("BCRYPT_COST must be in [4, 31], got %d", cfg.BcryptCost)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate mongo pool: %w", err)
+	}
+	if err := cfg.Breaker.Validate(""); err != nil {
+		return fmt.Errorf("validate mongo breaker: %w", err)
+	}
+	if err := cfg.HTTP.Validate(); err != nil {
+		return fmt.Errorf("validate http timeout: %w", err)
+	}
+	if err := cfg.Login.Validate(); err != nil {
+		return fmt.Errorf("validate login admission cap: %w", err)
+	}
+	if err := cfg.BotRoutes.Validate(); err != nil {
+		return fmt.Errorf("validate bot admission cap: %w", err)
+	}
 	return nil
 }

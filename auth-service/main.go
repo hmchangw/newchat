@@ -59,6 +59,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	// A negative cap would otherwise read as "disabled" and silently drop the
+	// admission control on the unauthenticated endpoint.
+	if err := cfg.Login.Validate(); err != nil {
+		return fmt.Errorf("validate login admission cap: %w", err)
+	}
 
 	signingKP, err := nkeys.FromSeed([]byte(cfg.AuthScopedSigningKey))
 	if err != nil {

@@ -103,6 +103,11 @@ func loadConfig() (Config, error) {
 	if err := env.Parse(&c); err != nil {
 		return Config{}, err
 	}
+	// A negative cap would otherwise read as "disabled" and silently drop the
+	// admission control on the unauthenticated /v1/login route.
+	if err := c.Login.Validate(); err != nil {
+		return Config{}, fmt.Errorf("validate login admission cap: %w", err)
+	}
 	if err := checkHandlerTimeout("ROOM_RPC_TIMEOUT", c.RoomRPCTimeout); err != nil {
 		return Config{}, err
 	}

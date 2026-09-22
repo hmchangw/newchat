@@ -31,6 +31,10 @@ services:
       - CLIENT_UPDATE_TOKEN=${CLIENT_UPDATE_TOKEN:-local-dev-token-0123456789}
       - CLIENT_UPDATE_UPLOAD_TIMEOUT=10m
       - CLIENT_UPDATE_MAX_UPLOAD_BYTES=${CLIENT_UPDATE_MAX_UPLOAD_BYTES:-2147483648}
+      # Sheds overflow on the unauthenticated login endpoint with 429 +
+      # Retry-After rather than queueing it: bcrypt runs before the credential
+      # is known valid, so an unmetered caller is a CPU load generator. 0 disables.
+      - MAX_CONCURRENCY=${MAX_CONCURRENCY:-32}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
