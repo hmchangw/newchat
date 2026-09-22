@@ -154,8 +154,7 @@ func main() {
 
 	// Built here rather than inside the loader: the tier's closures escape to the
 	// heap, so constructing one per L1 miss would allocate on every cold room.
-	// Separate breakers: room metadata and room subscriptions are different key
-	// shapes, and one timing out must not switch the other off.
+	// Separate breakers: one key shape timing out must not fence the other.
 	metaTier := roommetacache.NewL2Tier(valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "notifmetal2")), roomsCol, cfg.RoomMetaL2.TTL,
 		nil, cachemetrics.For("roommeta", "l2"))
 	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL, metaTier.Get)

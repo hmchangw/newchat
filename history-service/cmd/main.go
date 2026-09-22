@@ -184,12 +184,8 @@ func main() {
 		slog.Info("subauth L2 cache configured", "enabled", subValkey != nil && cfg.SubL2.TTL > 0, "ttl", cfg.SubL2.TTL)
 	}
 
-	// One breaker per tier over the one connection. Without these, a Valkey that
-	// accepts TCP and never answers costs every tier a full CallBudget on every
-	// call, for the whole outage — and it is the handler slot held for that
-	// budget, not any error path, that then sheds requests Cassandra could have
-	// served. Separate instances because a tier whose values are large can time
-	// out against a healthy Valkey, and must not switch off the others.
+	// One breaker per tier over the one connection: the handler slot held per
+	// call is what sheds traffic, and a large tier must not fence the others.
 	subAuthL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "subauthl2"))
 	dekL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "atrestdekl2"))
 	roomTimesL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "roomtimesl2"))

@@ -8,33 +8,18 @@ import (
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 )
 
-// BreakerConfig is an env-tagged Valkey circuit-breaker configuration, the
-// companion to Profile: the profile bounds how long one call waits, this bounds
-// how many calls pay that wait before the tier stops trying.
-//
-// Profile.CallBudget makes each payment survivable; this makes the payments
-// rare. Neither replaces the other — the budget still governs the calls before
-// the breaker opens, and every half-open probe after it does.
-//
-// Add it as a named field, call Validate() during config load, and build one
-// breaker PER TIER with New. A service that prefixes its knobs puts an
-// envPrefix on the field, so HISTORY_ reads HISTORY_VALKEY_BREAKER_FAILS.
+// BreakerConfig bounds how many calls pay a full CallBudget before a tier stops
+// trying. Build one breaker PER TIER from it; see New.
 type BreakerConfig struct {
-	// Fails is the consecutive-failure budget before the breaker opens. 0
-	// disables fencing entirely: calls always pass through.
+	// 0 disables fencing entirely: calls always pass through.
 	Fails int `env:"VALKEY_BREAKER_FAILS" envDefault:"5"`
-	// Cooldown is how long an open breaker fences calls before admitting one
-	// half-open probe. Keep it generous: a probe against a still-dead Valkey
-	// costs a full CallBudget, so a short cooldown reinstates the tax the
-	// breaker exists to remove.
+	// Keep generous: each half-open probe against a still-dead Valkey costs a
+	// full CallBudget, so a short cooldown reinstates the tax fencing removes.
 	Cooldown time.Duration `env:"VALKEY_BREAKER_COOLDOWN" envDefault:"10s"`
 }
 
-// Validate rejects negative values. Zero is legal for both and means "no
-// fencing"; negative means nothing.
-//
-// envPrefix is the field's own envPrefix ("" when unprefixed), so the message
-// names the variable the operator actually set.
+// Validate rejects negative values; zero is legal and means no fencing.
+// envPrefix names the variable the operator actually set.
 func (b BreakerConfig) Validate(envPrefix string) error {
 	if b.Fails < 0 {
 		return fmt.Errorf("%sVALKEY_BREAKER_FAILS must be >= 0, got %d", envPrefix, b.Fails)
@@ -45,20 +30,11 @@ func (b BreakerConfig) Validate(envPrefix string) error {
 	return nil
 }
 
-// New builds a breaker from this config, reporting under name on the shared
-// state gauge. Give each tier its own name: one breaker shared across tiers
-// means a single tier with oversized values — roomsubcache accepts blobs up to
-// DefaultMaxValueBytes — can time out against a healthy Valkey and switch the
-// cache off for every other consumer, dumping their read load onto MongoDB.
-//
-// BreakerFailure is applied unless the caller supplies its own predicate, since
-// unlike a Mongo store there is no per-call-site question here: a cache miss is
-// never evidence of an unwell Valkey.
+// New builds a breaker reporting under name. Give each tier its own: a tier with
+// oversized values can time out on a healthy Valkey and must not fence the rest.
 func (b BreakerConfig) New(ctx context.Context, name string, opts ...circuitbreaker.Option) *circuitbreaker.Breaker {
-	// Clamp rather than trust Validate: it is opt-in and only three of the
-	// fourteen Valkey consumers call it, so this is the one place that sees
-	// every configured value. A negative budget degrades to no fencing — the
-	// behaviour before this existed — instead of to something undefined.
+	// Validate is opt-in and only 3 of 14 consumers call it, so clamp here: a
+	// negative budget degrades to no fencing rather than to something undefined.
 	fails, cooldown := b.Fails, b.Cooldown
 	if fails < 0 || cooldown < 0 {
 		fails = 0
@@ -70,30 +46,14 @@ func (b BreakerConfig) New(ctx context.Context, name string, opts ...circuitbrea
 	return circuitbreaker.New(fails, cooldown, append(base, opts...)...)
 }
 
-// BreakerFailure is the failure predicate for a Valkey tier: every error counts
-// except ErrCacheMiss and the caller's own healthy-absence sentinels.
-//
-// A miss is the cache working. Counting it would open the breaker against a cold
-// keyspace and disable a tier that is behaving perfectly.
-//
-// The asymmetry it inherits from FailureExcept is the load-bearing part and is
-// easy to get backwards: context.Canceled is exempt, because a caller
-// abandoning its request says nothing about Valkey — while DeadlineExceeded is
-// NOT, because a deadline is precisely how an unreachable Valkey presents.
+// BreakerFailure counts every error but ErrCacheMiss (the cache working) and
+// Canceled; DeadlineExceeded must count, being how an unreachable Valkey presents.
 func BreakerFailure(extra ...error) func(error) bool {
 	return circuitbreaker.FailureExcept(append([]error{ErrCacheMiss}, extra...)...)
 }
 
-// Breakered fences a Client behind a breaker, so a tier whose Valkey is down
-// stops paying for it on every call.
-//
-// Every data method is fenced; Close is not. Close is lifecycle rather than a
-// data call, and fencing it would leak the pool on shutdown exactly when the
-// breaker is most likely to be open.
-//
-// A nil client stays nil — every tier already reads that as "no L2" — and a nil
-// breaker passes through, matching Breaker.Do's own nil handling, so a
-// deployment with fencing disabled runs the same code path.
+// Breakered fences every data method of a Client; Close is not fenced, or an
+// open breaker would leak the pool on shutdown. A nil client stays nil.
 func Breakered(c Client, b *circuitbreaker.Breaker) Client {
 	if c == nil {
 		return nil

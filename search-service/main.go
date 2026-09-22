@@ -250,8 +250,7 @@ func main() {
 	usersClient := newHTTPUsersClient(usersRC, cfg.UsersAPI.Token)
 
 	store := newESStore(engine, cfg.UserRoomIndex)
-	// Fenced: restricted-rooms falls through to Elasticsearch, so a slow cache
-	// read is strictly worse than a fast miss.
+	// Fenced: it falls through to Elasticsearch, so slow is worse than missing.
 	cache := newValkeyCache(valkeyutil.Breakered(valkey, cfg.Valkey.Breaker.New(ctx, "searchrestrictedl2")))
 	mongoStore := newMongoStore(mongoDB)
 

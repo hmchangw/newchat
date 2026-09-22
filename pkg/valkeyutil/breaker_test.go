@@ -12,8 +12,8 @@ import (
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 )
 
-// countingClient records how many data calls reached the wire, which is the
-// only thing that distinguishes a fenced call from a fast failure.
+// countingClient counts calls that reached the wire — the only thing that
+// distinguishes a fenced call from a fast failure.
 type countingClient struct {
 	calls int
 	err   error
@@ -39,9 +39,8 @@ func (c *countingClient) Expire(context.Context, string, time.Duration) (bool, e
 }
 func (c *countingClient) Close() error { return c.hit() }
 
-// every data method on the Client surface, so a decorator that forgets one is
-// caught here rather than by an unbounded call in production. Close is
-// deliberately absent — see TestBreakered_CloseBypassesTheBreaker.
+// Every data method, so a decorator that forgets one is caught here rather than
+// by an unbounded call in production. Close is covered separately.
 var breakeredOps = map[string]func(context.Context, Client) error{
 	"Get":  func(ctx context.Context, c Client) error { _, err := c.Get(ctx, "k"); return err },
 	"MGet": func(ctx context.Context, c Client) error { _, err := c.MGet(ctx, []string{"k"}); return err },
@@ -55,11 +54,8 @@ var breakeredOps = map[string]func(context.Context, Client) error{
 	"Expire": func(ctx context.Context, c Client) error { _, err := c.Expire(ctx, "k", time.Minute); return err },
 }
 
-// The point of the breaker: once open, a call costs nothing at all rather than
-// a CallBudget. Under a sustained outage every request would otherwise hold its
-// handler slot for the budget on every tier it touches, and a service's
-// concurrency ceiling — not its error handling — is what then sheds traffic it
-// could have served from the source of truth.
+// Once open a call costs nothing, not a CallBudget: otherwise each request holds
+// its handler slot per tier, and the concurrency ceiling is what sheds traffic.
 func TestBreakered_OpenBreakerFencesEveryOperation(t *testing.T) {
 	for name, op := range breakeredOps {
 		t.Run(name, func(t *testing.T) {
@@ -79,8 +75,8 @@ func TestBreakered_OpenBreakerFencesEveryOperation(t *testing.T) {
 	}
 }
 
-// A miss is the cache working, not the cache failing. Counting it would open the
-// breaker on a cold keyspace and disable a perfectly healthy tier.
+// A miss is the cache working; counting it would fence a healthy tier on a
+// cold keyspace.
 func TestBreakered_CacheMissNeitherTripsNorIsRewritten(t *testing.T) {
 	inner := &countingClient{err: ErrCacheMiss}
 	b := circuitbreaker.New(2, time.Minute, circuitbreaker.WithFailurePredicate(BreakerFailure()))
@@ -94,9 +90,8 @@ func TestBreakered_CacheMissNeitherTripsNorIsRewritten(t *testing.T) {
 	assert.Equal(t, 10, inner.calls)
 }
 
-// A caller abandoning its own request says nothing about Valkey's health. This
-// asymmetry is load-bearing and easy to get backwards: Canceled is exempt,
-// DeadlineExceeded is NOT — a deadline is how an unreachable Valkey presents.
+// Load-bearing asymmetry, easy to get backwards: Canceled is exempt,
+// DeadlineExceeded is not, being how an unreachable Valkey presents.
 func TestBreakered_CallerCancellationDoesNotTrip(t *testing.T) {
 	inner := &countingClient{err: context.Canceled}
 	b := circuitbreaker.New(1, time.Minute, circuitbreaker.WithFailurePredicate(BreakerFailure()))
@@ -112,8 +107,8 @@ func TestBreakered_CallerCancellationDoesNotTrip(t *testing.T) {
 	assert.Equal(t, circuitbreaker.StateOpen, b.State(), "a timeout is how an unreachable Valkey presents")
 }
 
-// Close is lifecycle, not a data call: fencing it during an outage would leak
-// the pool on shutdown, exactly when the breaker is most likely to be open.
+// Fencing Close would leak the pool on shutdown, exactly when the breaker is
+// most likely open.
 func TestBreakered_CloseBypassesTheBreaker(t *testing.T) {
 	inner := &countingClient{err: errors.New("valkey down")}
 	b := circuitbreaker.New(1, time.Minute, circuitbreaker.WithFailurePredicate(BreakerFailure()))
@@ -127,8 +122,8 @@ func TestBreakered_CloseBypassesTheBreaker(t *testing.T) {
 	assert.Equal(t, 2, inner.calls, "Close must reach the client even with the breaker open")
 }
 
-// A nil breaker is "fencing off", matching Breaker.Do's own nil handling, so a
-// deployment that disables it wires the same code path.
+// A nil breaker is fencing-off, so a deployment that disables it wires the
+// same code path.
 func TestBreakered_NilBreakerIsPassThrough(t *testing.T) {
 	inner := &countingClient{}
 	c := Breakered(inner, nil)

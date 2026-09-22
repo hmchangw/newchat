@@ -30,22 +30,8 @@ type Profile struct {
 	WriteTimeout time.Duration
 	PoolTimeout  time.Duration
 	MaxRetries   int
-	// CallBudget caps one operation end to end, across go-redis's retry layers.
-	//
-	// ReadTimeout bounds one socket read, not one call, and a timed-out read is
-	// retried at two nesting levels: MaxRedirects+1 attempts on the cluster loop,
-	// each running MaxRetries+1 attempts on the node client. Against a Valkey that
-	// accepts TCP and never answers, the wall cost is their product — measured at
-	// ~2.1s for CacheProfile's 150ms and ~6.3s for StoreProfile's 500ms.
-	//
-	// That defeats fail-open. Every consumer has a source of truth behind it, but
-	// the fallback only runs if request budget remains when the cache read gives
-	// up; at ~2s a call and several calls per request, history-service's 10s guard
-	// expired before Cassandra was ever asked. A ceiling here keeps the cost of a
-	// degraded Valkey proportional to what the cache is worth.
-	//
-	// Sized at roughly 3x ReadTimeout so one honest retry still fits — it removes
-	// the retry product, it does not make a single read stricter.
+	// CallBudget caps one operation across the retry layers, whose product measured
+	// ~2.1s and left no budget for the fallback. ~3x ReadTimeout, so a retry fits.
 	CallBudget time.Duration
 }
 

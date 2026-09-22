@@ -11,10 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// blackholeAddr starts a listener that accepts TCP and never answers, then
-// returns its address. This is what a paused or packet-dropping Valkey looks
-// like to the client — the degraded mode the profiles exist for, and the one a
-// refused connection does NOT reproduce.
+// blackholeAddr accepts TCP and never answers: what a paused Valkey looks like,
+// and the mode a refused connection does NOT reproduce.
 func blackholeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -36,11 +34,8 @@ func blackholeAddr(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// blackholeClient builds a cluster client pinned to addr with slots supplied
-// directly, so no live CLUSTER SLOTS is needed. That mirrors the real outage:
-// a service that was healthy when Valkey stalled still holds cached topology,
-// so its commands route to the stalled node instead of failing fast on a
-// topology reload.
+// blackholeClient supplies slots directly, mirroring a service that was healthy
+// when Valkey stalled and still holds topology, so commands reach the dead node.
 func blackholeClient(t *testing.T, addr string, p Profile) *clusterClient {
 	t.Helper()
 	opts := ClusterOptionsFor([]string{addr}, "", p)
@@ -55,19 +50,8 @@ func blackholeClient(t *testing.T, addr string, p Profile) *clusterClient {
 	return &clusterClient{c: c}
 }
 
-// A profile's ReadTimeout bounds one socket read, not one operation: go-redis
-// retries a timed-out read at two nesting levels (MaxRedirects on the cluster
-// loop, MaxRetries on the node client), so the wall cost of a single Get is
-// their product — measured at ~2.1s for CacheProfile's 150ms, and ~6.3s for
-// StoreProfile's 500ms.
-//
-// That defeats the whole design. Every consumer here is fail-open with a source
-// of truth behind it, but the fallback only runs if there is request budget left
-// when the cache read gives up. At 2s a call and several calls per request,
-// history-service's 10s guard expires before Cassandra is ever asked, so a
-// degraded Valkey produces a timeout instead of a slower correct answer.
-//
-// CallBudget caps one operation end to end, across every retry layer.
+// ReadTimeout bounds one socket read; the retry layers multiply it to ~2.1s
+// (cache) / ~6.3s (store), leaving no request budget for the fallback to run in.
 func TestCallBudget_BoundsOneOperationAgainstABlackhole(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -93,9 +77,8 @@ func TestCallBudget_BoundsOneOperationAgainstABlackhole(t *testing.T) {
 	}
 }
 
-// The budget is a ceiling, never an extension: a caller with less time left than
-// the budget keeps its own deadline, so a request already near its guard cannot
-// be pushed past it by a cache read.
+// A ceiling, never an extension: a request near its own guard must not be
+// pushed past it by a cache read.
 func TestCallBudget_NeverExtendsACallersDeadline(t *testing.T) {
 	client := blackholeClient(t, blackholeAddr(t), CacheProfile)
 
@@ -111,9 +94,8 @@ func TestCallBudget_NeverExtendsACallersDeadline(t *testing.T) {
 		"the caller's shorter deadline must win over the budget")
 }
 
-// Pipelines route through a different go-redis entry point than single
-// commands, and IncrEx (the bot rate limiter) is a pipeline — so a budget that
-// only covered single commands would leave the rate-limit path unbounded.
+// Pipelines take a different go-redis entry point, and IncrEx — the bot rate
+// limiter — is one, so a commands-only budget would leave it unbounded.
 func TestCallBudget_CoversPipelines(t *testing.T) {
 	client := blackholeClient(t, blackholeAddr(t), CacheProfile)
 

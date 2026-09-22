@@ -20,11 +20,8 @@ import (
 type Config struct {
 	Addrs    []string `env:"VALKEY_ADDRS" envSeparator:","`
 	Password string   `env:"VALKEY_PASSWORD"`
-	// Breaker fences a tier whose Valkey is down. It rides here rather than as a
-	// second field each service mounts: every consumer already carries a Config,
-	// so nesting is what lets fencing reach all fourteen without fourteen copies
-	// of the same two env tags — the duplication the shared-knob rule exists to
-	// prevent. Build one breaker PER TIER from it; see BreakerConfig.New.
+	// Nested rather than a per-service field: every consumer already carries a
+	// Config, so fencing reaches all 14 without 14 copies of the same env tags.
 	Breaker BreakerConfig
 }
 

@@ -13,10 +13,8 @@ import (
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 )
 
-// The knobs ride inside Config rather than as a second field each service
-// mounts. Every Valkey consumer already mounts Config, so nesting is what makes
-// fencing arrive everywhere without fourteen copies of the same two env tags —
-// which is the duplication CLAUDE.md's shared-knob rule exists to prevent.
+// Nesting in Config is what makes fencing arrive at all 14 consumers without
+// 14 copies of the same two env tags.
 func TestConfig_CarriesBreakerKnobs(t *testing.T) {
 	t.Setenv("VALKEY_ADDRS", "valkey:6379")
 
@@ -33,8 +31,8 @@ func TestConfig_CarriesBreakerKnobs(t *testing.T) {
 	assert.Equal(t, 45*time.Second, cfg.Breaker.Cooldown)
 }
 
-// Validate is opt-in — only three of the fourteen consumers call it — so it
-// covers the breaker where it runs, and New below covers the rest.
+// Validate is opt-in (3 of 14 call it), so it covers the breaker where it runs
+// and New covers the rest.
 func TestConfig_ValidateCoversTheBreaker(t *testing.T) {
 	good := Config{Addrs: []string{"valkey:6379"}, Breaker: BreakerConfig{Fails: 5, Cooldown: time.Second}}
 	assert.NoError(t, good.Validate())
@@ -45,9 +43,8 @@ func TestConfig_ValidateCoversTheBreaker(t *testing.T) {
 	assert.Contains(t, err.Error(), "VALKEY_BREAKER_FAILS")
 }
 
-// A negative budget must degrade to today's behaviour — no fencing — rather
-// than to something undefined. Eleven of the fourteen consumers never call
-// Validate, so New is the only place that sees every bad value.
+// New is the only place that sees every bad value, since 11 of 14 consumers
+// never call Validate.
 func TestBreakerConfig_NegativeValuesDisableFencingRatherThanMisbehave(t *testing.T) {
 	ctx := context.Background()
 	boom := errors.New("valkey down")
@@ -72,8 +69,7 @@ func TestBreakerConfig_NegativeValuesDisableFencingRatherThanMisbehave(t *testin
 	}
 }
 
-// The happy path still fences, so the defensive clamp above cannot be a blanket
-// "never fence" that silently disables the feature everywhere.
+// Guards the clamp above from becoming a blanket never-fence.
 func TestBreakerConfig_ValidConfigStillFences(t *testing.T) {
 	inner := &countingClient{err: errors.New("valkey down")}
 	c := Breakered(inner, BreakerConfig{Fails: 1, Cooldown: time.Minute}.New(context.Background(), "t:valid"))
