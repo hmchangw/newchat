@@ -30,6 +30,9 @@ type Profile struct {
 	WriteTimeout time.Duration
 	PoolTimeout  time.Duration
 	MaxRetries   int
+	// CallBudget caps one operation across the retry layers, whose product measured
+	// ~2.1s and left no budget for the fallback. ~3x ReadTimeout, so a retry fits.
+	CallBudget time.Duration
 }
 
 var (
@@ -43,6 +46,7 @@ var (
 		WriteTimeout: 150 * time.Millisecond,
 		PoolTimeout:  250 * time.Millisecond,
 		MaxRetries:   1,
+		CallBudget:   500 * time.Millisecond,
 	}
 
 	// StoreProfile serves user-presence-service, where Valkey is the store of
@@ -54,6 +58,7 @@ var (
 		WriteTimeout: 500 * time.Millisecond,
 		PoolTimeout:  time.Second,
 		MaxRetries:   2,
+		CallBudget:   1500 * time.Millisecond,
 	}
 )
 

@@ -227,7 +227,8 @@ func main() {
 	// alongside subscriptions and rooms, as notification-worker already does.
 	usersPrimary := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 	store := NewMongoStore(roomsPrimaryStore, subsPrimary, db.Collection("thread_rooms"),
-		usersPrimary, valkeyClient, cfg.RoomMetaL2.TTL, cfg.RoomSubCache.TTL, mongoBreaker)
+		usersPrimary, valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "broadcastl2")),
+		cfg.RoomMetaL2.TTL, cfg.RoomSubCache.TTL, mongoBreaker)
 
 	var (
 		previewCipher atrest.Cipher

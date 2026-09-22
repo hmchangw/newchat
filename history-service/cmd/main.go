@@ -184,6 +184,12 @@ func main() {
 		slog.Info("subauth L2 cache configured", "enabled", subValkey != nil && cfg.SubL2.TTL > 0, "ttl", cfg.SubL2.TTL)
 	}
 
+	// One breaker per tier over the one connection: the handler slot held per
+	// call is what sheds traffic, and a large tier must not fence the others.
+	subAuthL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "subauthl2"))
+	dekL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "atrestdekl2"))
+	roomTimesL2 := valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "roomtimesl2"))
+
 	var (
 		cipher        atrest.Cipher
 		previewCipher atrest.Cipher
@@ -207,7 +213,7 @@ func main() {
 		// client disables the tier. The DEK breaker is deliberately separate from
 		// the subscription breaker so the two health signals stay independent.
 		dekBreaker := cfg.DEKBreaker.New(ctx, "atrestdek")
-		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), subValkey,
+		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), dekL2,
 			cfg.DEKL2.TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 		slog.Info("at-rest DEK L2 configured", "enabled", subValkey != nil && cfg.DEKL2.TTL > 0, "ttl", cfg.DEKL2.TTL)
@@ -255,7 +261,7 @@ func main() {
 	// a just-revoked subscription as authorization for the whole TTL, and the
 	// outage TTL-slide can extend that further.
 	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
-	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2.TTL,
+	subTier := subauthcache.NewTier(subAuthL2, subsPrimary, cfg.SubL2.TTL,
 		cfg.Breaker.New(ctx, "subscription",
 			circuitbreaker.WithFailurePredicate(mongoBreakerFailure)),
 		cachemetrics.For("subauth", "l2"))
@@ -325,7 +331,7 @@ func main() {
 	// walk simply stays as wide as the configured history floor.
 	var roomTimes service.RoomTimesCache
 	if subValkey != nil && cfg.RoomTimesL2.TTL > 0 {
-		roomTimes = roomtimescache.NewTier(subValkey, cfg.RoomTimesL2.TTL, cachemetrics.For("roomtimes", "l2"))
+		roomTimes = roomtimescache.NewTier(roomTimesL2, cfg.RoomTimesL2.TTL, cachemetrics.For("roomtimes", "l2"))
 	}
 	slog.Info("room-times L2 configured",
 		"enabled", roomTimes != nil, "ttl", cfg.RoomTimesL2.TTL)
