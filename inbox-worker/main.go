@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -973,12 +974,17 @@ func main() {
 		}
 	}()
 
-	go dispatchLanes(iter,
-		func(subj string) bool { return isMembershipSubject(subj, cfg.SiteID) },
-		membershipCh, sem, &wg, process)
+	sig := shutdown.Signals()
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
+	go func() {
+		loop.Stopped(dispatchLanes(iter,
+			func(subj string) bool { return isMembershipSubject(subj, cfg.SiteID) },
+			membershipCh, sem, &wg, process))
+	}()
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -987,7 +993,8 @@ func main() {
 
 	slog.Info("inbox-worker started", "site", cfg.SiteID, "max_deliver", maxDeliver)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
+		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(ctx context.Context) error {
 			iter.Stop()
 			return nil

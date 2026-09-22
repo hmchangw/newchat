@@ -8,7 +8,7 @@ served by `pkg/health`.
 | Path       | Meaning   | Behavior |
 |------------|-----------|----------|
 | `/healthz` | Liveness  | Always `200 {"status":"ok"}` while the process runs. It never probes dependencies — a dependency outage must not restart the pod. |
-| `/readyz`  | Readiness | Reports whether this pod is connected to NATS. `200` when `CONNECTED` or `RECONNECTING`; `503` once the connection is `DISCONNECTED`/`CLOSED`. |
+| `/readyz`  | Readiness | Reports whether this pod can do its job. `200` when the NATS connection is `CONNECTED` or `RECONNECTING` and every consume loop is running; `503` once the connection is `DISCONNECTED`/`CLOSED`, or once a consume loop has exited (`pkg/loopguard`) — including the deliberate stop during graceful shutdown, which is what drains the pod from the load balancer. |
 
 ## Where they listen
 
@@ -41,7 +41,13 @@ Most services receive work over NATS, not an HTTP Service, so readiness here is
 primarily a rollout-gating and operator signal — and a safe one, since nothing is
 routed off it.
 
-The NATS readiness check is `natsutil.HealthCheck(nc)`.
+The NATS readiness check is `natsutil.HealthCheck(nc)`. JetStream workers add
+one `loopguard.Guard.Check()` per consume loop (named `consume-loop`, or per lane
+in multi-lane workers such as `outbox-ordered-{site}`), which fails with the
+terminal consume-loop error once that loop has exited. A pull iterator reports
+the error `Next` returned, such as `nats: consumer deleted`; a callback
+`Consume` lane only learns of its death through a closed channel, so it reports
+`loopguard.ErrConsumeClosed` instead.
 
 ## MongoDB degraded start
 
@@ -162,12 +168,70 @@ A degraded start is visible in the logs as
 
 ## Liveness
 
-Liveness is process-up only. (A consume-loop heartbeat — failing liveness when a
-worker's pull loop wedges while the process stays alive — is the natural next
-addition, since that is the failure neither current probe catches.)
+Liveness is process-up only. A consume loop that dies while the process stays
+alive is handled without a probe: `pkg/loopguard` fails readiness and raises
+SIGTERM on the process, so the supervisor replaces the pod through the ordinary
+graceful-shutdown path.
 
 `HEALTH_ADDR` is a standard `caarlos0/env` var; override per deployment if
 `:8081` clashes with another container port.
+
+## Verifying the loop guard
+
+The guard's whole value is in a failure that is hard to observe, so verify it by
+inducing the failure rather than by reading the tests.
+
+No Docker daemon is needed — a real `nats-server` and the real service binary
+are enough, and they cover the NATS-facing half of a worker's lifecycle:
+
+```bash
+make tools-nats
+nats-server --jetstream --http_port 8222 &
+```
+
+Run the worker with `BOOTSTRAP_STREAMS=true` so it creates its own streams.
+Outside a container `HEALTH_ADDR` is on localhost, so `/readyz` is directly
+probeable. Then delete the durable out from under it:
+
+```bash
+nats consumer rm <STREAM> <durable>
+```
+
+Expected sequence:
+
+1. `ERROR consume loop stopped; no further messages will be processed`, with
+   `loop` naming the lane.
+2. `/readyz` turns `503` and the body names the failing check and its cause.
+3. The process SIGTERMs itself and runs the ordinary graceful shutdown.
+4. On restart the durable is recreated and consumption resumes.
+
+A `503` captured mid-shutdown from a two-lane `outbox-worker`:
+
+```json
+{"status":"not ready","checks":{
+  "nats":"nats connection DRAINING_SUBS",
+  "outbox-concurrent-site-b":"consume loop stopped: nats: messages iterator closed",
+  "outbox-ordered-site-b":"consume loop stopped: consume context closed"}}
+```
+
+A heartbeat gap is deliberately **not** one of these. `jetstream.ErrNoHeartbeat`
+arrives after 30s of silence on an otherwise healthy connection — a leader
+election or a rolling server upgrade is enough — and nats.go returns it without
+invalidating the iterator, so every pull loop retries instead of reporting it
+(`natsmetrics.Recoverable`). It appears in the logs as `consume loop stalled;
+retrying`, never as a readiness failure.
+
+Two things about that output surprise people:
+
+- **The restart exits `0`, not non-zero.** The loop death raises SIGTERM and the
+  normal shutdown path runs to completion, so there is no crash to look for. The
+  supervisor replaces the pod because the process exited, not because it failed.
+- **A callback lane reports `consume context closed`, not the real NATS error.**
+  `jetstream.Consume` exposes its death only as a closed channel, so
+  `WatchClosed` can record no more than `loopguard.ErrConsumeClosed`. A pull
+  iterator reports what `Next` returned, e.g. `nats: consumer deleted`. Above,
+  `outbox-concurrent-site-b` is a pull lane and `outbox-ordered-site-b` a
+  callback lane, which is why the same shutdown reads differently on each.
 
 ## Valkey is never a startup gate
 
@@ -207,6 +271,7 @@ authoritative write itself still lands in the source of truth.
   `WARN`, repeats within 30s drop to `DEBUG`, and the window reopens so a
   sustained outage keeps a periodic heartbeat. Raise the level to `DEBUG` to see
   every occurrence.
+
 
 ## Optional pprof profiling surface
 
