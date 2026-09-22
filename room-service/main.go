@@ -347,7 +347,7 @@ func main() {
 		// after a membership, role or history-restriction write. One pool serves
 		// both tiers; an empty VALKEY_ADDRS leaves subValkey nil, which makes
 		// the bust a no-op that the L2 TTL reconciles.
-		subValkey = valkeyutil.WrapClusterClient(valkeyClient)
+		subValkey = valkeyutil.Breakered(valkeyutil.WrapClusterClient(valkeyClient), cfg.Valkey.Breaker.New(ctx, "roomsvcsubauthl2"))
 		slog.Info("badge cache and subauth L2 invalidation enabled", "ttl", cfg.BadgeCacheTTL)
 	} else {
 		slog.Warn("badge cache and subauth L2 invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")

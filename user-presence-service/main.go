@@ -117,7 +117,7 @@ func main() {
 	// this service's Valkey commands carry the same instrumentation and dial
 	// policy as every other service's. Presence IS the datastore here, so an
 	// uninstrumented client is the one worth least having.
-	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyDialOptions(sdk)...)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
@@ -202,6 +202,26 @@ func main() {
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// valkeyDialOptions is this service's Valkey dial policy: the fleet-standard
+// instrumentation bundle plus StoreProfile.
+//
+// The profile is the part that has to be stated. valkeyutil defaults to
+// CacheProfile, which is right for every consumer that can fall through to a
+// source of truth on a slow read — and wrong here, because presence has none.
+// Its Lua EVALs would sit under a 150ms ceiling and fail under load with nothing
+// downstream able to absorb it.
+//
+// A function rather than an inline argument list so a test can dial with the
+// same options main uses and assert the resulting client. Passing an option is
+// silent when it is dropped, and it was dropped: StoreProfile existed, was
+// documented and was unit-tested, yet no call site selected it.
+func valkeyDialOptions(sdk valkeyutil.Observability) []valkeyutil.Option {
+	return []valkeyutil.Option{
+		valkeyutil.Instrumented(sdk),
+		valkeyutil.WithProfile(valkeyutil.StoreProfile),
+	}
 }
 
 // registerRoutes wires user-presence-service's routes onto the router. It is a

@@ -460,6 +460,7 @@ func TestLoad_RejectsInvalidConfig(t *testing.T) {
 		{"fraction zero", "GOMEMLIMIT_FRACTION", "0", "GOMEMLIMIT_FRACTION"},
 		{"chunk above the history-service cap", "ROOM_BATCH_CHUNK", "101", "ROOM_BATCH_CHUNK"},
 		{"chunk below one", "ROOM_BATCH_CHUNK", "0", "ROOM_BATCH_CHUNK"},
+		{"badge seed fanout above the ceiling", "MAX_BADGE_SEED_FANOUT", "33", "MAX_BADGE_SEED_FANOUT"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -697,4 +698,29 @@ func TestValidate_RejectsInvalidClientReadPreference(t *testing.T) {
 	_, err := Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MONGO_CLIENT_READ_PREFERENCE")
+}
+
+func TestLoad_BadgeSeedFanoutDefault(t *testing.T) {
+	requiredEnv(t)
+	testutil.UnsetEnv(t, "MAX_BADGE_SEED_FANOUT")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 8, cfg.MaxBadgeSeedFanout)
+}
+
+func TestLoad_BadgeSeedFanoutOverride(t *testing.T) {
+	requiredEnv(t)
+	t.Setenv("MAX_BADGE_SEED_FANOUT", "4")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 4, cfg.MaxBadgeSeedFanout)
+}
+
+// Zero would make the seed semaphore an unbuffered channel whose send blocks
+// forever, so it must be rejected at startup rather than deadlock a handler.
+func TestLoad_BadgeSeedFanoutInvalidRejected(t *testing.T) {
+	requiredEnv(t)
+	t.Setenv("MAX_BADGE_SEED_FANOUT", "0")
+	_, err := Load()
+	require.ErrorContains(t, err, "MAX_BADGE_SEED_FANOUT")
 }

@@ -20,6 +20,9 @@ import (
 type Config struct {
 	Addrs    []string `env:"VALKEY_ADDRS" envSeparator:","`
 	Password string   `env:"VALKEY_PASSWORD"`
+	// Nested rather than a per-service field: every consumer already carries a
+	// Config, so fencing reaches all 14 without 14 copies of the same env tags.
+	Breaker BreakerConfig
 }
 
 // Enabled reports whether a Valkey is configured. No addresses is a valid
@@ -34,7 +37,7 @@ func (c Config) Validate() error {
 	if !c.Enabled() {
 		return errors.New("VALKEY_ADDRS must not be empty")
 	}
-	return nil
+	return c.Breaker.Validate("")
 }
 
 // dial and dialRaw are the cluster dialers, package vars so tests can exercise
