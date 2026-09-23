@@ -141,8 +141,12 @@ groups sized in §6.3:
 
 ¹ `hello`/`ping`/`activity`/`bye` are client→server publishes (fire-and-forget, no reply)
 on `chat.user.{account}.event.presence.{siteID}.{op}` — connection up / keepalive /
-active-inactive / tab-close. Each ~1/user/day (= `C_hc`); grouped in the Presence R/R row
-for inventory completeness, delivered to watchers in §6.2.
+active-inactive / tab-close. **`ping` is a periodic keepalive: one every 5 min per
+connection** (`user-presence-service` `PRESENCE_CONNS_TTL` defaults to `5m` — the ping is
+what re-arms that TTL); `hello`/`activity`/`bye` fire a handful of times a day. Together
+`C_hc ≈ 100/day/connection` (§4); grouped in the Presence R/R row for inventory
+completeness and sized as **ingress** in §6.2. The `Ping` handler re-publishes state only
+on the first-sight (offline→online) edge, so a routine keepalive has **no watcher fan-out**.
 
 ## 3. Payload Size Reference
 
@@ -179,7 +183,9 @@ for inventory completeness, delivered to watchers in §6.2.
 | Member add/remove ops per day per user *(member-change subset of R_room)* | R_member | **20** |
 | Search ops per day per user | R_search | ~5 |
 | Presence status changes per day per user | C_pres | ~10 |
-| Presence health-check ops per day per user (hello/ping/activity/bye) | C_hc | 4 |
+| Presence keepalive ping interval per connection | T_ping | **5 min** |
+| Connected hours per day per connection | H_conn | **8** |
+| Presence health-check ops per day per connection (ping 12/h × H_conn + ~4 hello/activity/bye) | C_hc | **100** |
 | Presence batch-query (initial-state) ops per day per user | R_presq | ~5 |
 | Cross-site fan-out (remote sites per federated query) | N | ~3 |
 | Federated fraction of member changes (→ OUTBOX / INBOX inflow) | f_fed | ~20% |
@@ -196,6 +202,14 @@ for inventory completeness, delivered to watchers in §6.2.
 > the ROOMS + INBOX streams + sys-message fan-out; **OUTBOX** (and the symmetric INBOX
 > federated inflow) carries only the cross-site subset `× f_fed`. The remaining ~80 room ops
 > are read-only Room R/R. Lines tagged *(member-driven)* scale linearly with R_member.
+
+> **C_hc = 100** = `60/T_ping × H_conn` pings (12/h × 8 h = 96) plus ~4 lifecycle ops
+> (hello / activity / bye). It is **per connection**, so it scales with D (§7), unlike the
+> other per-user `C_*`/`R_*` params. Sensitivity — the count moves linearly with `H_conn`
+> and inversely with `T_ping`: an always-on client (`H_conn = 24`) gives `C_hc ≈ 292`
+> (~6.1M/day, ~70/s); `T_ping = 2.5 min` (½ of `CONNS_TTL`, see §6.7) gives `C_hc ≈ 196`
+> (~4.1M/day, ~47/s); `T_ping = 30 s` (the `PRESENCE_HEARTBEAT_INTERVAL` default,
+> server-side sweep cadence) gives `C_hc ≈ 964` (~20M/day, ~232/s).
 
 > **4.5M/day traffic split** (bot pipeline folded into §6.1/§9): user↔room 2.0M and user→bot
 > 0.5M flow through `MESSAGES`→`MESSAGES-CANONICAL` (M = 2.5M; broadcast-worker forwards the
@@ -263,9 +277,9 @@ pipeline (4M split in §4); bot room fan-out is core-NATS (§6.2 note), not show
 | `chat.user.*.event.subscription.update` (`SubscriptionUpdate`) | R_room × U (read/mute/favorite; per-user) | 2.08M | 2.08M | 24 | 0.5KB | 1 GB |
 | `chat.user.*.event.room.key` (`RoomKeyUpdate`) *(member-driven)* | R_member × U × F ÷ 2 (rotation on member-remove only) | 0.21M | 21M | 241 | 0.2KB | 4.2 GB |
 | `chat.user.presence.state.*` (`PresenceState`, status broadcast) | U × C_pres × P | 0.21M | 4.16M | 48 | 0.15KB | 0.6 GB |
-| `chat.user.*.event.presence.{siteID}.{hello,ping,activity,bye}` — **client→server** (ingress; §2.3), watcher fan-out modeled here | U × C_hc × P | 0.083M | 1.66M | 19 | ~0.05KB | 0.08 GB |
+| `chat.user.*.event.presence.{siteID}.{hello,ping,activity,bye}` — **client→server** keepalive ingress (§2.3), server-terminated (no ×P fan-out) | U × C_hc | 2.08M | 2.08M | 24 | ~0.07KB | 0.15 GB |
 | `chat.room.*.event.typing` | active room only | — | — | — | — | *(ignored)* |
-| **Core delivery subtotal** | | | **~470M** | **~5,440** | | **~543 GB** |
+| **Core delivery subtotal** | | | **~471M** | **~5,450** | | **~543 GB** |
 
 **Reconciling with §2.2 — the message/metadata/member-change rows.**
 
@@ -296,19 +310,27 @@ pipeline (4M split in §4); bot room fan-out is core-NATS (§6.2 note), not show
   ~half of the `R_member` ops trigger a full ×F rotation — `≈ R_member × U × F ÷ 2`, ~21M
   deliveries/day at ~0.2KB (E2E rooms).
 
-The presence health-check row is a **client→server publish** (`RegisterVoid`, §2.3) modeled
-here for its optional watcher fan-out, not a true server→client subject.
+The presence health-check row is a **client→server publish** (`RegisterVoid`, §2.3), listed
+here rather than in R/R (§6.3) because it is fire-and-forget with no reply — it is ingress,
+not a server→client subject.
 
 Bot room delivery (Bot Broadcast Worker → members, `M_bot × F` ≈ ~200M deliveries/day) is
 now **included** in the message row above — bots post to rooms and fan out to members on the
 same `RoomEvent`/`UserRoomEvent` as human messages.
 
 Presence status delivery = ~4.16M/day (`C_pres = 10` changes × `P = 20` watchers), on
-`presence.state.*`. The health-check row is **client-published** (each connection publishes
-hello/ping/activity/bye to its own presence subject); each op is modeled as fanning out to
-the user's P watchers like a status change, but with a tiny ~50B payload it adds negligible
-bytes (and if these are server-only keepalives with no fan-out, the delivery count drops
-~20× — §11).
+`presence.state.*`. The health-check row is **client-published and server-terminated**: each
+connection publishes hello/ping/activity/bye to its own presence subject, and
+`user-presence-service` writes the liveness key to Valkey without re-broadcasting — its
+`Ping` handler publishes a `PresenceState` **only** on the first-sight (offline→online)
+edge, and those edges are already counted in the `C_pres` row above. So the ping cadence
+drives **ingress only** (×1), not `×P` fan-out.
+
+At `T_ping = 5 min` over `H_conn = 8` connected hours that ingress is
+`U × C_hc = 20,789 × 100 ≈ 2.08M publishes/day` (~24/s avg, ~96/s peak at k=4) — the
+highest-rate client→server subject in the model, but at ~70B a message only ~0.15 GB/day.
+It is **per connection**, so at D=5 it is ~10.4M/day (~120/s avg, ~481/s peak) while its
+bytes stay under ~0.75 GB/day.
 
 ### 6.3 Request/Reply endpoints
 
@@ -340,9 +362,9 @@ doesn't inflate it.
 | Layer | Ops or deliveries/day | avg msg/s | Bytes/day |
 |-------|----------------------:|----------:|----------:|
 | JetStream streams (incl. `BOT-*`, server-side/flat) | ~39M | ~454 | ~36 GB |
-| Core delivery subjects (scales with D) | ~470M | ~5,440 | ~543 GB |
+| Core delivery subjects (scales with D) | ~471M | ~5,450 | ~543 GB |
 | Client R/R (req + resp, scales with D) | ~11M | ~130 | ~149 GB |
-| **TOTAL (steady-state, D=1)** | **~0.52B/day** | **~6,020/s avg · ~24,100/s peak** | **~0.73 TB/day** |
+| **TOTAL (steady-state, D=1)** | **~0.52B/day** | **~6,030/s avg · ~24,100/s peak** | **~0.73 TB/day** |
 
 Plus **server-to-server R/R** (§6.3) — server-side, **flat with D** — ~2.1M ops/day (req +
 resp), ~25/s, ~4 GB/day per site. Like the JetStream layer it does not scale with D (§7);
@@ -377,6 +399,14 @@ At the single-connection baseline: 20,789 connections × (S=100 + P=20) =
   the message event (no separate delivery to coalesce), so the remaining levers are reducing
   effective fan-out (e.g. don't deliver to idle/very-large rooms in real time) or trimming
   the combined payload.
+- **Presence ping cadence is a message-rate lever, not a bandwidth one** — at
+  `T_ping = 5 min` and `H_conn = 8` it is ~2.08M publishes/day (~24/s, ~120/s at D=5) for
+  ~0.15 GB/day. Rate scales inversely with `T_ping` and linearly with connected hours, so
+  halving the interval doubles the op count for no extra fan-out. **Caveat: 5 min exactly equals `PRESENCE_CONNS_TTL` (5m)** — a ping that races
+  its own TTL lets a live connection expire and flap offline→online, and each flap *does*
+  cost a `×P` fan-out on `presence.state.*`. Either ping at ~½ TTL (2.5 min) or raise
+  `PRESENCE_CONNS_TTL` above the ping interval (e.g. 10–15m); the sizing above keeps the
+  5-min cadence as specified.
 - **Keep subscription-list payloads lean** — at R_sub = 10/day the endpoint is no longer
   dominant, but its 150KB response still makes each call expensive on reconnect bursts.
 
@@ -390,7 +420,7 @@ subscriber that re-subscribes and fetches its own state.
 
 | Scales linearly with D | Stays flat (independent of D) |
 |------------------------|-------------------------------|
-| All core deliveries (message, metadata, member-change, presence) | Message ingress (user sends from one client) |
+| All core deliveries (message, metadata, member-change, presence) — plus **presence keepalive ingress**, which is per-connection | Message ingress (user sends from one client) |
 | Subscription, history, room, search, **presence** R/R (client-facing) | JetStream pipeline & terminal streams (server-side) |
 | Connections & subscription interests | `MIGRATION-OPLOG`, `PUSH`, `HR`, **server-to-server R/R** (§6.3, server-side, not client-facing) |
 
@@ -402,7 +432,7 @@ connection state scale with D.** Effective fan-out becomes `F × D = 500` per me
 | Layer | D=1 deliveries/day | D=5 deliveries/day | D=1 bytes/day | D=5 bytes/day |
 |-------|-------------------:|-------------------:|--------------:|--------------:|
 | JetStream streams (incl. bot) | ~39M | ~39M *(flat)* | ~36 GB | ~36 GB |
-| Core delivery | ~470M | ~2,350M | ~543 GB | ~2,715 GB |
+| Core delivery | ~471M | ~2,355M | ~543 GB | ~2,715 GB |
 | Client R/R (req+resp) | ~11M | ~56M | ~149 GB | ~745 GB |
 | Server-to-server R/R | ~2.1M | ~2.1M *(flat)* | ~4 GB | ~4 GB |
 | **TOTAL (steady-state)** | **~0.52B** | **~2.45B** | **~0.73 TB** | **~3.50 TB** |
@@ -509,20 +539,20 @@ site independently. Peak ≈ 4× avg.
 
 | Fab | Users | Msg/day | Deliveries/day | avg msg/s | peak msg/s | Traffic/day | avg MB/s |
 |-----|------:|--------:|---------------:|----------:|-----------:|------------:|---------:|
-| Fab 1 | 20,789 | 2.50M | ~523M | 6,050 | 24,210 | 0.73 TB | 8.5 |
-| Fab 2 | 12,150 | 1.46M | ~306M | 3,540 | 14,150 | 0.43 TB | 4.9 |
-| Fab 3 | 2,922 | 0.35M | ~73M | 850 | 3,400 | 0.10 TB | 1.2 |
-| Fab 4 | 2,078 | 0.25M | ~52M | 600 | 2,420 | 0.07 TB | 0.8 |
-| Fab 5 | 17,061 | 2.05M | ~429M | 4,970 | 19,870 | 0.60 TB | 7.0 |
-| Fab 6 | 4,138 | 0.50M | ~104M | 1,200 | 4,820 | 0.15 TB | 1.7 |
+| Fab 1 | 20,789 | 2.50M | ~523M | 6,060 | 24,230 | 0.73 TB | 8.5 |
+| Fab 2 | 12,150 | 1.46M | ~306M | 3,540 | 14,160 | 0.43 TB | 4.9 |
+| Fab 3 | 2,922 | 0.35M | ~74M | 850 | 3,410 | 0.10 TB | 1.2 |
+| Fab 4 | 2,078 | 0.25M | ~52M | 610 | 2,420 | 0.07 TB | 0.8 |
+| Fab 5 | 17,061 | 2.05M | ~429M | 4,970 | 19,880 | 0.60 TB | 7.0 |
+| Fab 6 | 4,138 | 0.50M | ~104M | 1,210 | 4,820 | 0.15 TB | 1.7 |
 | Fab 7 | 2,199 | 0.26M | ~55M | 640 | 2,560 | 0.08 TB | 0.9 |
-| Fab 8 | 3,244 | 0.39M | ~82M | 940 | 3,780 | 0.11 TB | 1.3 |
-| Fab 9 | 4,492 | 0.54M | ~113M | 1,310 | 5,230 | 0.16 TB | 1.8 |
-| Fab 10 | 4,754 | 0.57M | ~120M | 1,380 | 5,540 | 0.17 TB | 1.9 |
+| Fab 8 | 3,244 | 0.39M | ~82M | 950 | 3,780 | 0.11 TB | 1.3 |
+| Fab 9 | 4,492 | 0.54M | ~113M | 1,310 | 5,240 | 0.16 TB | 1.8 |
+| Fab 10 | 4,754 | 0.57M | ~120M | 1,390 | 5,540 | 0.17 TB | 1.9 |
 | Fab 11 | 5,537 | 0.67M | ~139M | 1,610 | 6,450 | 0.19 TB | 2.3 |
-| Fab 12 | 4,356 | 0.52M | ~110M | 1,270 | 5,070 | 0.15 TB | 1.8 |
-| Fab 13 | 2,227 | 0.27M | ~56M | 650 | 2,590 | 0.08 TB | 0.9 |
-| Fab 14 | 5,215 | 0.63M | ~131M | 1,520 | 6,070 | 0.18 TB | 2.1 |
+| Fab 12 | 4,356 | 0.52M | ~110M | 1,270 | 5,080 | 0.15 TB | 1.8 |
+| Fab 13 | 2,227 | 0.27M | ~56M | 650 | 2,600 | 0.08 TB | 0.9 |
+| Fab 14 | 5,215 | 0.63M | ~131M | 1,520 | 6,080 | 0.18 TB | 2.1 |
 
 Per-fab byte split holds at the §6.4 ratio for every site: **core delivery ~75%**, R/R
 ~21%, JetStream streams (incl. bot) ~5%. For multi-device (D), scale Deliveries/day,
@@ -533,12 +563,18 @@ independent of D.
 
 - **R_member = 20/day/user** is the member-change slice of the 100 room ops (§4); all
   *(member-driven)* lines (ROOMS, OUTBOX, INBOX, member fan-out) scale with it.
-- **Presence** assumes ~10 event-driven status changes/user/day (`C_pres`); a heartbeat
-  design would explode this.
-- **Presence health-check** (hello/ping/activity/bye, C_hc = 4/user/day) is modeled as
-  publishing to `chat.user.{account}.event.presence.{siteID}.{op}` and fanning out to the
-  user's P watchers (~1.66M deliveries/day, negligible bytes). If these are server-only
-  keepalives with no watcher fan-out, the delivery count drops ~20× (to ~83k/day).
+- **Presence** assumes ~10 event-driven status changes/user/day (`C_pres`) — this is the
+  only `×P` fan-out term. The 5-min keepalive (next bullet) does **not** add to it, because
+  a ping of a known connection is suppressed server-side; a design where every heartbeat
+  re-broadcast state would multiply `C_pres` by ~10×.
+- **Presence health-check** (hello/ping/activity/bye) assumes a **5-minute keepalive ping
+  per connection over 8 connected hours/day** — `C_hc = 100/day/connection` (96 pings + ~4
+  lifecycle ops), publishing to `chat.user.{account}.event.presence.{siteID}.{op}`. It is
+  **ingress only**: the `Ping` handler re-publishes state solely on the offline→online edge,
+  so there is no `×P` watcher fan-out (~2.08M publishes/day, ~24/s, ~0.15 GB). Being
+  per-connection it scales with D (~10.4M/day, ~120/s at D=5). `H_conn = 8` is the assumption
+  most worth validating: a client that stays connected round the clock triples it — see the
+  §4 sensitivity note and the `PRESENCE_CONNS_TTL` caveat in §6.7.
 - **Cross-site federation is now modeled** (§6.1/§9): a per-site `OUTBOX-{siteID}`
   (`chat.outbox.{siteID}.>`) whose consumer **outbox-worker** forwards each event to the
   destination's `INBOX-{siteID}` (`chat.inbox.{siteID}.>`). OUTBOX carries only the cross-site
