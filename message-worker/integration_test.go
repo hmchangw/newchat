@@ -379,6 +379,56 @@ func TestCassandraStore_SaveThreadMessage(t *testing.T) {
 	})
 }
 
+// The stamp writes two tables with conditional updates, which silently do nothing
+// if the row is not found. applied must be true only when both wrote, since the
+// caller uses it to decide whether to stop retrying. messages_by_room is the one
+// that realistically misses: it is looked up by (room_id, bucket, created_at,
+// message_id), so a parent createdAt that is even slightly off will not match, while
+// messages_by_id (looked up by message_id alone) still does.
+func TestCassandraStore_UpdateParentMessageThreadRoomID_AppliedReporting(t *testing.T) {
+	cassSession := setupCassandra(t)
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, nil)
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	parent := &model.Message{
+		ID: "stamp-parent", RoomID: "stamp-room", UserID: "u-1",
+		Content: "parent", CreatedAt: parentCreatedAt,
+	}
+	require.NoError(t, store.SaveMessage(ctx, parent, &cassParticipant{ID: "u-1", Account: "alice"}, "site-a"))
+
+	t.Run("both rows found — reports applied", func(t *testing.T) {
+		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "stamp-parent", "stamp-room", parentCreatedAt, "tr-1")
+		require.NoError(t, err)
+		assert.True(t, applied)
+
+		var byID, byRoom string
+		require.NoError(t, cassSession.Query(`SELECT thread_room_id FROM messages_by_id WHERE message_id = ?`,
+			"stamp-parent").WithContext(ctx).Scan(&byID))
+		require.NoError(t, cassSession.Query(
+			`SELECT thread_room_id FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			"stamp-room", bucket.Of(parentCreatedAt), parentCreatedAt, "stamp-parent").WithContext(ctx).Scan(&byRoom))
+		assert.Equal(t, "tr-1", byID)
+		assert.Equal(t, "tr-1", byRoom, "this copy is what shows the thread marker in the room")
+	})
+
+	// A shifted createdAt still matches messages_by_id but not messages_by_room, so
+	// only half the stamp lands. applied must be false so a later reply retries.
+	t.Run("createdAt disagrees with the stored row — reports NOT applied", func(t *testing.T) {
+		skewed := parentCreatedAt.Add(time.Millisecond)
+		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "stamp-parent", "stamp-room", skewed, "tr-2")
+		require.NoError(t, err, "not matching a row is not a database error")
+		assert.False(t, applied, "reporting this as stamped would make the half-stamp permanent")
+	})
+
+	t.Run("parent row absent entirely — reports NOT applied", func(t *testing.T) {
+		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "no-such-parent", "stamp-room", parentCreatedAt, "tr-3")
+		require.NoError(t, err)
+		assert.False(t, applied)
+	})
+}
+
 func TestCassandraStore_GetMessageSender(t *testing.T) {
 	cassSession := setupCassandra(t)
 	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
@@ -979,6 +1029,58 @@ func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFre
 	err := store.InsertThreadSubscription(ctx, &dup)
 	require.Error(t, err)
 	assert.True(t, mongo.IsDuplicateKeyError(err), "a second document for the same key must be refused, got: %v", err)
+}
+
+// The flag is what lets subsequent replies skip the parent stamp, so it has to
+// survive a real Mongo round trip — and be absent (false) on rooms written before
+// the field existed, so those repair themselves rather than silently staying unlinked.
+func TestThreadStoreMongo_MarkParentStamped(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	room := &model.ThreadRoom{
+		ID: "tr-stamp", ParentMessageID: "msg-parent-stamp", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, store.CreateThreadRoom(ctx, room))
+
+	t.Run("a freshly created room reads as not stamped", func(t *testing.T) {
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
+		require.NoError(t, err)
+		assert.False(t, got.ParentStamped, "nothing has confirmed the parent stamp yet")
+	})
+
+	t.Run("MarkParentStamped persists and round-trips", func(t *testing.T) {
+		require.NoError(t, store.MarkParentStamped(ctx, "tr-stamp"))
+
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
+		require.NoError(t, err)
+		assert.True(t, got.ParentStamped)
+	})
+
+	t.Run("re-marking is idempotent", func(t *testing.T) {
+		require.NoError(t, store.MarkParentStamped(ctx, "tr-stamp"))
+
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
+		require.NoError(t, err)
+		assert.True(t, got.ParentStamped)
+	})
+
+	t.Run("a document written without the field reads as not stamped", func(t *testing.T) {
+		_, err := db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+			"_id": "tr-legacy-stamp", "parentMessageId": "msg-parent-legacy", "roomId": "r-1",
+			"siteId": "site-a", "lastMsgAt": now, "lastMsgId": "m1",
+			"createdAt": now, "updatedAt": now,
+		})
+		require.NoError(t, err)
+
+		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-legacy")
+		require.NoError(t, err)
+		assert.False(t, got.ParentStamped, "an absent field must repair, not read as done")
+	})
 }
 
 func TestThreadStoreMongo_GetThreadRoomByParentMessageID(t *testing.T) {

@@ -525,8 +525,16 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 
 	// Requires ThreadParentMessageCreatedAt; missing → permanent silent thread-fetch failure.
 	if msg.ThreadParentMessageCreatedAt != nil {
-		if err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, threadRoomID); err != nil {
+		applied, err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, threadRoomID)
+		if err != nil {
 			return nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
+		}
+		// Only record the stamp if it actually wrote both rows. If we record a
+		// stamp that missed, no later reply will ever try again.
+		if applied {
+			if err := h.threadStore.MarkParentStamped(ctx, threadRoomID); err != nil {
+				return nil, fmt.Errorf("mark parent stamped: %w", err)
+			}
 		}
 	} else {
 		slog.ErrorContext(ctx, "first thread reply: ThreadParentMessageCreatedAt is nil, parent thread_room_id stamp skipped",
@@ -552,6 +560,7 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 // this reply's unread mark. That combined list is the audience
 // fanOutThreadUnread should mark unread; it dedups, and the sender is
 // filtered out there regardless of whether they were already a follower.
+// It re-stamps the parent's thread_room_id only while parentStamped is false.
 func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
 	existingRoom, err := h.threadStore.GetThreadRoomByParentMessageID(ctx, msg.ThreadParentMessageID)
 	if err != nil {
@@ -629,29 +638,44 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		followers = append(followers, parentSender.Account)
 	}
 
-	// Re-stamp handles redelivery: first attempt may have created the thread room
-	// but crashed before the stamp landed. IF EXISTS in the store prevents phantom rows.
-	switch {
-	case parentFound && msg.ThreadParentMessageCreatedAt != nil:
-		if err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, existingRoom.ID); err != nil {
-			return "", nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
+	// The parent's thread_room_id never changes, so re-stamping it on every reply
+	// costs two Cassandra writes for nothing. But we can't just drop it: the first
+	// reply can fail after creating the thread room but before stamping, and the
+	// retry comes back through here. An unstamped parent makes history-service show
+	// the thread as empty, forever. So: stamp only while parentStamped is false.
+	// Old rooms have no flag, which reads as false, so they repair on their next reply.
+	if !existingRoom.ParentStamped {
+		switch {
+		case parentFound && msg.ThreadParentMessageCreatedAt != nil:
+			applied, err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, existingRoom.ID)
+			if err != nil {
+				return "", nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
+			}
+			// Same rule as handleFirstThreadReply: only record a stamp that landed.
+			if applied {
+				if err := h.threadStore.MarkParentStamped(ctx, existingRoom.ID); err != nil {
+					return "", nil, fmt.Errorf("mark parent stamped: %w", err)
+				}
+			}
+		case !parentFound:
+			// The parent isn't in Cassandra yet, so there is nothing to stamp. Leave
+			// the flag false so a later reply retries once the parent shows up.
+			slog.WarnContext(ctx, "subsequent thread reply: parent not in messages_by_id, thread_room_id stamp deferred",
+				"request_id", natsutil.RequestIDFromContext(ctx),
+				"replyID", msg.ID,
+				"parentMessageID", msg.ThreadParentMessageID,
+				"threadRoomID", existingRoom.ID,
+				"room_id", msg.RoomID,
+			)
+		default: // msg.ThreadParentMessageCreatedAt == nil
+			slog.ErrorContext(ctx, "subsequent thread reply: ThreadParentMessageCreatedAt is nil, parent thread_room_id stamp skipped",
+				"request_id", natsutil.RequestIDFromContext(ctx),
+				"replyID", msg.ID,
+				"parentMessageID", msg.ThreadParentMessageID,
+				"threadRoomID", existingRoom.ID,
+				"room_id", msg.RoomID,
+			)
 		}
-	case !parentFound:
-		slog.ErrorContext(ctx, "subsequent thread reply: parent not found in messages_by_id, thread_room_id stamp skipped",
-			"request_id", natsutil.RequestIDFromContext(ctx),
-			"replyID", msg.ID,
-			"parentMessageID", msg.ThreadParentMessageID,
-			"threadRoomID", existingRoom.ID,
-			"room_id", msg.RoomID,
-		)
-	default: // msg.ThreadParentMessageCreatedAt == nil
-		slog.ErrorContext(ctx, "subsequent thread reply: ThreadParentMessageCreatedAt is nil, parent thread_room_id stamp skipped",
-			"request_id", natsutil.RequestIDFromContext(ctx),
-			"replyID", msg.ID,
-			"parentMessageID", msg.ThreadParentMessageID,
-			"threadRoomID", existingRoom.ID,
-			"room_id", msg.RoomID,
-		)
 	}
 
 	return existingRoom.ID, followers, nil

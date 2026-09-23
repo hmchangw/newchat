@@ -89,6 +89,18 @@ func (s *threadStoreMongo) GetThreadRoomByParentMessageID(ctx context.Context, p
 	return &room, nil
 }
 
+// MarkParentStamped sets parentStamped on the thread room after the parent's
+// thread_room_id write succeeded. Safe to call twice: it writes the same value.
+func (s *threadStoreMongo) MarkParentStamped(ctx context.Context, threadRoomID string) error {
+	if _, err := s.threadRooms.UpdateOne(ctx,
+		bson.M{"_id": threadRoomID},
+		bson.M{"$set": bson.M{"parentStamped": true}},
+	); err != nil {
+		return fmt.Errorf("mark parent stamped on thread room %s: %w", threadRoomID, err)
+	}
+	return nil
+}
+
 func (s *threadStoreMongo) InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
 	if err := s.subIndex.Ready(ctx); err != nil {
 		return err
