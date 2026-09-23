@@ -484,6 +484,13 @@ func main() {
 			for {
 				msgCtx, msg, err := retryIter.Next()
 				if err != nil {
+					// Same stall handling natsmetrics.Consume applies to the hot loop: a
+					// recoverable Next failure is a blip, and returning on it would end the
+					// drain for the life of the pod, stranding everything parked on RETRY.
+					if natsmetrics.Recoverable(err) {
+						slog.Warn("retry consume loop stalled; retrying", "error", err)
+						continue
+					}
 					retryConsumerMetrics.LoopFailed(context.Background(), err)
 					return
 				}

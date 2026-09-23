@@ -354,7 +354,11 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 Four levers govern redelivery. `BackOff` fires on a failure mode disjoint from the
 rest; `jsretry.Heartbeat` runs the other way, holding a live handler's deadline open
 rather than spacing a retry; and `pkg/retrylane` shares `jsretry`'s trigger but moves
-where the wait happens once the fast rungs are spent. Set all four.
+where the wait happens once the fast rungs are spent. Consider all four; set the ones
+that apply. The first two govern every consumer. The last two are selective:
+`jsretry.Heartbeat` only where honest slow work needs its deadline held open, and
+`pkg/retrylane` only where escalation is safe — it is opt-in per service and excluded
+by design from the ordering-sensitive lanes named below.
 
 - **Consumer `BackOff`** (server-side, `pkg/stream.ConsumerSettings`) fires only when a
   message goes un-acked past `AckWait` — pod crash, OOM, hang, or a handler slower than

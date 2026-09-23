@@ -35,8 +35,14 @@ strictly worse: every added second is occupancy multiplied by the failure rate.
 
 ## 2. Decision: relocate the wait, don't extend or abandon it
 
-Keep the retry budget exactly as it is (12.6 minutes, five spaced attempts) but **move the
-long waits off the hot lane**:
+Keep the retry budget exactly as it is but **move the long waits off the hot lane**:
+
+The figures below (12.6 minutes, five spaced attempts) are the *baseline* — an unmodified
+consumer at `stream.DefaultMaxDeliver`. A consumer that adopts the lane does not run that
+budget: `retrylane.ConsumerConfig` derives its retry `MaxDeliver` from
+`stream.OutageRetryWindow`, so the participating consumers carry at least ~1h of jittered
+minima (~2h nominal on the current slow tail). Wherever this document quotes 12.6 minutes,
+it is describing the baseline being improved on, not what the lane ships.
 
 - fast rungs stay in place — `DefaultBackoff[:3]` = `{1s, 5s, 30s}` = **36s occupancy** (schedule-specific: on `LowLatencyBackoff`, `[:3]` = `{200ms, 1s, 5s}` = **6.2s**)
 - slow rungs move to a retry lane — `DefaultBackoff[3:]` = `{2m, 10m}` = 12 minutes
@@ -359,9 +365,13 @@ Properties an operator must know before running it:
   two that succeeded.
 - **Bulk replay is rate-limited**, a paced drip. Unthrottled it re-breaks the dependency that
   just recovered.
-- **`Nats-Msg-Id` stays the original** `{origStream}:{origSeq}:{consumer}`, so a
-  double-clicked replay inside the dedup window is a no-op; outside it, correctness rests on
-  handler idempotency — the system's baseline assumption everywhere else.
+- **`Nats-Msg-Id` is replay-specific** — `replay:{consumer}:{recordID}`, not the original
+  `{origStream}:{origSeq}:{consumer}`. Reusing the escalation's id would dedup the *first*
+  replay against the escalation that created the DLQ entry, so the replay would silently
+  publish nothing while reporting success. A replay-specific id still makes a
+  double-clicked replay inside the dedup window a no-op, which is the property wanted;
+  outside it, correctness rests on handler idempotency — the system's baseline assumption
+  everywhere else.
 - **Order is not preserved.** Replays arrive arbitrarily late, which is safe only because
   §3.6 restricts the lane to order-insensitive consumers.
 - **Two pre-flight failures**: the DLQ entry aged out (→ "content no longer available"; the

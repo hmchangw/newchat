@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -384,17 +385,21 @@ func main() {
 		return cons.Info(ctx)
 	}, 15*time.Second)
 
+	// Stored once the retry consumer is bound, below. The handoff is atomic because
+	// the drain callback runs on the refresh goroutine, while the bind happens on
+	// this one; the tracker has to exist first, since the handler the retry loop
+	// processes with depends on it.
+	var retryBacklog atomic.Pointer[consumerInfoFunc]
 	degradeTr := newDegradeTracker(histdegrade.NewStore(db), cfg.SiteID,
 		func(ctx context.Context) (uint64, uint64, error) {
-			ci, err := cons.Info(ctx)
-			if err != nil {
-				return 0, 0, fmt.Errorf("consumer info: %w", err)
-			}
 			// NumAckPending rides along with NumPending: history has caught up only
 			// when nothing is left to deliver AND nothing is still cycling through
-			// redelivery.
-			// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
-			return ci.NumPending, uint64(ci.NumAckPending), nil
+			// redelivery — on either lane.
+			var retry consumerInfoFunc
+			if f := retryBacklog.Load(); f != nil {
+				retry = *f
+			}
+			return historyBacklog(ctx, cons.Info, retry)
 		}, mtr, nil, cfg.DegradeMarkDelay)
 	// tickAfterInterval, not tickOnStart: the marker is read at startup by the
 	// first message that needs it, and an immediate tick would race the consumer
@@ -510,6 +515,12 @@ func main() {
 	// nil outside default mode, and when the lane is off with RETRY-{siteID}
 	// unprovisioned — in which case nothing can be parked there to drain.
 	if retryCons != nil {
+		// Publish this lane's backlog to the degrade tracker before the loop starts:
+		// once it is draining, its successes can clear the marker, so its depth has to
+		// be visible to the check that decides whether history has caught up.
+		info := consumerInfoFunc(retryCons.Info)
+		retryBacklog.Store(&info)
+
 		// The retry lane does not escalate again in phases 0-3: HandleRetryMsg settles
 		// in place on the slow-rung schedule relocated off the hot consumer.
 		retryProcess := retryProcessor(handler)
@@ -536,6 +547,13 @@ func main() {
 			for {
 				msgCtx, msg, err := retryIter.Next()
 				if err != nil {
+					// Same stall handling natsmetrics.Consume applies to the hot loop: a
+					// recoverable Next failure is a blip, and returning on it would end the
+					// drain for the life of the pod, stranding everything parked on RETRY.
+					if natsmetrics.Recoverable(err) {
+						slog.Warn("retry consume loop stalled; retrying", "error", err)
+						continue
+					}
 					retryConsumerMetrics.LoopFailed(context.Background(), err)
 					return
 				}
@@ -654,6 +672,36 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 	cc.Durable = defaultConsumerDurable
 	cc.FilterSubjects = []string{subject.MsgCanonicalCreated(siteID)}
 	return cc
+}
+
+// historyBacklog reports the combined pending and ack-pending depth of every
+// consumer whose deliveries can clear the degraded marker. retry may be nil —
+// teams mode binds no retry consumer, and neither does default mode when the lane
+// is off and RETRY-{siteID} is unprovisioned.
+//
+// Both lanes must be counted because settle calls OnWriteSuccess for a delivery
+// from either. Counting the hot consumer alone was correct only while it was the
+// only lane: after escalation drains it, one successful retry delivery would
+// observe zero pending work and clear the marker while escalated history messages
+// are still parked on RETRY, telling clients their history is complete when it is
+// not. An unreadable backlog is an error rather than a zero for the same reason —
+// the marker must not clear on a number nobody could fetch.
+func historyBacklog(ctx context.Context, hot, retry consumerInfoFunc) (uint64, uint64, error) {
+	ci, err := hot(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("consumer info: %w", err)
+	}
+	// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
+	pending, ackPending := ci.NumPending, uint64(ci.NumAckPending)
+	if retry == nil {
+		return pending, ackPending, nil
+	}
+	rci, err := retry(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("retry consumer info: %w", err)
+	}
+	// #nosec G115 -- as above
+	return pending + rci.NumPending, ackPending + uint64(rci.NumAckPending), nil
 }
 
 // retryConsumerConfig is retrylane.ConsumerConfig plus the one invariant this
