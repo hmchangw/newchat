@@ -64,6 +64,16 @@ reinterprets the untouched default against the slow schedule
 15 on `LowLatencyBackoff`'s). Without that, switching the lane on would make an outage
 *lossier* than leaving it off.
 
+**`message-worker` is the exception: `MaxDeliver` is not its retry budget at all.** It
+owns its own give-up decision (`settle.go`, #307) and its retry consumer runs
+`MaxDeliver=-1`, so JetStream never retires a message behind that decision. What bounds
+its retries is `INVALID_RETRY_WINDOW` measured against the cumulative `X-Retry-Attempt`
+header, which spans both lanes — the fast rungs before escalation and the slow ones
+after. An operator reading `MaxDeliver` there to infer the retry budget will get the
+wrong answer; read the window instead. The 14/15 derivation above applies to
+`notification-worker` and `broadcast-worker`, which have no give-up path of their own and
+rely on the cap to retire a message.
+
 ## 3. Design
 
 ### 3.1 `pkg/retrylane` — a wrapper, not a wider `pkg/jsretry`
@@ -386,7 +396,7 @@ Per the `caarlos0/env` convention, opt-in by default like `BOOTSTRAP_STREAMS`:
 |---|---|---|
 | `RETRY_LANE_ENABLED` | `false` | Opt in per service |
 | `RETRY_LANE_FAST_STEPS` | `3` | Split index into `jsretry.DefaultBackoff` |
-| `RETRY_CONSUMER_MAX_DELIVER` | `3` (sentinel) | Retry-lane attempts before DLQ; the loop guard. The default is **reinterpreted**, not used: `ConsumerConfig` raises it to cover `stream.OutageRetryWindow` under the slow schedule (14 / 15). Set it explicitly to override. |
+| `RETRY_CONSUMER_MAX_DELIVER` | `3` (sentinel) | Retry-lane attempts before DLQ; the loop guard. The default is **reinterpreted**, not used: `ConsumerConfig` raises it to cover `stream.OutageRetryWindow` under the slow schedule (14 / 15). Set it explicitly to override — but note an explicit `3` is indistinguishable from the untouched default and is raised too, matching `stream.WithOutageRetryBudget`'s repo-wide heuristic. **Not read by `message-worker`**, whose retry consumer is pinned to `-1` so `settle.go` stays the only thing that gives up. |
 | `RETRY_CONSUMER_MAX_ACK_PENDING` | `40000` | Sized for 5/s escalation × the slow lane's full occupancy (~7320s ⇒ ~36,600, rounded). Under-sizing only slows redelivery of parked messages — publishes are not gated by it, and the hot lane is unaffected. |
 | `RETRY_CONSUMER_MAX_WORKERS` | `10` | Deliberately small — doubles as the recovery herd damper |
 
