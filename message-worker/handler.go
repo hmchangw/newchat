@@ -529,12 +529,8 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 		if err != nil {
 			return nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
 		}
-		// Only a stamp that actually matched both rows may be recorded. Everything
-		// above can NAK after the thread room is committed, and the redelivery takes
-		// the subsequent-reply path, so the flag — not "we reached this function
-		// once" — is what says the parent is linked to its thread. A missed LWT
-		// leaves it false so the next reply retries; recording one would make the
-		// miss permanent, which is the failure mode this flag exists to prevent.
+		// Only record the stamp if it actually wrote both rows. If we record a
+		// stamp that missed, no later reply will ever try again.
 		if applied {
 			if err := h.threadStore.MarkParentStamped(ctx, threadRoomID); err != nil {
 				return nil, fmt.Errorf("mark parent stamped: %w", err)
@@ -564,8 +560,7 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 // this reply's unread mark. That combined list is the audience
 // fanOutThreadUnread should mark unread; it dedups, and the sender is
 // filtered out there regardless of whether they were already a follower.
-// It re-issues the parent thread_room_id stamp only while the room's parentStamped
-// flag is false — see the note at the end of the body.
+// It re-stamps the parent's thread_room_id only while parentStamped is false.
 func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
 	existingRoom, err := h.threadStore.GetThreadRoomByParentMessageID(ctx, msg.ThreadParentMessageID)
 	if err != nil {
@@ -643,15 +638,12 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		followers = append(followers, parentSender.Account)
 	}
 
-	// The parent's thread_room_id never changes, so once it is written the re-stamp is
-	// two Cassandra LWTs per reply for nothing — that is what this PR removes. It cannot
-	// be dropped unconditionally, though: the thread room is committed before the writes
-	// in handleFirstThreadReply, and the stamp is the last of them, so any NAK in that
-	// window (including one from the stamp itself) sends the redelivery down this path
-	// with the parent still unlinked, and history-service then serves that thread as
-	// having zero replies, permanently. parentStamped closes that: false means the stamp
-	// is unconfirmed and this reply issues it. Rooms predating the field read false and
-	// repair themselves on their next reply.
+	// The parent's thread_room_id never changes, so re-stamping it on every reply
+	// costs two Cassandra writes for nothing. But we can't just drop it: the first
+	// reply can fail after creating the thread room but before stamping, and the
+	// retry comes back through here. An unstamped parent makes history-service show
+	// the thread as empty, forever. So: stamp only while parentStamped is false.
+	// Old rooms have no flag, which reads as false, so they repair on their next reply.
 	if !existingRoom.ParentStamped {
 		switch {
 		case parentFound && msg.ThreadParentMessageCreatedAt != nil:
@@ -659,15 +651,15 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 			if err != nil {
 				return "", nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
 			}
-			// Unconfirmed stays unrecorded — see handleFirstThreadReply.
+			// Same rule as handleFirstThreadReply: only record a stamp that landed.
 			if applied {
 				if err := h.threadStore.MarkParentStamped(ctx, existingRoom.ID); err != nil {
 					return "", nil, fmt.Errorf("mark parent stamped: %w", err)
 				}
 			}
 		case !parentFound:
-			// Nothing to stamp yet. The flag stays false so a later reply can still
-			// repair this once the parent's canonical write lands.
+			// The parent isn't in Cassandra yet, so there is nothing to stamp. Leave
+			// the flag false so a later reply retries once the parent shows up.
 			slog.WarnContext(ctx, "subsequent thread reply: parent not in messages_by_id, thread_room_id stamp deferred",
 				"request_id", natsutil.RequestIDFromContext(ctx),
 				"replyID", msg.ID,

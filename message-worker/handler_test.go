@@ -1299,11 +1299,10 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// The first reply commits the thread room before the six writes that follow
-			// it, so any NAK in that window leaves the parent unstamped and the
-			// redelivery takes this path. parentStamped=false is how that is detected,
-			// and this is the only place it can be repaired — history-service reads an
-			// unstamped parent as a thread with zero replies.
+			// The first reply creates the thread room before it stamps the parent, so
+			// a failure in between leaves the parent unstamped and the retry lands
+			// here. This is the only place that gets repaired, and it matters:
+			// history-service shows an unstamped parent as a thread with no replies.
 			name: "subsequent reply — parent not yet stamped — stamps it and records that",
 			msg: &model.Message{
 				ID:                           "msg-reply",
@@ -1334,8 +1333,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			},
 		},
 		{
-			// The repair is what the flag buys; the flag is what keeps it off the hot
-			// path. Without the guard this is two Cassandra LWTs on every reply forever.
+			// The flag is what keeps the repair off the common path. Without it,
+			// every reply pays for two Cassandra writes it does not need.
 			name: "subsequent reply — parent already stamped — writes no stamp",
 			msg: &model.Message{
 				ID:                           "msg-reply",
@@ -1364,9 +1363,8 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 			},
 		},
 		{
-			// An unstamped room whose parent is gone from messages_by_id has nothing to
-			// stamp; the flag must stay false so a later reply can still repair it if
-			// the parent's canonical write lands.
+			// If the parent isn't in Cassandra there is nothing to stamp, so the flag
+			// stays false and a later reply can still repair it once it arrives.
 			name: "subsequent reply — not stamped but parent missing — no stamp, flag untouched",
 			msg: &model.Message{
 				ID:                           "msg-reply",
@@ -3531,17 +3529,10 @@ func TestHandler_ThreadReplyBadge_SuppressedDuringDrain(t *testing.T) {
 	}
 }
 
-// TestHandler_ParentStampNotRecordedWhenLWTMisses pins the precondition the flag
-// depends on: MarkParentStamped may run only when the stamp actually landed.
-//
-// UpdateParentMessageThreadRoomID issues two `IF EXISTS` LWTs and historically
-// returned nil even when one did not apply — it only logged. Treating that nil as
-// confirmation records a stamp that never happened, and because the flag then
-// suppresses every later attempt, the miss becomes permanent. The messages_by_room
-// half is the reachable one: it is keyed on (room_id, bucket, created_at,
-// message_id), so an event-carried parent createdAt that disagrees with the stored
-// row, or a MESSAGE_BUCKET_HOURS mismatch, misses it while messages_by_id (keyed on
-// message_id alone) still applies.
+// We may only record the stamp when it actually wrote something. The stamp uses
+// conditional writes that quietly do nothing if the row is not found, so "no error"
+// is not the same as "written". Recording a stamp that missed is permanent, because
+// the flag stops every later reply from retrying.
 func TestHandler_ParentStampNotRecordedWhenLWTMisses(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	parentCreatedAt := now.Add(-time.Hour)
@@ -3558,8 +3549,8 @@ func TestHandler_ParentStampNotRecordedWhenLWTMisses(t *testing.T) {
 		applied    bool
 		wantMarked bool
 	}{
-		{name: "both LWTs applied — the stamp is recorded", applied: true, wantMarked: true},
-		{name: "an LWT missed — the stamp is NOT recorded, so a later reply retries", applied: false, wantMarked: false},
+		{name: "the stamp wrote both rows — record it", applied: true, wantMarked: true},
+		{name: "the stamp missed — don't record it, so a later reply retries", applied: false, wantMarked: false},
 	}
 
 	for _, tt := range tests {
@@ -3581,12 +3572,12 @@ func TestHandler_ParentStampNotRecordedWhenLWTMisses(t *testing.T) {
 			h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
 				nil, testDegradeTracker(), testDropPolicy())
 			_, err := h.handleFirstThreadReply(context.Background(), msg, "site-a", "tr-1", replier, now, false)
-			require.NoError(t, err, "a missed LWT is not an error — it is logged and left for the next reply")
+			require.NoError(t, err, "a missed stamp is not an error, just left for the next reply")
 
 			if tt.wantMarked {
-				assert.Equal(t, 1, marks, "a landed stamp must be recorded so the hot path stops re-issuing it")
+				assert.Equal(t, 1, marks, "recording it is what stops later replies re-stamping")
 			} else {
-				assert.Zero(t, marks, "recording a stamp that missed makes the miss permanent")
+				assert.Zero(t, marks, "recording a miss would make it permanent")
 			}
 		})
 
@@ -3615,7 +3606,7 @@ func TestHandler_ParentStampNotRecordedWhenLWTMisses(t *testing.T) {
 			if tt.wantMarked {
 				assert.Equal(t, 1, marks)
 			} else {
-				assert.Zero(t, marks, "the flag must stay false so the next reply retries the stamp")
+				assert.Zero(t, marks, "leave the flag false so the next reply retries")
 			}
 		})
 	}

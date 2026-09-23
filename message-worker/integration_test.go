@@ -379,13 +379,12 @@ func TestCassandraStore_SaveThreadMessage(t *testing.T) {
 	})
 }
 
-// UpdateParentMessageThreadRoomID reports whether BOTH `IF EXISTS` LWTs matched.
-// The caller records thread_rooms.parentStamped off that answer and the flag then
-// suppresses every later attempt, so a miss reported as success is permanent. The
-// messages_by_room half is the reachable miss: it is keyed on
-// (room_id, bucket, created_at, message_id), so a parent createdAt that disagrees
-// with the stored row — an event-carried value, or a MESSAGE_BUCKET_HOURS
-// mismatch — misses it while messages_by_id (keyed on message_id alone) applies.
+// The stamp writes two tables with conditional updates, which silently do nothing
+// if the row is not found. applied must be true only when both wrote, since the
+// caller uses it to decide whether to stop retrying. messages_by_room is the one
+// that realistically misses: it is looked up by (room_id, bucket, created_at,
+// message_id), so a parent createdAt that is even slightly off will not match, while
+// messages_by_id (looked up by message_id alone) still does.
 func TestCassandraStore_UpdateParentMessageThreadRoomID_AppliedReporting(t *testing.T) {
 	cassSession := setupCassandra(t)
 	bucket := msgbucket.New(24 * time.Hour)
@@ -399,7 +398,7 @@ func TestCassandraStore_UpdateParentMessageThreadRoomID_AppliedReporting(t *test
 	}
 	require.NoError(t, store.SaveMessage(ctx, parent, &cassParticipant{ID: "u-1", Account: "alice"}, "site-a"))
 
-	t.Run("both rows match — reports applied", func(t *testing.T) {
+	t.Run("both rows found — reports applied", func(t *testing.T) {
 		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "stamp-parent", "stamp-room", parentCreatedAt, "tr-1")
 		require.NoError(t, err)
 		assert.True(t, applied)
@@ -411,17 +410,16 @@ func TestCassandraStore_UpdateParentMessageThreadRoomID_AppliedReporting(t *test
 			`SELECT thread_room_id FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
 			"stamp-room", bucket.Of(parentCreatedAt), parentCreatedAt, "stamp-parent").WithContext(ctx).Scan(&byRoom))
 		assert.Equal(t, "tr-1", byID)
-		assert.Equal(t, "tr-1", byRoom, "the room-timeline copy is what carries the thread indicator")
+		assert.Equal(t, "tr-1", byRoom, "this copy is what shows the thread marker in the room")
 	})
 
-	// The half-stamp: messages_by_id still matches on message_id, messages_by_room
-	// does not match the shifted clustering key. applied must be false so the caller
-	// leaves the flag unset and a later reply retries.
+	// A shifted createdAt still matches messages_by_id but not messages_by_room, so
+	// only half the stamp lands. applied must be false so a later reply retries.
 	t.Run("createdAt disagrees with the stored row — reports NOT applied", func(t *testing.T) {
 		skewed := parentCreatedAt.Add(time.Millisecond)
 		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "stamp-parent", "stamp-room", skewed, "tr-2")
-		require.NoError(t, err, "a missed LWT is not a transport error")
-		assert.False(t, applied, "recording this as stamped would make the half-stamp permanent")
+		require.NoError(t, err, "not matching a row is not a database error")
+		assert.False(t, applied, "reporting this as stamped would make the half-stamp permanent")
 	})
 
 	t.Run("parent row absent entirely — reports NOT applied", func(t *testing.T) {

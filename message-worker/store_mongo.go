@@ -89,8 +89,8 @@ func (s *threadStoreMongo) GetThreadRoomByParentMessageID(ctx context.Context, p
 	return &room, nil
 }
 
-// MarkParentStamped flips parentStamped on the thread room once the parent's
-// thread_room_id write has landed. Idempotent: a redelivery re-sets the same value.
+// MarkParentStamped sets parentStamped on the thread room after the parent's
+// thread_room_id write succeeded. Safe to call twice: it writes the same value.
 func (s *threadStoreMongo) MarkParentStamped(ctx context.Context, threadRoomID string) error {
 	if _, err := s.threadRooms.UpdateOne(ctx,
 		bson.M{"_id": threadRoomID},

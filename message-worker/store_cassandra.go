@@ -487,9 +487,9 @@ func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, pa
 			"threadRoomID", threadRoomID,
 		)
 	}
-	// Both halves must land before the caller may record the stamp: messages_by_id
-	// backs opening the thread, messages_by_room backs the thread indicator in the
-	// room timeline, and a caller that records a half-stamp suppresses every retry.
+	// Report applied only if both writes found their row. messages_by_id is what
+	// opens the thread; messages_by_room is what shows the thread marker in the room
+	// timeline. Writing only one leaves the parent half-linked.
 	return byIDApplied && applied, nil
 }
 
