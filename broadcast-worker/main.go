@@ -388,6 +388,11 @@ func main() {
 	// Derived before the consumer config: ConsumerConfig sizes the retry lane's
 	// MaxDeliver against this schedule so the outage budget survives escalation.
 	slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.LowLatencyBackoff)
+	// The backpressure tail, kept per-message by slowBackoffFor: settleBackoff routes a
+	// shedding downstream onto the slower curve on the hot lane, and escalation must not
+	// drop that choice. MaxDeliver stays derived from the faster schedule above — see
+	// slowBackoffFor on why that still covers the outage window for both.
+	slowBackpressureBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.BackpressureBackoff)
 	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, &cfg.Retry, slowBackoff)
 	retryConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
@@ -532,7 +537,7 @@ func main() {
 			func(msg jetstream.Msg) natsmetrics.EventType {
 				return natsmetrics.EventTypeFromSubject(retrylane.OriginSubject(msg.Headers(), msg.Subject()))
 			},
-			guardedProcessor(retryProcessor(handler, slowBackoff)),
+			guardedProcessor(retryProcessor(handler, slowBackoff, slowBackpressureBackoff)),
 			// No loopguard: the retry loop draining is not a liveness condition for
 			// live fan-out, and SelfShutdown here would kill a healthy pod over a
 			// stalled drain. natsmetrics.Consume still records LoopFailed, so a dead
@@ -677,13 +682,18 @@ func broadcastProcessor(handler *Handler, lane *retrylane.Lane) messageProcessor
 
 // retryProcessor builds the retry-lane's per-message processing closure. Deliveries reaching
 // RETRY-{siteID} already spent their fast-rung budget on the hot consumer, so this settles
-// with plain jsretry.Settle over slowBackoff — the retry lane does not escalate a second time.
-func retryProcessor(handler *Handler, slowBackoff []time.Duration) messageProcessor {
+// with plain jsretry.Settle — the retry lane does not escalate a second time.
+//
+// The curve is chosen per message from X-Retry-Reason rather than fixed, so the
+// backpressure schedule the hot lane picked for a shedding downstream survives
+// escalation. See slowBackoffFor.
+func retryProcessor(handler *Handler, slowBackoff, slowBackpressureBackoff []time.Duration) messageProcessor {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
-		jsretry.Settle(handlerCtx, msg, slowBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
+		sched := slowBackoffFor(msg.Headers(), slowBackoff, slowBackpressureBackoff)
+		jsretry.Settle(handlerCtx, msg, sched, handler.HandleMessage(handlerCtx, msg.Data()))
 	}
 }
 
