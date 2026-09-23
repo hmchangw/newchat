@@ -110,8 +110,8 @@ func (s *salvageStore) SaveMessage(context.Context, *model.Message, *cassPartici
 func (s *salvageStore) GetQuotedParentSnapshot(context.Context, string) (*cassandra.QuotedParentMessage, bool, error) {
 	return nil, false, nil
 }
-func (s *salvageStore) UpdateParentMessageThreadRoomID(context.Context, string, string, time.Time, string) error {
-	return nil
+func (s *salvageStore) UpdateParentMessageThreadRoomID(context.Context, string, string, time.Time, string) (bool, error) {
+	return true, nil
 }
 
 type salvageUsers struct{}

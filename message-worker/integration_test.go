@@ -379,6 +379,58 @@ func TestCassandraStore_SaveThreadMessage(t *testing.T) {
 	})
 }
 
+// UpdateParentMessageThreadRoomID reports whether BOTH `IF EXISTS` LWTs matched.
+// The caller records thread_rooms.parentStamped off that answer and the flag then
+// suppresses every later attempt, so a miss reported as success is permanent. The
+// messages_by_room half is the reachable miss: it is keyed on
+// (room_id, bucket, created_at, message_id), so a parent createdAt that disagrees
+// with the stored row — an event-carried value, or a MESSAGE_BUCKET_HOURS
+// mismatch — misses it while messages_by_id (keyed on message_id alone) applies.
+func TestCassandraStore_UpdateParentMessageThreadRoomID_AppliedReporting(t *testing.T) {
+	cassSession := setupCassandra(t)
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, nil)
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	parent := &model.Message{
+		ID: "stamp-parent", RoomID: "stamp-room", UserID: "u-1",
+		Content: "parent", CreatedAt: parentCreatedAt,
+	}
+	require.NoError(t, store.SaveMessage(ctx, parent, &cassParticipant{ID: "u-1", Account: "alice"}, "site-a"))
+
+	t.Run("both rows match — reports applied", func(t *testing.T) {
+		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "stamp-parent", "stamp-room", parentCreatedAt, "tr-1")
+		require.NoError(t, err)
+		assert.True(t, applied)
+
+		var byID, byRoom string
+		require.NoError(t, cassSession.Query(`SELECT thread_room_id FROM messages_by_id WHERE message_id = ?`,
+			"stamp-parent").WithContext(ctx).Scan(&byID))
+		require.NoError(t, cassSession.Query(
+			`SELECT thread_room_id FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			"stamp-room", bucket.Of(parentCreatedAt), parentCreatedAt, "stamp-parent").WithContext(ctx).Scan(&byRoom))
+		assert.Equal(t, "tr-1", byID)
+		assert.Equal(t, "tr-1", byRoom, "the room-timeline copy is what carries the thread indicator")
+	})
+
+	// The half-stamp: messages_by_id still matches on message_id, messages_by_room
+	// does not match the shifted clustering key. applied must be false so the caller
+	// leaves the flag unset and a later reply retries.
+	t.Run("createdAt disagrees with the stored row — reports NOT applied", func(t *testing.T) {
+		skewed := parentCreatedAt.Add(time.Millisecond)
+		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "stamp-parent", "stamp-room", skewed, "tr-2")
+		require.NoError(t, err, "a missed LWT is not a transport error")
+		assert.False(t, applied, "recording this as stamped would make the half-stamp permanent")
+	})
+
+	t.Run("parent row absent entirely — reports NOT applied", func(t *testing.T) {
+		applied, err := store.UpdateParentMessageThreadRoomID(ctx, "no-such-parent", "stamp-room", parentCreatedAt, "tr-3")
+		require.NoError(t, err)
+		assert.False(t, applied)
+	})
+}
+
 func TestCassandraStore_GetMessageSender(t *testing.T) {
 	cassSession := setupCassandra(t)
 	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)

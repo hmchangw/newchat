@@ -71,7 +71,7 @@ func (*captureStore) GetQuotedParentSnapshot(context.Context, string) (*cassandr
 func (*captureStore) GetMessageCreatedAt(context.Context, string) (time.Time, bool, error) {
 	panic("unused")
 }
-func (*captureStore) UpdateParentMessageThreadRoomID(context.Context, string, string, time.Time, string) error {
+func (*captureStore) UpdateParentMessageThreadRoomID(context.Context, string, string, time.Time, string) (bool, error) {
 	panic("unused")
 }
 

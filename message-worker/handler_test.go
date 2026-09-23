@@ -603,7 +603,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			// Thread replies resolve the parent createdAt from messages_by_id; default to
 			// found so cases proceed (the parent-row stamp is allowed but not asserted here).
 			mockStore.EXPECT().GetMessageCreatedAt(gomock.Any(), gomock.Any()).Return(parentCreatedAt, true, nil).AnyTimes()
-			mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
 			mockThreadStore.EXPECT().MarkParentStamped(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 			tt.setupMocks(mockStore, mockUserStore, mockThreadStore)
 
@@ -704,7 +704,7 @@ func TestProcessMessage_UserLookupError_FailsOpen_ThreadReply_CreatesReplierSubs
 			return nil
 		})
 
-	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "parent1", "room1", parentCreatedAt, gomock.Any()).Return(nil)
+	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "parent1", "room1", parentCreatedAt, gomock.Any()).Return(true, nil)
 	threadStore.EXPECT().MarkParentStamped(gomock.Any(), gomock.Any()).Return(nil)
 	threadStore.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
 	store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site1", gomock.Any()).
@@ -1325,7 +1325,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).Return(nil)
 				store.EXPECT().UpdateParentMessageThreadRoomID(
 					gomock.Any(), "msg-parent", "r1", now.Add(-5*time.Minute), "tr-existing",
-				).Return(nil)
+				).Return(true, nil)
 				ts.EXPECT().MarkParentStamped(gomock.Any(), "tr-existing").Return(nil)
 			},
 			extraUserStoreSetup: func(us *MockUserStore) {
@@ -1425,7 +1425,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 					gomock.Any(), "msg-parent", "r1",
 					now.Add(-5*time.Minute),
 					gomock.Cond(func(x any) bool { s, ok := x.(string); return ok && s == capturedRoomID }),
-				).Return(nil)
+				).Return(true, nil)
 				ts.EXPECT().MarkParentStamped(gomock.Any(),
 					gomock.Cond(func(x any) bool { s, ok := x.(string); return ok && s == capturedRoomID }),
 				).Return(nil)
@@ -1454,7 +1454,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 				ts.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
-					Return(errors.New("cassandra: write timeout"))
+					Return(false, errors.New("cassandra: write timeout"))
 			},
 			extraUserStoreSetup: func(us *MockUserStore) {
 				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
@@ -3229,7 +3229,7 @@ func TestProcessMessage_UserLookupError_FailsOpen_DoesNotFabricateReplierHomeSit
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
 		Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site1"}}, nil)
 	threadStore.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Times(2).Return(nil)
-	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "parent1", "room1", parentCreatedAt, gomock.Any()).Return(nil)
+	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "parent1", "room1", parentCreatedAt, gomock.Any()).Return(true, nil)
 	threadStore.EXPECT().MarkParentStamped(gomock.Any(), gomock.Any()).Return(nil)
 	threadStore.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
 	store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site2", gomock.Any()).
@@ -3526,6 +3526,96 @@ func TestHandler_ThreadReplyBadge_SuppressedDuringDrain(t *testing.T) {
 				assert.Len(t, published, 1)
 			} else {
 				assert.Empty(t, published, "a badge replayed an hour late re-notifies users about old activity")
+			}
+		})
+	}
+}
+
+// TestHandler_ParentStampNotRecordedWhenLWTMisses pins the precondition the flag
+// depends on: MarkParentStamped may run only when the stamp actually landed.
+//
+// UpdateParentMessageThreadRoomID issues two `IF EXISTS` LWTs and historically
+// returned nil even when one did not apply — it only logged. Treating that nil as
+// confirmation records a stamp that never happened, and because the flag then
+// suppresses every later attempt, the miss becomes permanent. The messages_by_room
+// half is the reachable one: it is keyed on (room_id, bucket, created_at,
+// message_id), so an event-carried parent createdAt that disagrees with the stored
+// row, or a MESSAGE_BUCKET_HOURS mismatch, misses it while messages_by_id (keyed on
+// message_id alone) still applies.
+func TestHandler_ParentStampNotRecordedWhenLWTMisses(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	parentCreatedAt := now.Add(-time.Hour)
+	parentSender := &cassParticipant{ID: "u-parent", Account: "parent-user"}
+	replier := &model.User{ID: "u-replier", Account: "replier", SiteID: "site-a"}
+	msg := &model.Message{
+		ID: "msg-reply", RoomID: "r1", UserID: "u-replier", UserAccount: "replier",
+		CreatedAt: now, ThreadParentMessageID: "msg-parent",
+		ThreadParentMessageCreatedAt: &parentCreatedAt,
+	}
+
+	tests := []struct {
+		name       string
+		applied    bool
+		wantMarked bool
+	}{
+		{name: "both LWTs applied — the stamp is recorded", applied: true, wantMarked: true},
+		{name: "an LWT missed — the stamp is NOT recorded, so a later reply retries", applied: false, wantMarked: false},
+	}
+
+	for _, tt := range tests {
+		t.Run("first reply: "+tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store, us, ts := NewMockStore(ctrl), NewMockUserStore(ctrl), NewMockThreadStore(ctrl)
+			store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(parentSender, nil)
+			ts.EXPECT().AddReplyAccounts(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+			us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
+				Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+			ts.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil).Times(2)
+			store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-1").
+				Return(tt.applied, nil)
+
+			marks := 0
+			ts.EXPECT().MarkParentStamped(gomock.Any(), "tr-1").
+				DoAndReturn(func(context.Context, string) error { marks++; return nil }).AnyTimes()
+
+			h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+				nil, testDegradeTracker(), testDropPolicy())
+			_, err := h.handleFirstThreadReply(context.Background(), msg, "site-a", "tr-1", replier, now, false)
+			require.NoError(t, err, "a missed LWT is not an error — it is logged and left for the next reply")
+
+			if tt.wantMarked {
+				assert.Equal(t, 1, marks, "a landed stamp must be recorded so the hot path stops re-issuing it")
+			} else {
+				assert.Zero(t, marks, "recording a stamp that missed makes the miss permanent")
+			}
+		})
+
+		t.Run("subsequent reply: "+tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store, us, ts := NewMockStore(ctrl), NewMockUserStore(ctrl), NewMockThreadStore(ctrl)
+			ts.EXPECT().GetThreadRoomByParentMessageID(gomock.Any(), "msg-parent").
+				Return(&model.ThreadRoom{ID: "tr-existing", ParentStamped: false}, nil)
+			store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(parentSender, nil)
+			us.EXPECT().FindUserByAccount(gomock.Any(), gomock.Any()).
+				Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).AnyTimes()
+			ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-existing", "msg-reply", gomock.Any(), now).Return(nil)
+			store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-existing").
+				Return(tt.applied, nil)
+
+			marks := 0
+			ts.EXPECT().MarkParentStamped(gomock.Any(), "tr-existing").
+				DoAndReturn(func(context.Context, string) error { marks++; return nil }).AnyTimes()
+
+			h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+				nil, testDegradeTracker(), testDropPolicy())
+			_, _, err := h.handleSubsequentThreadReply(context.Background(), msg, "site-a", replier, now, false)
+			require.NoError(t, err)
+
+			if tt.wantMarked {
+				assert.Equal(t, 1, marks)
+			} else {
+				assert.Zero(t, marks, "the flag must stay false so the next reply retries the stamp")
 			}
 		})
 	}

@@ -120,11 +120,12 @@ func (mr *MockStoreMockRecorder) SaveThreadMessage(ctx, msg, sender, siteID, thr
 }
 
 // UpdateParentMessageThreadRoomID mocks base method.
-func (m *MockStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) error {
+func (m *MockStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateParentMessageThreadRoomID", ctx, parentMessageID, roomID, parentCreatedAt, threadRoomID)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdateParentMessageThreadRoomID indicates an expected call of UpdateParentMessageThreadRoomID.

@@ -451,7 +451,7 @@ func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model
 
 // IF EXISTS prevents phantom rows on missing parents; misses log at ERROR
 // because a silent miss permanently breaks thread reads for that parent.
-func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) error {
+func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) (bool, error) {
 	parentBucket := s.bucket.Of(parentCreatedAt)
 
 	applied, err := s.cassSession.Query(
@@ -459,8 +459,9 @@ func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, pa
 		threadRoomID, parentMessageID,
 	).WithContext(ctx).ScanCAS()
 	if err != nil {
-		return fmt.Errorf("set thread_room_id on parent %s in messages_by_id: %w", parentMessageID, err)
+		return false, fmt.Errorf("set thread_room_id on parent %s in messages_by_id: %w", parentMessageID, err)
 	}
+	byIDApplied := applied
 	if !applied {
 		slog.Error("thread_room_id stamp on messages_by_id missed: parent row not found for message_id",
 			"request_id", natsutil.RequestIDFromContext(ctx),
@@ -474,7 +475,7 @@ func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, pa
 		threadRoomID, roomID, parentBucket, parentCreatedAt, parentMessageID,
 	).WithContext(ctx).ScanCAS()
 	if err != nil {
-		return fmt.Errorf("set thread_room_id on parent %s in messages_by_room: %w", parentMessageID, err)
+		return false, fmt.Errorf("set thread_room_id on parent %s in messages_by_room: %w", parentMessageID, err)
 	}
 	if !applied {
 		slog.Error("thread_room_id stamp on messages_by_room missed: parent row not found at the given (room_id, bucket, created_at, message_id) coordinates",
@@ -486,7 +487,10 @@ func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, pa
 			"threadRoomID", threadRoomID,
 		)
 	}
-	return nil
+	// Both halves must land before the caller may record the stamp: messages_by_id
+	// backs opening the thread, messages_by_room backs the thread indicator in the
+	// room timeline, and a caller that records a half-stamp suppresses every retry.
+	return byIDApplied && applied, nil
 }
 
 // GetQuotedParentSnapshot re-projects the authoritative quoted-parent snapshot for

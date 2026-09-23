@@ -26,7 +26,11 @@ type Store interface {
 	// GetMessageCreatedAt returns the authoritative createdAt for a message from
 	// messages_by_id. The bool is false (nil error) when the row is absent.
 	GetMessageCreatedAt(ctx context.Context, messageID string) (time.Time, bool, error)
-	UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) error
+	// UpdateParentMessageThreadRoomID stamps thread_room_id on the parent in both
+	// messages_by_id and messages_by_room. applied reports whether BOTH conditional
+	// updates matched a row; a miss is logged, not an error, because the caller's
+	// recourse is to leave the stamp unconfirmed and let a later reply retry.
+	UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) (applied bool, err error)
 }
 
 // ThreadStore defines MongoDB operations for thread room and subscription management.

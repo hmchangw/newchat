@@ -525,15 +525,20 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 
 	// Requires ThreadParentMessageCreatedAt; missing → permanent silent thread-fetch failure.
 	if msg.ThreadParentMessageCreatedAt != nil {
-		if err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, threadRoomID); err != nil {
+		applied, err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, threadRoomID)
+		if err != nil {
 			return nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
 		}
-		// Only now may subsequent replies stop re-issuing the stamp. Everything above
-		// can NAK after the thread room is committed, and the redelivery takes the
-		// subsequent-reply path, so the flag — not "we reached this function once" —
-		// is what says the parent is linked to its thread.
-		if err := h.threadStore.MarkParentStamped(ctx, threadRoomID); err != nil {
-			return nil, fmt.Errorf("mark parent stamped: %w", err)
+		// Only a stamp that actually matched both rows may be recorded. Everything
+		// above can NAK after the thread room is committed, and the redelivery takes
+		// the subsequent-reply path, so the flag — not "we reached this function
+		// once" — is what says the parent is linked to its thread. A missed LWT
+		// leaves it false so the next reply retries; recording one would make the
+		// miss permanent, which is the failure mode this flag exists to prevent.
+		if applied {
+			if err := h.threadStore.MarkParentStamped(ctx, threadRoomID); err != nil {
+				return nil, fmt.Errorf("mark parent stamped: %w", err)
+			}
 		}
 	} else {
 		slog.ErrorContext(ctx, "first thread reply: ThreadParentMessageCreatedAt is nil, parent thread_room_id stamp skipped",
@@ -650,11 +655,15 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 	if !existingRoom.ParentStamped {
 		switch {
 		case parentFound && msg.ThreadParentMessageCreatedAt != nil:
-			if err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, existingRoom.ID); err != nil {
+			applied, err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, existingRoom.ID)
+			if err != nil {
 				return "", nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
 			}
-			if err := h.threadStore.MarkParentStamped(ctx, existingRoom.ID); err != nil {
-				return "", nil, fmt.Errorf("mark parent stamped: %w", err)
+			// Unconfirmed stays unrecorded — see handleFirstThreadReply.
+			if applied {
+				if err := h.threadStore.MarkParentStamped(ctx, existingRoom.ID); err != nil {
+					return "", nil, fmt.Errorf("mark parent stamped: %w", err)
+				}
 			}
 		case !parentFound:
 			// Nothing to stamp yet. The flag stays false so a later reply can still
