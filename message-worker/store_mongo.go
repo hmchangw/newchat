@@ -196,6 +196,19 @@ func (s *threadStoreMongo) AdvanceThreadSubscriptionLastSeen(ctx context.Context
 	return nil
 }
 
+// MarkParentSubscribed flips thread_rooms.parentSubscribed, the record that the
+// parent author's subscription for this thread has been written. Idempotent: a
+// re-run writes the same value.
+func (s *threadStoreMongo) MarkParentSubscribed(ctx context.Context, threadRoomID string) error {
+	_, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, bson.M{
+		"$set": bson.M{"parentSubscribed": true},
+	})
+	if err != nil {
+		return fmt.Errorf("mark parent subscribed on thread room %s: %w", threadRoomID, err)
+	}
+	return nil
+}
+
 func (s *threadStoreMongo) AddReplyAccounts(ctx context.Context, threadRoomID string, accounts []string) error {
 	if len(accounts) == 0 {
 		return nil

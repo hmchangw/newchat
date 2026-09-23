@@ -1083,6 +1083,65 @@ func TestThreadStoreMongo_MarkParentStamped(t *testing.T) {
 	})
 }
 
+// MarkParentSubscribed is the record the subsequent-reply heal reads, so it has
+// to persist, be idempotent, and — critically — read as false on rooms written
+// before the field existed, which is what makes those rooms repairable.
+func TestThreadStoreMongo_MarkParentSubscribed(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	room := &model.ThreadRoom{
+		ID: "tr-mark", ParentMessageID: "msg-parent-mark", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "msg-reply-1", ReplyAccounts: []string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, store.CreateThreadRoom(ctx, room))
+
+	read := func(t *testing.T, parentMessageID string) *model.ThreadRoom {
+		t.Helper()
+		got, err := store.GetThreadRoomByParentMessageID(ctx, parentMessageID)
+		require.NoError(t, err)
+		return got
+	}
+
+	t.Run("a freshly created room is not marked", func(t *testing.T) {
+		assert.False(t, read(t, "msg-parent-mark").ParentSubscribed)
+	})
+
+	t.Run("marking persists and round-trips", func(t *testing.T) {
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-mark"))
+		assert.True(t, read(t, "msg-parent-mark").ParentSubscribed)
+	})
+
+	t.Run("marking twice is idempotent", func(t *testing.T) {
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-mark"))
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-mark"))
+		assert.True(t, read(t, "msg-parent-mark").ParentSubscribed)
+	})
+
+	// The population the heal exists to repair: written under the old order, so
+	// the author is in replyAccounts even though nothing vouches for their
+	// subscription. It must read as unmarked.
+	t.Run("a document written without the field reads as not marked", func(t *testing.T) {
+		_, err := db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+			"_id": "tr-legacy-mark", "parentMessageId": "msg-parent-legacy-mark",
+			"threadParentCreatedAt": now, "roomId": "r-1", "siteId": "site-a",
+			"lastMsgAt": now, "lastMsgId": "msg-reply-1",
+			"replyAccounts": []string{"parent-user"},
+			"createdAt":     now, "updatedAt": now,
+		})
+		require.NoError(t, err)
+		assert.False(t, read(t, "msg-parent-legacy-mark").ParentSubscribed,
+			"an absent field must read as false so the next reply repairs the room")
+	})
+
+	t.Run("marking a room that does not exist is not an error", func(t *testing.T) {
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-does-not-exist"))
+	})
+}
+
 func TestThreadStoreMongo_GetThreadRoomByParentMessageID(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
