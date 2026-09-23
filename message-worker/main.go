@@ -281,6 +281,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validated against "default", not cfg.Mode: the failover lane carries no
+	// migration path, so it is the live .created pipeline whatever mode this pod
+	// runs in, and it answers to the same give-up policy as the home lane.
+	failoverConsumerCfg := buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID)
+	if err := validateConsumerConfig(&failoverConsumerCfg, "default"); err != nil {
+		slog.Error("invalid failover consumer config", "error", err)
+		os.Exit(1)
+	}
+
 	mtr, err := newMetrics()
 	if err != nil {
 		slog.Error("init metrics failed", "error", err)
@@ -386,7 +395,7 @@ func main() {
 		},
 		Buddy: &failoverlane.BuddyLane{
 			Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
-			Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
+			Consumer: failoverConsumerCfg,
 		},
 	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
 		if lane == subject.LaneHome {
@@ -542,10 +551,23 @@ func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Obser
 // identical, because a failover-lane message is still this site's message and
 // still belongs in this site's keyspace.
 //
+// It takes stream.WithUnlimitedRedelivery for the same reason the home lane
+// does, and the reason is stronger here. The two lanes share one handler and
+// one settle.go, so a finite cap would let JetStream terminate a message behind
+// a give-up decision that has not been made — and settle.go retries
+// indefinitely on every failure class except a request-class Cassandra rejection
+// that outlived its window, so the cap would destroy exactly the failures the
+// give-up policy declines to destroy. A message reaching this lane has also
+// already been delivered by broadcast-worker and indexed by search-sync-worker,
+// so the loss is silent and one-sided. Applied to the settings rather than to
+// the built config because backOffSchedule clamps its steps against the cap;
+// see WithUnlimitedRedelivery's own note on that ordering.
+//
 // Default mode only — teams mode is a one-time migration path with no failover
-// lane.
+// lane, which is why main validates this config against "default" rather than
+// against cfg.Mode.
 func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
 	cc.Durable = "message-worker-failover"
 	cc.FilterSubjects = []string{subject.FailoverMsgCanonicalCreated(siteID)}
 	return cc
