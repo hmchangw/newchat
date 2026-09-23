@@ -138,6 +138,9 @@ func (salvageThreads) InsertThreadSubscription(context.Context, *model.ThreadSub
 func (salvageThreads) UpsertThreadSubscription(context.Context, *model.ThreadSubscription) error {
 	return nil
 }
+func (salvageThreads) UpsertThreadSubscriptionAdvancingLastSeen(context.Context, *model.ThreadSubscription, time.Time) error {
+	return nil
+}
 func (salvageThreads) MarkThreadSubscriptionMention(context.Context, *model.ThreadSubscription) error {
 	return nil
 }

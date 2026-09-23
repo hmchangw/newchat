@@ -258,17 +258,22 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 
 		// Resolve (or create) the thread room first so we have the threadRoomID
 		// before persisting the message to Cassandra.
-		threadRoomID, followers, err := h.handleThreadRoomAndSubscriptions(ctx, &evt.Message, evt.SiteID, user, isMigration)
+		threadRoomID, followers, replierLastSeenAdvanced, err := h.handleThreadRoomAndSubscriptions(ctx, &evt.Message, evt.SiteID, user, isMigration)
 		if err != nil {
 			return fmt.Errorf("handle thread room and subscriptions: %w", err)
 		}
 		// Replying implies the replier read up to their own reply: advance their thread
-		// lastSeenAt so the read-floor doesn't count them (#396). Best-effort. Runs on
-		// migration too ($max only moves forward → lands on the replier's last reply).
-		if err := h.threadStore.AdvanceThreadSubscriptionLastSeen(ctx, threadRoomID, evt.Message.UserAccount, evt.Message.CreatedAt); err != nil {
-			slog.WarnContext(ctx, "advance replier thread lastSeenAt failed",
-				"error", err, "thread_room_id", threadRoomID, "account", evt.Message.UserAccount,
-				"request_id", natsutil.RequestIDFromContext(ctx))
+		// lastSeenAt so the read-floor doesn't count them (#396). The hot subsequent-reply
+		// path folds this into the replier's subscription upsert — one write instead of two —
+		// and reports replierLastSeenAdvanced. This standalone $max covers the paths that
+		// write no replier subscription: first reply, migration, self-reply, system message.
+		// Best-effort either way.
+		if !replierLastSeenAdvanced {
+			if err := h.threadStore.AdvanceThreadSubscriptionLastSeen(ctx, threadRoomID, evt.Message.UserAccount, evt.Message.CreatedAt); err != nil {
+				slog.WarnContext(ctx, "advance replier thread lastSeenAt failed",
+					"error", err, "thread_room_id", threadRoomID, "account", evt.Message.UserAccount,
+					"request_id", natsutil.RequestIDFromContext(ctx))
+			}
 		}
 		mentionedAccounts, err := h.markThreadMentions(ctx, &evt.Message, threadRoomID, evt.SiteID, isMigration)
 		if err != nil {
@@ -426,7 +431,7 @@ func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
 // subscription is skipped in that case. A real user whose Mongo sender lookup
 // failed (fail-open) is projected from the canonical event, so their
 // subscription still lands even during a Mongo outage.
-func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, isMigration bool) (string, []string, error) {
+func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, isMigration bool) (string, []string, bool, error) {
 	now := msg.CreatedAt
 
 	// history-service gates the thread list on threadParentCreatedAt >= the
@@ -458,12 +463,14 @@ func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *mod
 	err := h.threadStore.CreateThreadRoom(ctx, &threadRoom)
 	switch {
 	case err == nil:
+		// The first reply writes its subscriptions with InsertThreadSubscription, which
+		// carries no lastSeenAt, so the caller's standalone $max still runs for it.
 		followers, ferr := h.handleFirstThreadReply(ctx, msg, eventSiteID, threadRoom.ID, replier, now, isMigration)
-		return threadRoom.ID, followers, ferr
+		return threadRoom.ID, followers, false, ferr
 	case errors.Is(err, errThreadRoomExists):
 		return h.handleSubsequentThreadReply(ctx, msg, eventSiteID, replier, now, isMigration)
 	default:
-		return "", nil, fmt.Errorf("create thread room: %w", err)
+		return "", nil, false, fmt.Errorf("create thread room: %w", err)
 	}
 }
 
@@ -579,6 +586,8 @@ func (h *Handler) healParentThreadSub(ctx context.Context, msg *model.Message, e
 	if err != nil {
 		return fmt.Errorf("lookup parent owner site: %w", err)
 	}
+	// The parent author's own lastSeenAt is not theirs to advance here — they did
+	// not write this reply — so their subscription keeps the plain $setOnInsert.
 	parentSub := h.buildThreadSubscription(msg, threadRoomID, parentSender.ID, parentSender.Account, eventSiteID, now)
 	if err := h.threadStore.UpsertThreadSubscription(ctx, parentSub); err != nil {
 		return fmt.Errorf("heal parent author thread subscription: %w", err)
@@ -603,10 +612,13 @@ func (h *Handler) healParentThreadSub(ctx context.Context, msg *model.Message, e
 
 // writeReplierThreadSub upserts the replier's thread subscription on the
 // subsequent-reply path and publishes the cross-site inbox copy when the
-// replier's home site is remote. Callers keep their own eligibility guard.
+// replier's home site is remote. Callers keep their own eligibility guard, and
+// set replierLastSeenAdvanced on success — the upsert folds the replier's own
+// lastSeenAt advance into the same write (#396), so the caller's standalone
+// $max is only needed on the paths that do not reach here.
 func (h *Handler) writeReplierThreadSub(ctx context.Context, msg *model.Message, eventSiteID, threadRoomID string, replier *model.User, now time.Time) error {
 	replierSub := h.buildThreadSubscription(msg, threadRoomID, msg.UserID, msg.UserAccount, eventSiteID, now)
-	if err := h.threadStore.UpsertThreadSubscription(ctx, replierSub); err != nil {
+	if err := h.threadStore.UpsertThreadSubscriptionAdvancingLastSeen(ctx, replierSub, msg.CreatedAt); err != nil {
 		return fmt.Errorf("upsert replier thread subscription: %w", err)
 	}
 	if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
@@ -616,8 +628,9 @@ func (h *Handler) writeReplierThreadSub(ctx context.Context, msg *model.Message,
 }
 
 // handleSubsequentThreadReply runs when CreateThreadRoom reported an existing room.
-// It upserts only the replier's subscription (idempotent on redelivery), then
-// bumps the room's last-message pointer. The parent author's subscription is
+// It upserts only the replier's subscription (idempotent on redelivery),
+// folding the replier's own lastSeenAt advance into that same write (#396),
+// then bumps the room's last-message pointer. The parent author's subscription is
 // deliberately NOT re-upserted on every reply: it is created on the first reply,
 // so rewriting it each time is a no-op write on the hottest collection
 // (thread_subscriptions) plus an owner-site lookup to route its inbox copy.
@@ -630,8 +643,12 @@ func (h *Handler) writeReplierThreadSub(ctx context.Context, msg *model.Message,
 // path, and the redelivery lands here. The author would then be permanently
 // absent from thread_subscriptions while still accumulating unread marks that
 // history-service's thread list — which gates on that row — can never render.
+//
 // Returns the existing thread room ID so the caller can pass it to
-// SaveThreadMessage, plus the thread's followers as they stood *before* this reply (existingRoom's
+// SaveThreadMessage, whether the replier's lastSeenAt was advanced as part of
+// that write (false on the migration / self-reply / nil-replier paths, where the
+// caller's standalone $max handles it instead), plus
+// the thread's followers as they stood *before* this reply (existingRoom's
 // ReplyAccounts, captured up front) with the parent author appended when
 // resolvable — legacy thread_rooms predating the parent-author seed lack the
 // author in ReplyAccounts, and without the explicit append they would miss
@@ -639,27 +656,29 @@ func (h *Handler) writeReplierThreadSub(ctx context.Context, msg *model.Message,
 // fanOutThreadUnread should mark unread; it dedups, and the sender is
 // filtered out there regardless of whether they were already a follower.
 // It re-stamps the parent's thread_room_id only while parentStamped is false.
-func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
+func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, bool, error) {
 	existingRoom, err := h.threadStore.GetThreadRoomByParentMessageID(ctx, msg.ThreadParentMessageID)
 	if err != nil {
-		return "", nil, fmt.Errorf("get existing thread room: %w", err)
+		return "", nil, false, fmt.Errorf("get existing thread room: %w", err)
 	}
 	followers := existingRoom.ReplyAccounts
 
 	// Migrated replies: resolve the parent for replyAccounts, but skip all thread_subscription writes (collections owns them).
 	parentFound := true
+	replierLastSeenAdvanced := false
 	parentSender, err := h.store.GetMessageSender(ctx, msg.ThreadParentMessageID)
 	switch {
 	case err == nil:
 		if !isMigration && !existingRoom.ParentSubscribed {
 			if err := h.healParentThreadSub(ctx, msg, eventSiteID, existingRoom.ID, parentSender, now); err != nil {
-				return "", nil, err
+				return "", nil, false, err
 			}
 		}
 		if !isMigration && replier != nil && msg.UserID != parentSender.ID {
 			if err := h.writeReplierThreadSub(ctx, msg, eventSiteID, existingRoom.ID, replier, now); err != nil {
-				return "", nil, err
+				return "", nil, false, err
 			}
+			replierLastSeenAdvanced = true
 		}
 	case errors.Is(err, errMessageNotFound):
 		parentFound = false
@@ -669,11 +688,12 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		if !isMigration && replier != nil {
 			if err := h.writeReplierThreadSub(ctx, msg, eventSiteID, existingRoom.ID, replier, now); err != nil {
-				return "", nil, err
+				return "", nil, false, err
 			}
+			replierLastSeenAdvanced = true
 		}
 	default:
-		return "", nil, fmt.Errorf("get parent message sender: %w", err)
+		return "", nil, false, fmt.Errorf("get parent message sender: %w", err)
 	}
 
 	// Update lastMsg pointer AND merge replier + parent author into replyAccounts in one write.
@@ -685,7 +705,7 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		replyAccounts = append(replyAccounts, parentSender.Account)
 	}
 	if err := h.threadStore.UpdateThreadRoomLastMessage(ctx, existingRoom.ID, msg.ID, replyAccounts, now); err != nil {
-		return "", nil, fmt.Errorf("update thread room last message: %w", err)
+		return "", nil, false, fmt.Errorf("update thread room last message: %w", err)
 	}
 
 	// The parent author is always part of this reply's unread audience, even on
@@ -709,12 +729,12 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		case parentFound && msg.ThreadParentMessageCreatedAt != nil:
 			applied, err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, existingRoom.ID)
 			if err != nil {
-				return "", nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
+				return "", nil, false, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
 			}
 			// Same rule as handleFirstThreadReply: only record a stamp that landed.
 			if applied {
 				if err := h.threadStore.MarkParentStamped(ctx, existingRoom.ID); err != nil {
-					return "", nil, fmt.Errorf("mark parent stamped: %w", err)
+					return "", nil, false, fmt.Errorf("mark parent stamped: %w", err)
 				}
 			}
 		case !parentFound:
@@ -738,7 +758,7 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		}
 	}
 
-	return existingRoom.ID, followers, nil
+	return existingRoom.ID, followers, replierLastSeenAdvanced, nil
 }
 
 // lookupOwnerSiteID resolves a user's home site by account.
