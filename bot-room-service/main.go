@@ -139,7 +139,8 @@ func run() error {
 
 	peers := parsePeers(cfg.AllSiteIDs, cfg.SiteID)
 	h := newHandler(store, cfg.SiteID, peers, pubCallback, keyStore, keySender)
-	h.valkey = subValkey
+	// Fenced so a dead Valkey stops costing a CallBudget per invalidation.
+	h.valkey = valkeyutil.Breakered(subValkey, cfg.Valkey.Breaker.New(ctx, "botroomsubauthl2"))
 	// LOCAL sysmsg emission on create/add/remove; never federated cross-site.
 	h.sysmsgPub = jsPublishAdapter{js: js}
 

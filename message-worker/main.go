@@ -200,7 +200,8 @@ func main() {
 		// message-worker is the sole persister, so its DEK breaker opening is the
 		// difference between messages being written and being parked. Publish it.
 		dekBreaker := cfg.DEKBreaker.New(ctx, "atrestdek")
-		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), valkeyClient,
+		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl),
+			valkeyutil.Breakered(valkeyClient, cfg.Valkey.Breaker.New(ctx, "msgworkerdekl2")),
 			cfg.DEKL2.TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 	}
