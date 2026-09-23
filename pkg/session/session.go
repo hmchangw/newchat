@@ -207,18 +207,25 @@ func (s *MongoStore) DeleteByID(ctx context.Context, siteID, account, id string)
 
 func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// Legacy index from before DeleteBeyondCap became account-keyed. Left in
-	// place (idempotent, harmless) — ops can drop it once the account_1_issuedAt_1
-	// index below has been backfilled.
+	// place (idempotent, harmless) — ops can drop it once the
+	// account_1_issuedAt_1__id_1 index below has been backfilled.
 	if _, err := s.coll.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "userId", Value: 1}, {Key: "issuedAt", Value: 1}},
 	}); err != nil {
 		return fmt.Errorf("create sessions userId_issuedAt index: %w", err)
 	}
-	// Backs DeleteBeyondCap, which is now keyed by account rather than userID.
+	// Backs DeleteBeyondCap. Its sort key is (issuedAt, _id), so _id has to
+	// be in the index: with only (account, issuedAt) the planner satisfied the
+	// account equality but not the sort, fetched every session document for
+	// the account and ran a blocking in-memory SORT on every login — the
+	// heaviest query on a busy primary. With _id present the walk is
+	// index-order, and since the query projects only _id it is fully covered
+	// (no FETCH). The older account_1_issuedAt_1 index is a redundant prefix
+	// of this one; ops can drop it once this index exists.
 	if _, err := s.coll.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "account", Value: 1}, {Key: "issuedAt", Value: 1}},
+		Keys: bson.D{{Key: "account", Value: 1}, {Key: "issuedAt", Value: 1}, {Key: "_id", Value: 1}},
 	}); err != nil {
-		return fmt.Errorf("create sessions account_issuedAt index: %w", err)
+		return fmt.Errorf("create sessions account_issuedAt_id index: %w", err)
 	}
 	// Backs the ListForAccount / DeleteForAccount queries and the
 	// DeleteForAccountExcept revocation.
