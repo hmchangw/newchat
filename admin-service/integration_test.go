@@ -19,6 +19,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/pwhash"
@@ -286,7 +287,7 @@ func TestIntegration_UpdateUserPasswordAndRevoke(t *testing.T) {
 	require.NoError(t, st.CreateUser(ctx, u))
 
 	t.Run("sets hash and requirePasswordChange=false", func(t *testing.T) {
-		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$fakehash", false, "")
+		_, err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$fakehash", false, "")
 		require.NoError(t, err)
 
 		// Read back via raw projection to check services.password.bcrypt.
@@ -307,7 +308,7 @@ func TestIntegration_UpdateUserPasswordAndRevoke(t *testing.T) {
 	})
 
 	t.Run("sets requirePasswordChange=true", func(t *testing.T) {
-		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$anotherhash", true, "")
+		_, err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$anotherhash", true, "")
 		require.NoError(t, err)
 
 		var raw struct {
@@ -325,12 +326,15 @@ func TestIntegration_UpdateUserPasswordAndRevoke(t *testing.T) {
 		seedSession(t, db, session.Session{ID: "frank-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 		seedSession(t, db, session.Session{ID: "frank-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
 
-		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$rotatedhash", false, "")
+		revoked, err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$rotatedhash", false, "")
 		require.NoError(t, err)
 
 		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
 		assert.Empty(t, sessions, "exceptSessionID=\"\" (admin setPassword) must kill every session for the account")
+		// The ids are the caller's cache keys, so reporting fewer than were
+		// deleted leaves those tokens authenticating from cache.
+		assert.ElementsMatch(t, []string{"frank-sess-1", "frank-sess-2"}, revoked)
 	})
 
 	t.Run("exceptSessionID=<id> preserves caller session, revokes siblings", func(t *testing.T) {
@@ -339,17 +343,20 @@ func TestIntegration_UpdateUserPasswordAndRevoke(t *testing.T) {
 		seedSession(t, db, session.Session{ID: "frank-sibling-a", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 11})
 		seedSession(t, db, session.Session{ID: "frank-sibling-b", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 12})
 
-		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$callerkeeps", false, "frank-caller")
+		revoked, err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$callerkeeps", false, "frank-caller")
 		require.NoError(t, err)
 
 		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
 		require.Len(t, sessions, 1, "only the caller's session should survive")
 		assert.Equal(t, "frank-caller", sessions[0].ID)
+		assert.ElementsMatch(t, []string{"frank-sibling-a", "frank-sibling-b"}, revoked)
+		assert.NotContains(t, revoked, "frank-caller",
+			"the surviving session must not be bust from the cache")
 	})
 
 	t.Run("nonexistent id returns ErrUserNotFound", func(t *testing.T) {
-		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", "nonexistent-account", "$2a$04$fakehash", false, "")
+		_, err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", "nonexistent-account", "$2a$04$fakehash", false, "")
 		assert.ErrorIs(t, err, ErrUserNotFound)
 	})
 }
@@ -376,7 +383,7 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 		seedSession(t, db, session.Session{ID: "gwen-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 		seedSession(t, db, session.Session{ID: "gwen-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
 
-		updated, err := st.DeactivateAndRevoke(ctx, "site-a", u.Account)
+		updated, revoked, err := st.DeactivateAndRevoke(ctx, "site-a", u.Account)
 		require.NoError(t, err)
 
 		// Post-write doc (ReturnDocument=After): active must already be false,
@@ -398,10 +405,12 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
 		assert.Empty(t, sessions, "deactivate must kill every session for the account")
+		assert.ElementsMatch(t, []string{"gwen-sess-1", "gwen-sess-2"}, revoked,
+			"the ids reported are the caller's cache keys; a short report leaves tokens live in cache")
 	})
 
 	t.Run("nonexistent account returns ErrUserNotFound", func(t *testing.T) {
-		_, err := st.DeactivateAndRevoke(ctx, "site-a", "ghost-account")
+		_, _, err := st.DeactivateAndRevoke(ctx, "site-a", "ghost-account")
 		assert.ErrorIs(t, err, ErrUserNotFound)
 	})
 }
@@ -1315,7 +1324,7 @@ func TestLoginAndChangePasswordEndToEnd(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, h, sessions, cfg.SiteID)
+	registerRoutes(r, h, sessions, cfg.SiteID, ginutil.ConcurrencyConfig{}, nil)
 
 	// Seed one admin
 	hash, err := pwhash.Hash("s3cret", cfg.BcryptCost)

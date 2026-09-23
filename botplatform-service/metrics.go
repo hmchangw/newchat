@@ -16,6 +16,12 @@ import (
 // so nothing else surfaces the gap.
 var controlBypassed metric.Int64Counter
 
+// botRequestsShed counts bot requests rejected by the admission cap before the
+// session lookup ran. It is the counter that shows the cap doing its job, and
+// the one to alert on if it becomes non-zero in steady state — that means
+// legitimate bot traffic is being shed and BOT_MAX_CONCURRENCY is too low.
+var botRequestsShed metric.Int64Counter
+
 func init() {
 	m := otel.Meter("botplatform")
 
@@ -29,6 +35,15 @@ func init() {
 		// provider is not yet installed at package init time.
 		controlBypassed, _ = noop.NewMeterProvider().Meter("botplatform").
 			Int64Counter("bot_control_bypassed_total")
+	}
+
+	botRequestsShed, err = m.Int64Counter(
+		"bot_requests_shed_total",
+		metric.WithDescription("Bot requests rejected by the admission cap before the session lookup"),
+	)
+	if err != nil {
+		botRequestsShed, _ = noop.NewMeterProvider().Meter("botplatform").
+			Int64Counter("bot_requests_shed_total")
 	}
 }
 

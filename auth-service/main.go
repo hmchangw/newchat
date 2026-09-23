@@ -28,7 +28,11 @@ type config struct {
 	AuthScopedSigningKey string        `env:"AUTH_SCOPED_SIGNING_KEY,required"`
 	AuthAccountPubKey    string        `env:"AUTH_ACCOUNT_PUB_KEY,required"`
 	NATSJWTExpiry        time.Duration `env:"NATS_JWT_EXPIRY"           envDefault:"2h"`
-	NATSJWTExpiryJitter  float64       `env:"NATS_JWT_EXPIRY_JITTER"    envDefault:"0.1"`
+
+	// Login caps in-flight requests on the unauthenticated auth endpoint; the
+	// knob is owned by pkg/ginutil so all three login surfaces share one default.
+	Login               ginutil.ConcurrencyConfig
+	NATSJWTExpiryJitter float64 `env:"NATS_JWT_EXPIRY_JITTER"    envDefault:"0.1"`
 
 	// OIDC settings — required when DEV_MODE is false.
 	OIDCIssuerURL string   `env:"OIDC_ISSUER_URL"`
@@ -54,6 +58,11 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	// A negative cap would otherwise read as "disabled" and silently drop the
+	// admission control on the unauthenticated endpoint.
+	if err := cfg.Login.Validate(); err != nil {
+		return fmt.Errorf("validate login admission cap: %w", err)
 	}
 
 	signingKP, err := nkeys.FromSeed([]byte(cfg.AuthScopedSigningKey))
@@ -115,7 +124,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
-	registerRoutes(r, handler)
+	registerRoutes(r, handler, cfg.Login, nil)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{

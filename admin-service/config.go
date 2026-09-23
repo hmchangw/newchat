@@ -8,6 +8,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -92,12 +93,20 @@ type Config struct {
 	// min(FanoutTimeout, request deadline). A blanket router timeout shorter than
 	// FanoutTimeout would silently shrink the fanout — see applyBaseMiddleware.
 	Pool mongoutil.PoolConfig
+
+	// Login caps in-flight requests on the unauthenticated /v1/login route only.
+	Login ginutil.ConcurrencyConfig
 }
 
 func loadConfig() (Config, error) {
 	var c Config
 	if err := env.Parse(&c); err != nil {
 		return Config{}, err
+	}
+	// A negative cap would otherwise read as "disabled" and silently drop the
+	// admission control on the unauthenticated /v1/login route.
+	if err := c.Login.Validate(); err != nil {
+		return Config{}, fmt.Errorf("validate login admission cap: %w", err)
 	}
 	if err := checkHandlerTimeout("ROOM_RPC_TIMEOUT", c.RoomRPCTimeout); err != nil {
 		return Config{}, err

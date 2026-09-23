@@ -590,7 +590,7 @@ func TestHandler_updateUser(t *testing.T) {
 				"active": false,
 			},
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2").Return(&model.User{Account: "u2"}, nil)
+				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2").Return(&model.User{Account: "u2"}, nil, nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, e *AuditEntry) error {
 						assert.Equal(t, "user.update", e.Action)
@@ -661,7 +661,7 @@ func TestHandler_updateUser(t *testing.T) {
 				return m
 			}(),
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u6").Return(&model.User{Account: "u6"}, nil)
+				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u6").Return(&model.User{Account: "u6"}, nil, nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			wantStatus: http.StatusOK,
@@ -746,7 +746,7 @@ func TestHandler_updateUser(t *testing.T) {
 func TestHandler_updateUser_DeactivateAndRevoke_TxError_Returns500(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	m := NewMockAdminStore(ctrl)
-	m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2b").Return(nil, fmt.Errorf("mongo dead"))
+	m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2b").Return(nil, nil, fmt.Errorf("mongo dead"))
 	// no AppendAudit expectation — must not fire
 
 	h := newHandler(m, emptySessionStore(), testCfg(), nil, nil)
@@ -1203,12 +1203,12 @@ func TestHandler_setPassword(t *testing.T) {
 			body:   map[string]any{"password": "newSecret123", "requirePasswordChange": true},
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u1", gomock.Any(), true, "").
-					DoAndReturn(func(_ context.Context, siteID, id, hash string, requireChange bool, exceptSessionID string) error {
+					DoAndReturn(func(_ context.Context, siteID, id, hash string, requireChange bool, exceptSessionID string) ([]string, error) {
 						expected := sha256HexOf("newSecret123")
 						err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(expected))
 						assert.NoError(t, err, "stored hash must verify against bcrypt(sha256_hex(plaintext))")
 						assert.Empty(t, exceptSessionID, "admin-forced reset must revoke every session, no exception")
-						return nil
+						return nil, nil
 					})
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, e *AuditEntry) error {
@@ -1249,7 +1249,7 @@ func TestHandler_setPassword(t *testing.T) {
 			body:   map[string]any{"password": "apassword"},
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u2", gomock.Any(), gomock.Any(), "").
-					Return(fmt.Errorf("db offline"))
+					Return(nil, fmt.Errorf("db offline"))
 			},
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -1259,7 +1259,7 @@ func TestHandler_setPassword(t *testing.T) {
 			body:   map[string]any{"password": "somepass"},
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "no-such", gomock.Any(), gomock.Any(), "").
-					Return(ErrUserNotFound)
+					Return(nil, ErrUserNotFound)
 			},
 			wantStatus: http.StatusNotFound,
 			wantReason: string(errcode.AdminUserNotFound),
@@ -1269,7 +1269,7 @@ func TestHandler_setPassword(t *testing.T) {
 			userID: "u3",
 			body:   map[string]any{"password": "somepass"},
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u3", gomock.Any(), true, "").Return(nil)
+				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u3", gomock.Any(), true, "").Return(nil, nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			wantStatus: http.StatusOK,
@@ -1313,7 +1313,7 @@ func TestHandler_setPassword_TxError_Returns500(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	m := NewMockAdminStore(ctrl)
 	m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u9", gomock.Any(), true, "").
-		Return(fmt.Errorf("mongo dead"))
+		Return(nil, fmt.Errorf("mongo dead"))
 	// no AppendAudit expectation — must not fire
 
 	h := newHandler(m, emptySessionStore(), testCfg(), nil, nil)
@@ -1671,7 +1671,7 @@ func TestHandler_updateUser_Fanout(t *testing.T) {
 			body: map[string]any{"active": false},
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-a", "alice").
-					Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", Active: &inactive}, nil)
+					Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", Active: &inactive}, nil, nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			check: func(t *testing.T, snap model.UserAccountUpdated) {

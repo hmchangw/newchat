@@ -23,6 +23,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errtest"
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/principal"
@@ -86,7 +87,8 @@ func setupRouter(t *testing.T, handler *AuthHandler) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, handler)
+	// Cap disabled: these tests exercise handler behaviour, not admission.
+	registerRoutes(r, handler, ginutil.ConcurrencyConfig{}, nil)
 	return r
 }
 

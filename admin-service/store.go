@@ -60,18 +60,22 @@ type AdminStore interface {
 
 	// UpdateUserPasswordAndRevoke atomically updates the user's bcrypt hash +
 	// requirePasswordChange flag AND deletes matching sessions for that account.
+	// Returns the deleted session ids so the caller can evict them from the
+	// session cache — a Mongo-only delete leaves a revoked token authenticating
+	// from cache until its refresh window elapses.
 	// If exceptSessionID is non-empty, sessions with that _id survive (used by
 	// self-service change-password to keep the caller logged in). If empty, ALL
 	// sessions for the account are deleted (used by admin setPassword). Both
 	// writes run in a single Mongo transaction — requires a replica set.
-	UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) error
+	UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) ([]string, error)
 
 	// DeactivateAndRevoke atomically sets active=false on the user AND
 	// deletes every session for the account. Runs in one Mongo transaction.
 	// Called only for the deactivate branch of updateUser; other UpdateUser
 	// patches (name/roles) stay non-transactional.
-	// Returns the post-write doc projected to the fanout fields.
-	DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error)
+	// Returns the post-write doc projected to the fanout fields, and the deleted
+	// session ids so the caller can evict them from the session cache.
+	DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, []string, error)
 
 	// ListRooms pages this deployment's rooms collection, ordered by _id and
 	// projected to the admin-console columns only. Scoping is the database the

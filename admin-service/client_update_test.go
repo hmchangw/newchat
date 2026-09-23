@@ -25,6 +25,7 @@ import (
 	o11ygin "github.com/flywindy/o11y/gin"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -607,7 +608,7 @@ func TestRoutes_ClientUpdatesRequiresAdmin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	applyBaseMiddleware(r, nil)
-	registerRoutes(r, h, sessions, "site-A")
+	registerRoutes(r, h, sessions, "site-A", ginutil.ConcurrencyConfig{}, nil)
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 

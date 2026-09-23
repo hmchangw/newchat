@@ -3,15 +3,19 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/session"
 )
 
 // registerRoutes wires all HTTP routes onto r.
-func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID string) {
+// login carries the admission cap because it is the only unauthenticated route
+// that pays bcrypt before deciding anything; health and the admin group stay
+// uncapped so probes and authenticated traffic are unaffected by a login flood.
+func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID string, login ginutil.ConcurrencyConfig, onShed func()) {
 	r.GET("/healthz", h.healthz)
 	r.GET("/readyz", h.readyz)
 
-	r.POST("/v1/login", h.handleLogin)
+	r.POST("/v1/login", login.Middleware(onShed), h.handleLogin)
 	r.POST("/v1/password/change", requireAdmin(sessions, siteID), h.handleChangePassword)
 
 	admin := r.Group("/v1/admin", requireAdmin(sessions, siteID))

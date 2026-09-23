@@ -19,6 +19,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -54,7 +55,7 @@ func newIntegrationRouter(t *testing.T, db *mongo.Database, cfg *config) *gin.En
 	st := newStoreMongo(db, nil, nil, 0) // nil breaker fences nothing; nil valkey disables the session cache
 	h := newHandler(st, cfg)
 	r := gin.New()
-	registerRoutes(r, h)
+	registerRoutes(r, h, ginutil.ConcurrencyConfig{}, nil)
 	return r
 }
 

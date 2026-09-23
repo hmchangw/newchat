@@ -20,6 +20,10 @@ services:
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
       - TLS_SKIP_VERIFY=${TLS_SKIP_VERIFY:-false}
+      # Sheds overflow on the unauthenticated login endpoint with 429 +
+      # Retry-After rather than queueing it: bcrypt runs before the credential
+      # is known valid, so an unmetered caller is a CPU load generator. 0 disables.
+      - MAX_CONCURRENCY=${MAX_CONCURRENCY:-32}
     networks:
       - chat-local
 

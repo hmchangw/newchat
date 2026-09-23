@@ -167,6 +167,16 @@ func (h *AuthHandler) HandleAuth(c *gin.Context) {
 // handleSSO runs the existing OIDC validation + JWT mint. Behavior unchanged
 // from the pre-extension code path.
 func (h *AuthHandler) handleSSO(ctx context.Context, c *gin.Context, req authRequest) {
+	// main.go wires a nil validator in dev mode, but the router still sends any
+	// ssoToken-carrying request here — so this is reachable in a shipped
+	// configuration, not only by mis-construction. handleSession guards its own
+	// validator the same way.
+	if h.validator == nil {
+		errhttp.Write(ctx, c, errcode.Unavailable("SSO auth not configured",
+			errcode.WithReason(errcode.AuthSSONotConfigured)))
+		return
+	}
+
 	claims, err := h.validator.Validate(ctx, req.SSOToken)
 	if err != nil {
 		if errors.Is(err, pkgoidc.ErrTokenExpired) {

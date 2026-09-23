@@ -480,7 +480,7 @@ func (h *Handler) updateUser(c *gin.Context) {
 				errcode.WithReason(errcode.AdminMixedDeactivatePatch)))
 			return
 		}
-		u, err := h.store.DeactivateAndRevoke(ctx, h.cfg.SiteID, account)
+		u, revoked, err := h.store.DeactivateAndRevoke(ctx, h.cfg.SiteID, account)
 		if err != nil {
 			if errors.Is(err, ErrUserNotFound) {
 				errhttp.Write(ctx, c, errcode.NotFound("user not found",
@@ -490,6 +490,10 @@ func (h *Handler) updateUser(c *gin.Context) {
 			errhttp.Write(ctx, c, fmt.Errorf("deactivate user and revoke sessions: %w", err))
 			return
 		}
+		// Mongo no longer has the rows, but every request resolves through the
+		// session cache first — without this a deactivated account keeps
+		// authenticating until each entry's refresh window elapses.
+		sessioncache.BustMany(ctx, h.valkey, revoked)
 		updated = u
 	} else {
 		// UserUpdate and updateUserRequest share an identical field layout, so the conversion is safe (staticcheck S1016).
@@ -698,7 +702,8 @@ func (h *Handler) setPassword(c *gin.Context) {
 	// admin-forced reset, unlike self-service change-password, has no caller
 	// session to preserve. The password write and the revoke run in one
 	// Mongo transaction, so a failure leaves neither applied.
-	if err := h.store.UpdateUserPasswordAndRevoke(ctx, h.cfg.SiteID, account, hash, requireChange, ""); err != nil {
+	revoked, err := h.store.UpdateUserPasswordAndRevoke(ctx, h.cfg.SiteID, account, hash, requireChange, "")
+	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			errhttp.Write(ctx, c, errcode.NotFound("user not found",
 				errcode.WithReason(errcode.AdminUserNotFound)))
@@ -707,6 +712,8 @@ func (h *Handler) setPassword(c *gin.Context) {
 		errhttp.Write(ctx, c, fmt.Errorf("update user password and revoke sessions: %w", err))
 		return
 	}
+	// The reset is only real once the cache forgets the old tokens.
+	sessioncache.BustMany(ctx, h.valkey, revoked)
 
 	h.audit(ctx, c, "user.password.set", "", account, map[string]string{
 		"requirePasswordChange": strconv.FormatBool(requireChange),
