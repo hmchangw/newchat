@@ -132,7 +132,7 @@ func run() error {
 	// and continues (nil client, bust becomes a no-op reconciled by the L2
 	// TTL) rather than exiting — this is an optional cache tier, not a hard
 	// startup dependency.
-	subValkey := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "subauth L2 invalidation", valkeyutil.Instrumented(sdk))
+	subValkey := valkeyDial(ctx, cfg.Valkey, sdk)
 	if subValkey != nil {
 		slog.Info("subauth L2 invalidation enabled")
 	}
@@ -182,4 +182,10 @@ func parsePeers(raw, self string) []string {
 		}
 	}
 	return out
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) valkeyutil.Client {
+	return valkeyutil.ConnectOptional(ctx, cfg, "subauth L2 invalidation", valkeyutil.Instrumented(sdk))
 }

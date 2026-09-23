@@ -79,7 +79,7 @@ func run() error {
 	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency, and leaves
 	// session validation reading Mongo on every bot request (dev only; prod must
 	// supply). Connected before the stores so the session cache can use it.
-	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	valkey, err := valkeyDial(ctx, cfg.Valkey, sdk)
 	if err != nil {
 		return fmt.Errorf("connect valkey: %w", err)
 	}
@@ -163,4 +163,10 @@ func run() error {
 	}
 	<-shutdownDone
 	return nil
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) (valkeyutil.Client, error) {
+	return valkeyutil.Connect(ctx, cfg, valkeyutil.Instrumented(sdk))
 }

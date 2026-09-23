@@ -180,7 +180,7 @@ func main() {
 	// subscription authz L2 and the at-rest DEK L2) are fail-open caches that
 	// degrade to Mongo. Exiting here would turn an optional accelerator into a
 	// hard startup dependency and take history reads down with Valkey.
-	subValkey := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "subauth L2", valkeyutil.Instrumented(sdk))
+	subValkey := valkeyDial(ctx, cfg.Valkey, sdk)
 	if cfg.Valkey.Enabled() {
 		slog.Info("subauth L2 cache configured", "enabled", subValkey != nil && cfg.SubL2.TTL > 0, "ttl", cfg.SubL2.TTL)
 	}
@@ -438,4 +438,10 @@ func main() {
 		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) valkeyutil.Client {
+	return valkeyutil.ConnectOptional(ctx, cfg, "subauth L2", valkeyutil.Instrumented(sdk))
 }
