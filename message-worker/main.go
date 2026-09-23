@@ -224,7 +224,7 @@ func main() {
 	// fail-open cache tier and stop every write — strictly worse than the outage
 	// the L2 exists to survive. A nil client is the documented "L2 off" contract
 	// (NewL2DEKStore and valkeyutil.Disconnect both accept it).
-	valkeyClient := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "DEK and user L2", valkeyutil.Instrumented(sdk))
+	valkeyClient := valkeyDial(ctx, cfg.Valkey, sdk)
 	if cfg.Valkey.Enabled() {
 		slog.Info("valkey L2 tiers configured", "dek_enabled", valkeyClient != nil && cfg.DEKL2.TTL > 0, "dek_ttl", cfg.DEKL2.TTL)
 	}
@@ -547,4 +547,10 @@ func validateConsumerConfig(cc *jetstream.ConsumerConfig, mode string) error {
 		return fmt.Errorf("default mode needs MaxDeliver=-1 (has %d): a finite cap terminates messages behind settle.go's give-up decision", cc.MaxDeliver)
 	}
 	return nil
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) valkeyutil.Client {
+	return valkeyutil.ConnectOptional(ctx, cfg, "DEK and user L2", valkeyutil.Instrumented(sdk))
 }

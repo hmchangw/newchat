@@ -115,11 +115,30 @@ const pingTimeout = 5 * time.Second
 func dialCluster(ctx context.Context, addrs []string, password string, opts ...Option) (*redis.ClusterClient, error) {
 	cc := newConnectConfig(opts...)
 	c := newProfiledClusterClient(ClusterOptionsFor(addrs, password, cc.profile), cc.profile)
-	if err := instrumentCluster(c, &cc); err != nil {
+	// Instrumentation is not a gate either. o11y/redis installs per-shard hooks
+	// through ForEachShard, which needs CLUSTER SLOTS, so an unreachable Valkey
+	// fails it with an i/o timeout — and treating that as fatal crashlooped every
+	// instrumented pod, which is the failure the non-fatal PING below exists to
+	// prevent. The library commits its entry and leaves already-installed hooks
+	// attached before returning, so the client is usable, only under-instrumented.
+	// A nil provider is a deterministic wiring bug, not an outage — it fails on
+	// every pod every time — so it stays fatal rather than booting 14 services
+	// with no Valkey telemetry behind one warning.
+	if cc.obs != nil && (cc.obs.TracerProvider() == nil || cc.obs.MeterProvider() == nil) {
 		if closeErr := c.Close(); closeErr != nil {
-			slog.Warn("valkey cluster close after failed instrument", "error", closeErr)
+			slog.Warn("valkey cluster close after nil observability provider", "error", closeErr)
 		}
-		return nil, err
+		return nil, fmt.Errorf("instrument valkey client: nil tracer or meter provider")
+	}
+	if err := instrumentCluster(c, &cc); err != nil {
+		if cc.requireReachable {
+			if closeErr := c.Close(); closeErr != nil {
+				slog.Warn("valkey cluster close after failed instrument", "error", closeErr)
+			}
+			return nil, err
+		}
+		slog.Warn("valkey instrumentation incomplete; continuing without full telemetry",
+			"addrs", addrs, "error", err)
 	}
 	// The probe is a diagnostic, not a gate — see WithRequireReachable for why
 	// unreachability is non-fatal by default. Note the effective deadline is

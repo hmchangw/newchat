@@ -121,7 +121,7 @@ func run() error {
 	// optional tier, not a hard startup dependency — same shape as
 	// bot-room-service and inbox-worker. Without it a revoked token keeps
 	// authenticating from cache until its refresh window elapses.
-	if vk := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "session revocation", valkeyutil.Instrumented(sdk)); vk != nil {
+	if vk := valkeyDial(ctx, cfg.Valkey, sdk); vk != nil {
 		// Fenced: a dead Valkey else costs a CallBudget per revocation check.
 		h.valkey = valkeyutil.Breakered(vk, cfg.Valkey.Breaker.New(ctx, "adminsession"))
 		defer valkeyutil.Disconnect(vk)
@@ -177,4 +177,10 @@ func run() error {
 	}
 	<-shutdownDone
 	return nil
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) valkeyutil.Client {
+	return valkeyutil.ConnectOptional(ctx, cfg, "session revocation", valkeyutil.Instrumented(sdk))
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -336,7 +337,7 @@ func main() {
 	// — both become no-ops (nil-checked in handler.go).
 	var badge badgeCache
 	var subValkey valkeyutil.Client
-	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	valkeyClient, err := valkeyDial(ctx, cfg.Valkey, sdk)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
@@ -432,4 +433,10 @@ func main() {
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) (*redis.ClusterClient, error) {
+	return valkeyutil.ConnectRaw(ctx, cfg, valkeyutil.Instrumented(sdk))
 }

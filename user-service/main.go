@@ -15,6 +15,7 @@ import (
 	o11y "github.com/flywindy/o11y"
 	o11ygin "github.com/flywindy/o11y/gin"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
@@ -199,7 +200,7 @@ func main() {
 	// Empty VALKEY_ADDRS disables the badge cache: badge.count.batch and
 	// subscription.count still work, just uncached (dev-safe Phase A default).
 	var badge badgeCache = noopBadgeCache{}
-	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	valkeyClient, err := valkeyDial(ctx, cfg.Valkey, sdk)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
@@ -413,4 +414,10 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 	// Reported as a cause so a handler can tell the drain apart from a client
 	// hang-up: one must fail the request, the other must stay quiet.
 	return srv, func() { cancelInFlight(service.ErrShuttingDown) }, nil
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) (*redis.ClusterClient, error) {
+	return valkeyutil.ConnectRaw(ctx, cfg, valkeyutil.Instrumented(sdk))
 }

@@ -147,7 +147,7 @@ func main() {
 	slog.Info("mongo user read preference configured", "readPreference", userReadPref.Mode().String())
 	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), userReadPref)
 
-	valkeyClient, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	valkeyClient, err := valkeyDial(ctx, cfg.Valkey, sdk)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
@@ -468,4 +468,10 @@ func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject strin
 	cc.Durable = durable
 	cc.FilterSubjects = []string{filterSubject}
 	return cc
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) (valkeyutil.Client, error) {
+	return valkeyutil.Connect(ctx, cfg, valkeyutil.Instrumented(sdk))
 }

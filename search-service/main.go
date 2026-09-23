@@ -216,7 +216,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	valkey, err := valkeyDial(ctx, cfg.Valkey, sdk)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
@@ -347,4 +347,10 @@ func main() {
 		// drain-window observations (incl. app metrics) before it closes.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) (valkeyutil.Client, error) {
+	return valkeyutil.Connect(ctx, cfg, valkeyutil.Instrumented(sdk))
 }
