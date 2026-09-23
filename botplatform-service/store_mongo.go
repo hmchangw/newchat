@@ -95,10 +95,12 @@ func (s *storeMongo) DeleteSessionsBeyondCap(ctx context.Context, account string
 		return 0, nil
 	}
 	evicted, err := s.sessions.DeleteBeyondCap(ctx, account, max)
-	if err != nil {
-		return 0, err
-	}
+	// Bust before checking err: a drain the request deadline cut short has
+	// already deleted the rows it reports, and no later login will see them.
 	sessioncache.BustMany(ctx, s.valkey, evicted)
+	if err != nil {
+		return int64(len(evicted)), fmt.Errorf("evict over-cap sessions: %w", err)
+	}
 	return int64(len(evicted)), nil
 }
 

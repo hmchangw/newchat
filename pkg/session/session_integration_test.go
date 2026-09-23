@@ -239,3 +239,50 @@ func planStages(node any) []string {
 	}
 	return out
 }
+
+// TestDeleteBeyondCap_DrainsBacklogLargerThanOneBatch pins the batched drain.
+// The single-shot version collected every over-cap _id and deleted them in one
+// $in: a backlog of a few hundred thousand rows exceeded the 16MB command
+// limit (and, earlier, the request deadline), the eviction failed, the login's
+// fresh row stayed, and every later login had one more row to sort. Eviction
+// must make bounded progress per round and keep going until the account is
+// back under the cap.
+func TestDeleteBeyondCap_DrainsBacklogLargerThanOneBatch(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	const max = 3
+	total := 2*session.EvictBatch + max + 7 // three rounds: two full, one partial
+	ids := make([]string, total)
+	for i := range total {
+		ids[i] = fmt.Sprintf("backlog-%06d", i)
+		require.NoError(t, s.Insert(ctx, &session.Session{
+			ID: ids[i], UserID: "u1", Account: "heavy", SiteID: "site-a",
+			Roles: []string{"bot"}, IssuedAt: int64(i),
+		}))
+	}
+
+	deleted, err := s.DeleteBeyondCap(ctx, "heavy", max)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, ids[:total-max], deleted, "every over-cap id must be reported for the cache bust")
+
+	remaining, err := s.ListForAccount(ctx, "site-a", "heavy")
+	require.NoError(t, err)
+	require.Len(t, remaining, max)
+	kept := make([]string, len(remaining))
+	for i, r := range remaining {
+		kept[i] = r.ID
+	}
+	assert.ElementsMatch(t, ids[total-max:], kept, "only the newest max sessions survive")
+}
+
+func TestDeleteBeyondCap_CancelledContextReturnsError(t *testing.T) {
+	s := newStore(t)
+	require.NoError(t, s.Insert(context.Background(), &session.Session{
+		ID: "c-0", UserID: "u1", Account: "cancel", SiteID: "site-a", IssuedAt: 1,
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.DeleteBeyondCap(ctx, "cancel", 0)
+	require.Error(t, err)
+}

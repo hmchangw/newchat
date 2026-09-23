@@ -90,10 +90,20 @@ func (s *MongoStore) FindByHash(ctx context.Context, hash string) (*Session, err
 	return &out, nil
 }
 
+// EvictBatch bounds how many over-cap sessions one DeleteBeyondCap round
+// collects and deletes. A single $in over an unbounded backlog exceeded the
+// 16MB command limit once an account had accumulated a few hundred thousand
+// rows, so the eviction failed on every login and the backlog only grew.
+const EvictBatch = 1000
+
 // DeleteBeyondCap keeps the newest `max` sessions for account (by issuedAt,
 // with _id as a deterministic tie-breaker for sessions issued within the same
-// millisecond) and deletes the rest. Two round-trips only when the cap is
-// exceeded.
+// millisecond) and deletes the rest, EvictBatch rows per round until the
+// account is under the cap. The common case is one round returning at most a
+// single row; a backlog left by earlier failed evictions drains across as
+// many rounds — or as many logins, if the caller's deadline cuts a drain
+// short — as it takes. On error the ids evicted before the failure are still
+// returned, so the caller can bust their cache entries.
 //
 // Race note: this is a find-then-delete, not a transaction. Two concurrent
 // logins for the same account can each read the same over-cap snapshot and
@@ -104,30 +114,51 @@ func (s *MongoStore) FindByHash(ctx context.Context, hash string) (*Session, err
 // wrapping this in a transaction, and "keep newest N" is not a safety
 // invariant worth the added contention.
 func (s *MongoStore) DeleteBeyondCap(ctx context.Context, account string, max int) ([]string, error) {
+	var evicted []string
+	for {
+		ids, err := s.overCapBatch(ctx, account, max)
+		if err != nil {
+			return evicted, err
+		}
+		if len(ids) == 0 {
+			return evicted, nil
+		}
+		res, err := s.coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
+		if err != nil {
+			return evicted, fmt.Errorf("delete over-cap sessions: %w", err)
+		}
+		evicted = append(evicted, ids...)
+		// A round that deleted nothing means another drain (a concurrent login
+		// or a revoke) got there first; stop rather than spin on its work.
+		if len(ids) < EvictBatch || res.DeletedCount == 0 {
+			return evicted, nil
+		}
+	}
+}
+
+// overCapBatch returns up to EvictBatch ids of the sessions ranked beyond max,
+// oldest of those first so the deletes below run against the most stale rows.
+// The find is covered by the (account, issuedAt, _id) index: no fetch, no sort.
+func (s *MongoStore) overCapBatch(ctx context.Context, account string, max int) ([]string, error) {
 	cur, err := s.coll.Find(ctx, bson.M{"account": account},
 		options.Find().
 			SetProjection(bson.M{"_id": 1}).
 			SetSort(bson.D{{Key: "issuedAt", Value: -1}, {Key: "_id", Value: -1}}).
-			SetSkip(int64(max)),
+			SetSkip(int64(max)).
+			SetLimit(EvictBatch),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("find over-cap sessions: %w", err)
 	}
-	var toDelete []struct {
+	var rows []struct {
 		ID string `bson:"_id"`
 	}
-	if err := cur.All(ctx, &toDelete); err != nil {
+	if err := cur.All(ctx, &rows); err != nil {
 		return nil, fmt.Errorf("decode over-cap sessions: %w", err)
 	}
-	if len(toDelete) == 0 {
-		return nil, nil
-	}
-	ids := make([]string, len(toDelete))
-	for i, d := range toDelete {
-		ids[i] = d.ID
-	}
-	if _, err := s.coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}}); err != nil {
-		return nil, fmt.Errorf("delete over-cap sessions: %w", err)
+	ids := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
 	}
 	return ids, nil
 }
