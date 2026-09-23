@@ -3,6 +3,7 @@ package testutil
 import (
 	"net"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
@@ -26,20 +27,20 @@ func (NoopObservability) MeterProvider() metric.MeterProvider  { return metricno
 // Pass this, never nil, to any test asserting what a service's dial does.
 func ValkeyObservability() NoopObservability { return NoopObservability{} }
 
-// DeadValkeyAddr reserves and frees a port, yielding an address that refuses
-// connections — a Valkey that is down while a pod boots.
+// DeadValkeyAddr is an address that refuses connections — a Valkey that is down
+// while a pod boots.
 //
-// Refused rather than blackholed on purpose: deterministic and fast, and the
-// property under test is that the dial does not fail, not how long it takes.
+// A fixed low port, not an ephemeral one reserved and released: these guards
+// pass whether the dial refuses or connects, so a reused port would make them
+// silently vacuous rather than flaky. Port 1 needs root to bind, so nothing
+// takes it.
 func DeadValkeyAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve a dead address: %v", err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("free the dead address: %v", err)
+	const addr = "127.0.0.1:1"
+	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("%s unexpectedly accepts connections; this guard needs a dead address", addr)
 	}
 	return addr
 }

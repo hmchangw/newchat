@@ -59,8 +59,8 @@ func WithIgnoredCommands(names ...string) Option {
 	return WithRedisOptions(o11yredis.WithIgnoredCommands(names...))
 }
 
-// WithRequireReachable makes the startup PING fatal, so an unreachable cluster
-// fails the dial instead of returning a usable client.
+// WithRequireReachable makes an unreachable cluster fatal — both the startup
+// PING and the instrumentation hook install, which needs CLUSTER SLOTS.
 //
 // It is off by default, and deliberately so. A shared datastore is the same for
 // every replica, so gating startup on its reachability means a Valkey outage

@@ -256,3 +256,39 @@ func TestDialCluster_RequireReachableStillFailsWhenInstrumented(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, c)
 }
+
+// A nil provider is a deterministic wiring bug, not an outage: it fails on every
+// pod every time, so failing fast surfaces it immediately. Only the best-effort
+// hook install — which needs a reachable Valkey — is downgraded to a warning.
+func TestDialCluster_NilProvidersAreFatal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		obs  Observability
+	}{
+		{"nil tracer provider", halfObs{tracer: false, meter: true}},
+		{"nil meter provider", halfObs{tracer: true, meter: false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := dialCluster(context.Background(), []string{"127.0.0.1:1"}, "", Instrumented(tc.obs))
+			require.Error(t, err, "a misconfigured provider must not boot silently uninstrumented")
+			assert.Nil(t, c)
+		})
+	}
+}
+
+// halfObs returns a nil provider for whichever half is switched off.
+type halfObs struct{ tracer, meter bool }
+
+func (h halfObs) TracerProvider() trace.TracerProvider {
+	if !h.tracer {
+		return nil
+	}
+	return tracenoop.NewTracerProvider()
+}
+
+func (h halfObs) MeterProvider() metric.MeterProvider {
+	if !h.meter {
+		return nil
+	}
+	return noop.NewMeterProvider()
+}
