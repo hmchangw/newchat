@@ -272,6 +272,20 @@ func (mr *MockThreadStoreMockRecorder) MarkParentStamped(ctx, threadRoomID any) 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkParentStamped", reflect.TypeOf((*MockThreadStore)(nil).MarkParentStamped), ctx, threadRoomID)
 }
 
+// MarkParentSubscribed mocks base method.
+func (m *MockThreadStore) MarkParentSubscribed(ctx context.Context, threadRoomID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkParentSubscribed", ctx, threadRoomID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkParentSubscribed indicates an expected call of MarkParentSubscribed.
+func (mr *MockThreadStoreMockRecorder) MarkParentSubscribed(ctx, threadRoomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkParentSubscribed", reflect.TypeOf((*MockThreadStore)(nil).MarkParentSubscribed), ctx, threadRoomID)
+}
+
 // MarkThreadSubscriptionMention mocks base method.
 func (m *MockThreadStore) MarkThreadSubscriptionMention(ctx context.Context, sub *model.ThreadSubscription) error {
 	m.ctrl.T.Helper()

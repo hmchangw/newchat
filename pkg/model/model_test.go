@@ -447,6 +447,19 @@ func TestThreadRoomParentStampedIsNotSerializedToJSON(t *testing.T) {
 	assert.False(t, back.ParentStamped, "the flag is bson-only; JSON must never carry it")
 }
 
+// ParentSubscribed is message-worker bookkeeping, not part of any client
+// payload, so it must never appear in JSON however it is set.
+func TestThreadRoomParentSubscribedIsNotSerializedToJSON(t *testing.T) {
+	b, err := json.Marshal(&model.ThreadRoom{ID: "tr-1", ParentSubscribed: true})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "parentSubscribed")
+	assert.NotContains(t, string(b), "ParentSubscribed")
+
+	var back model.ThreadRoom
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"tr-1","parentSubscribed":true}`), &back))
+	assert.False(t, back.ParentSubscribed, "a client payload must not be able to set it")
+}
+
 func TestThreadSubscriptionJSON(t *testing.T) {
 	ts := model.ThreadSubscription{
 		ID:              "ts-1",

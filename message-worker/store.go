@@ -39,6 +39,9 @@ type ThreadStore interface {
 	// MarkParentStamped records that the parent's thread_room_id was written, so
 	// later replies stop re-writing it.
 	MarkParentStamped(ctx context.Context, threadRoomID string) error
+	// MarkParentSubscribed records that the parent author's thread subscription
+	// has been written, so subsequent replies stop re-writing it. Idempotent.
+	MarkParentSubscribed(ctx context.Context, threadRoomID string) error
 	GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error)
 	InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error

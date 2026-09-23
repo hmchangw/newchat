@@ -414,7 +414,9 @@ func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
 
 // handleThreadRoomAndSubscriptions creates the ThreadRoom on first reply and
 // inserts ThreadSubscriptions for the parent author and replier. On subsequent
-// replies it upserts both subscriptions and bumps the room's last-message pointer.
+// replies it upserts only the replier's subscription — the parent author's is
+// rewritten just to heal a first reply that never wrote it — and bumps the
+// room's last-message pointer.
 // It returns the threadRoomID so the caller can pass it to SaveThreadMessage,
 // plus the thread's pre-existing followers (the accounts fanOutThreadUnread
 // should mark unread — the parent author alone on a first reply, or the room's
@@ -511,6 +513,12 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 				return nil, fmt.Errorf("publish parent thread subscription inbox: %w", err)
 			}
 		}
+		// Records that the insert above landed, so subsequent replies stop
+		// re-writing it. Left false by every early return before this point,
+		// which is what makes the heal fire.
+		if err := h.threadStore.MarkParentSubscribed(ctx, threadRoomID); err != nil {
+			return nil, fmt.Errorf("mark parent subscribed: %w", err)
+		}
 
 		if replier != nil && msg.UserID != parentSender.ID {
 			replierSub := h.buildThreadSubscription(msg, threadRoomID, msg.UserID, msg.UserAccount, eventSiteID, now)
@@ -549,11 +557,81 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 	return []string{parentSender.Account}, nil
 }
 
+// healParentThreadSub writes the parent author's thread subscription on the
+// subsequent-reply path when the first reply did not get that far, then records
+// that it landed. It is the bounded replacement for the unconditional per-reply
+// upsert: thread_rooms.parentSubscribed gates it, so an established thread pays
+// neither the write nor the owner-site lookup.
+//
+// The gate is an explicit flag rather than the parent author's membership of
+// ReplyAccounts, which would be free to read but does not mean what it needs to
+// mean. Rooms created before this change added the author to that set BEFORE
+// inserting their subscription, so a first reply that failed at the insert left
+// the author present and unsubscribed — exactly the state to repair, read as
+// healthy. Both orders also coexist during a rolling deploy.
+//
+// The write is an upsert, not an insert: every room predating the flag reads as
+// unsubscribed and most do have the subscription. They pay one idempotent write
+// each, once, and the ones that do not are repaired.
+// Callers keep their own eligibility guard.
+func (h *Handler) healParentThreadSub(ctx context.Context, msg *model.Message, eventSiteID, threadRoomID string, parentSender *cassParticipant, now time.Time) error {
+	parentOwnerSite, err := h.lookupOwnerSiteID(ctx, parentSender.Account, "subsequent-reply parent heal")
+	if err != nil {
+		return fmt.Errorf("lookup parent owner site: %w", err)
+	}
+	parentSub := h.buildThreadSubscription(msg, threadRoomID, parentSender.ID, parentSender.Account, eventSiteID, now)
+	if err := h.threadStore.UpsertThreadSubscription(ctx, parentSub); err != nil {
+		return fmt.Errorf("heal parent author thread subscription: %w", err)
+	}
+	// Gated exactly as on the first reply: an unroutable owner must not block the
+	// local write that just landed.
+	if parentOwnerSite != "" {
+		if err := h.publishThreadSubInboxIfRemote(ctx, parentSub, parentOwnerSite, msg.ID); err != nil {
+			return fmt.Errorf("publish healed parent thread subscription inbox: %w", err)
+		}
+	}
+	if err := h.threadStore.MarkParentSubscribed(ctx, threadRoomID); err != nil {
+		return fmt.Errorf("mark parent subscribed: %w", err)
+	}
+	slog.InfoContext(ctx, "healed missing parent thread subscription",
+		"parentMessageID", msg.ThreadParentMessageID,
+		"threadRoomID", threadRoomID,
+		"replyID", msg.ID,
+		"request_id", natsutil.RequestIDFromContext(ctx))
+	return nil
+}
+
+// writeReplierThreadSub upserts the replier's thread subscription on the
+// subsequent-reply path and publishes the cross-site inbox copy when the
+// replier's home site is remote. Callers keep their own eligibility guard.
+func (h *Handler) writeReplierThreadSub(ctx context.Context, msg *model.Message, eventSiteID, threadRoomID string, replier *model.User, now time.Time) error {
+	replierSub := h.buildThreadSubscription(msg, threadRoomID, msg.UserID, msg.UserAccount, eventSiteID, now)
+	if err := h.threadStore.UpsertThreadSubscription(ctx, replierSub); err != nil {
+		return fmt.Errorf("upsert replier thread subscription: %w", err)
+	}
+	if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
+		return fmt.Errorf("publish replier thread subscription inbox: %w", err)
+	}
+	return nil
+}
+
 // handleSubsequentThreadReply runs when CreateThreadRoom reported an existing room.
-// Upserts subscriptions for both the parent author and the replier (idempotent
-// on redelivery), then bumps the room's last-message pointer. Returns the
-// existing thread room ID so the caller can pass it to SaveThreadMessage, plus
-// the thread's followers as they stood *before* this reply (existingRoom's
+// It upserts only the replier's subscription (idempotent on redelivery), then
+// bumps the room's last-message pointer. The parent author's subscription is
+// deliberately NOT re-upserted on every reply: it is created on the first reply,
+// so rewriting it each time is a no-op write on the hottest collection
+// (thread_subscriptions) plus an owner-site lookup to route its inbox copy.
+//
+// It is still written when the first reply demonstrably did not get that far —
+// see healParentThreadSub. Skipping the rewrite without that heal would be
+// unsound, not merely a trade-off: handleFirstThreadReply can return before its
+// parent InsertThreadSubscription on any error (an ordinary transient Mongo or
+// userStore failure, not just a crash) and on the errMessageNotFound salvage
+// path, and the redelivery lands here. The author would then be permanently
+// absent from thread_subscriptions while still accumulating unread marks that
+// history-service's thread list — which gates on that row — can never render.
+// Returns the existing thread room ID so the caller can pass it to
+// SaveThreadMessage, plus the thread's followers as they stood *before* this reply (existingRoom's
 // ReplyAccounts, captured up front) with the parent author appended when
 // resolvable — legacy thread_rooms predating the parent-author seed lack the
 // author in ReplyAccounts, and without the explicit append they would miss
@@ -573,28 +651,14 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 	parentSender, err := h.store.GetMessageSender(ctx, msg.ThreadParentMessageID)
 	switch {
 	case err == nil:
-		if !isMigration {
-			parentOwnerSite, lookupErr := h.lookupOwnerSiteID(ctx, parentSender.Account, "subsequent-reply parent")
-			if lookupErr != nil {
-				return "", nil, fmt.Errorf("lookup parent owner site: %w", lookupErr)
+		if !isMigration && !existingRoom.ParentSubscribed {
+			if err := h.healParentThreadSub(ctx, msg, eventSiteID, existingRoom.ID, parentSender, now); err != nil {
+				return "", nil, err
 			}
-			parentSub := h.buildThreadSubscription(msg, existingRoom.ID, parentSender.ID, parentSender.Account, eventSiteID, now)
-			if err := h.threadStore.UpsertThreadSubscription(ctx, parentSub); err != nil {
-				return "", nil, fmt.Errorf("upsert parent author thread subscription: %w", err)
-			}
-			if parentOwnerSite != "" {
-				if err := h.publishThreadSubInboxIfRemote(ctx, parentSub, parentOwnerSite, msg.ID); err != nil {
-					return "", nil, fmt.Errorf("publish parent thread subscription inbox: %w", err)
-				}
-			}
-			if replier != nil && msg.UserID != parentSender.ID {
-				replierSub := h.buildThreadSubscription(msg, existingRoom.ID, msg.UserID, msg.UserAccount, eventSiteID, now)
-				if err := h.threadStore.UpsertThreadSubscription(ctx, replierSub); err != nil {
-					return "", nil, fmt.Errorf("upsert replier thread subscription: %w", err)
-				}
-				if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
-					return "", nil, fmt.Errorf("publish replier thread subscription inbox: %w", err)
-				}
+		}
+		if !isMigration && replier != nil && msg.UserID != parentSender.ID {
+			if err := h.writeReplierThreadSub(ctx, msg, eventSiteID, existingRoom.ID, replier, now); err != nil {
+				return "", nil, err
 			}
 		}
 	case errors.Is(err, errMessageNotFound):
@@ -604,12 +668,8 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 			"replyID", msg.ID,
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		if !isMigration && replier != nil {
-			replierSub := h.buildThreadSubscription(msg, existingRoom.ID, msg.UserID, msg.UserAccount, eventSiteID, now)
-			if err := h.threadStore.UpsertThreadSubscription(ctx, replierSub); err != nil {
-				return "", nil, fmt.Errorf("upsert replier thread subscription: %w", err)
-			}
-			if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
-				return "", nil, fmt.Errorf("publish replier thread subscription inbox: %w", err)
+			if err := h.writeReplierThreadSub(ctx, msg, eventSiteID, existingRoom.ID, replier, now); err != nil {
+				return "", nil, err
 			}
 		}
 	default:
