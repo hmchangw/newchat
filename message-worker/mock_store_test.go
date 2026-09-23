@@ -120,11 +120,12 @@ func (mr *MockStoreMockRecorder) SaveThreadMessage(ctx, msg, sender, siteID, thr
 }
 
 // UpdateParentMessageThreadRoomID mocks base method.
-func (m *MockStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) error {
+func (m *MockStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateParentMessageThreadRoomID", ctx, parentMessageID, roomID, parentCreatedAt, threadRoomID)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdateParentMessageThreadRoomID indicates an expected call of UpdateParentMessageThreadRoomID.
@@ -255,6 +256,20 @@ func (m *MockThreadStore) InsertThreadSubscription(ctx context.Context, sub *mod
 func (mr *MockThreadStoreMockRecorder) InsertThreadSubscription(ctx, sub any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InsertThreadSubscription", reflect.TypeOf((*MockThreadStore)(nil).InsertThreadSubscription), ctx, sub)
+}
+
+// MarkParentStamped mocks base method.
+func (m *MockThreadStore) MarkParentStamped(ctx context.Context, threadRoomID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkParentStamped", ctx, threadRoomID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkParentStamped indicates an expected call of MarkParentStamped.
+func (mr *MockThreadStoreMockRecorder) MarkParentStamped(ctx, threadRoomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkParentStamped", reflect.TypeOf((*MockThreadStore)(nil).MarkParentStamped), ctx, threadRoomID)
 }
 
 // MarkThreadSubscriptionMention mocks base method.

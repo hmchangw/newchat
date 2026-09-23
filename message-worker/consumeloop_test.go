@@ -113,8 +113,8 @@ func (s *salvageStore) SaveMessage(context.Context, *model.Message, *cassPartici
 func (s *salvageStore) GetQuotedParentSnapshot(context.Context, string) (*cassandra.QuotedParentMessage, bool, error) {
 	return nil, false, nil
 }
-func (s *salvageStore) UpdateParentMessageThreadRoomID(context.Context, string, string, time.Time, string) error {
-	return nil
+func (s *salvageStore) UpdateParentMessageThreadRoomID(context.Context, string, string, time.Time, string) (bool, error) {
+	return true, nil
 }
 
 type salvageUsers struct{}
@@ -130,6 +130,7 @@ func (salvageUsers) FindUsersByAccounts(context.Context, []string) ([]model.User
 type salvageThreads struct{}
 
 func (salvageThreads) CreateThreadRoom(context.Context, *model.ThreadRoom) error { return nil }
+func (salvageThreads) MarkParentStamped(context.Context, string) error           { return nil }
 func (salvageThreads) GetThreadRoomByParentMessageID(context.Context, string) (*model.ThreadRoom, error) {
 	return &model.ThreadRoom{ID: "tr-1"}, nil
 }

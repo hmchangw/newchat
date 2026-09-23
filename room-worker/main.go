@@ -182,7 +182,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	metaValkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	metaValkey, err := valkeyDial(ctx, cfg.Valkey, sdk)
 	if err != nil {
 		slog.Error("valkey connect (room-meta L2 invalidation) failed", "error", err)
 		os.Exit(1)
@@ -494,4 +494,10 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode string) jetstream.Consu
 		cc.Durable = "room-worker-teams"
 	}
 	return cc
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) (valkeyutil.Client, error) {
+	return valkeyutil.Connect(ctx, cfg, valkeyutil.Instrumented(sdk))
 }

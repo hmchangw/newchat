@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -24,7 +25,7 @@ func TestValkeyDialOptions_SelectStoreProfile(t *testing.T) {
 	// ConnectRaw still returns a client whose options can be inspected.
 	client, err := valkeyutil.ConnectRaw(context.Background(),
 		valkeyutil.Config{Addrs: []string{"127.0.0.1:1"}},
-		valkeyDialOptions(nil)...)
+		valkeyDialOptions(testutil.ValkeyObservability())...)
 	require.NoError(t, err)
 	require.NotNil(t, client)
 	t.Cleanup(func() { _ = client.Close() })
@@ -42,6 +43,6 @@ func TestValkeyDialOptions_SelectStoreProfile(t *testing.T) {
 // uninstrumented client is the one worth least having here, since presence has
 // no second signal to diagnose from.
 func TestValkeyDialOptions_KeepInstrumentation(t *testing.T) {
-	assert.Len(t, valkeyDialOptions(nil), 2,
+	assert.Len(t, valkeyDialOptions(testutil.ValkeyObservability()), 2,
 		"dial options are the instrumentation bundle plus the store profile")
 }

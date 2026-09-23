@@ -69,9 +69,10 @@ func (s historyStore) GetMessageCreatedAt(ctx context.Context, messageID string)
 	return createdAt, found, nil
 }
 
-func (s historyStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) error {
-	if err := s.Store.UpdateParentMessageThreadRoomID(ctx, parentMessageID, roomID, parentCreatedAt, threadRoomID); err != nil {
-		return historyWriteError{err}
+func (s historyStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) (bool, error) {
+	applied, err := s.Store.UpdateParentMessageThreadRoomID(ctx, parentMessageID, roomID, parentCreatedAt, threadRoomID)
+	if err != nil {
+		return false, historyWriteError{err}
 	}
-	return nil
+	return applied, nil
 }

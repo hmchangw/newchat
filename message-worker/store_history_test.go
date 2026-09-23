@@ -74,10 +74,11 @@ func TestHistoryStore_TagsEveryCassandraError(t *testing.T) {
 		{
 			name: "UpdateParentMessageThreadRoomID",
 			set: func(m *MockStore) {
-				m.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(down)
+				m.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(false, down)
 			},
 			call: func(ctx context.Context, s Store) error {
-				return s.UpdateParentMessageThreadRoomID(ctx, "p-1", "r-1", time.Time{}, "tr-1")
+				_, err := s.UpdateParentMessageThreadRoomID(ctx, "p-1", "r-1", time.Time{}, "tr-1")
+				return err
 			},
 		},
 	} {

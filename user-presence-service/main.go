@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -117,7 +118,7 @@ func main() {
 	// this service's Valkey commands carry the same instrumentation and dial
 	// policy as every other service's. Presence IS the datastore here, so an
 	// uninstrumented client is the one worth least having.
-	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyDialOptions(sdk)...)
+	valkeyClient, err := valkeyDial(ctx, cfg.Valkey, sdk)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
@@ -237,4 +238,10 @@ func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) 
 	natsrouter.Register(router, subject.PresenceManualSetPattern(siteID), natsmetrics.MethodSetManualPresence, handler.SetManual)
 	natsrouter.Register(router, subject.PresenceQueryBatch(siteID), natsmetrics.MethodBatchGetPresence, handler.QueryBatch)
 	natsrouter.Register(router, subject.PresenceQueryBatchPeer(siteID), natsmetrics.MethodBatchGetPeerPresence, handler.QueryBatchPeer)
+}
+
+// valkeyDial is this service's Valkey dial, extracted so a test can run exactly
+// what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
+func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) (*redis.ClusterClient, error) {
+	return valkeyutil.ConnectRaw(ctx, cfg, valkeyDialOptions(sdk)...)
 }
