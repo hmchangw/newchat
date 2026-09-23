@@ -31,7 +31,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, jsretry.DeliveriesFor(jsretry.LowLatencyBackoff, stream.OutageRetryWindow), cc.MaxDeliver,
 			"a consumer left at the package default gets the budget derived from the schedule it settles with")
 		assert.Equal(t, 512, cc.MaxWaiting)
-		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
+		assert.Equal(t, jetstream.DeliverNewPolicy, cc.DeliverPolicy)
 	})
 
 	t.Run("overrides flow through", func(t *testing.T) {

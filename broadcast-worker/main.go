@@ -566,12 +566,19 @@ func guardedProcessor(process messageProcessor) natsmetrics.ProcessMessage {
 
 // buildConsumerConfig returns the durable consumer config, centralized so it's unit-testable
 // without NATS; durable/filterSubject are env-driven so the binary can bind to user or bot streams.
+//
+// DeliverPolicy=New overrides the project default (All): broadcast-worker
+// only fans out to currently-connected subscribers, so replaying stream
+// history on a freshly-created durable would re-deliver stale messages to
+// live clients with no benefit. Honored only at consumer creation — an
+// existing durable keeps its cursor.
 func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
 	// Outage retry budget: fan-out that cannot complete must wait for the
 	// dependency rather than drop the message after ~2.6 minutes.
 	cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.LowLatencyBackoff))
 	cc.Durable = durable
 	cc.FilterSubject = filterSubject
+	cc.DeliverPolicy = jetstream.DeliverNewPolicy
 	return cc
 }
 
