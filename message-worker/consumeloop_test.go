@@ -126,11 +126,10 @@ func (salvageUsers) FindUsersByAccounts(context.Context, []string) ([]model.User
 
 type salvageThreads struct{}
 
-func (salvageThreads) CreateThreadRoom(context.Context, *model.ThreadRoom) error { return nil }
-func (salvageThreads) MarkParentStamped(context.Context, string) error           { return nil }
-func (salvageThreads) MarkParentSubscribed(context.Context, string) error        { return nil }
-func (salvageThreads) GetThreadRoomByParentMessageID(context.Context, string) (*model.ThreadRoom, error) {
-	return &model.ThreadRoom{ID: "tr-1"}, nil
+func (salvageThreads) MarkParentStamped(context.Context, string) error    { return nil }
+func (salvageThreads) MarkParentSubscribed(context.Context, string) error { return nil }
+func (salvageThreads) EnsureThreadRoom(_ context.Context, room *model.ThreadRoom) (*model.ThreadRoom, bool, error) {
+	return room, true, nil
 }
 func (salvageThreads) InsertThreadSubscription(context.Context, *model.ThreadSubscription) error {
 	return nil
