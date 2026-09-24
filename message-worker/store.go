@@ -69,6 +69,13 @@ type ThreadStore interface {
 	// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
 	// redelivery; accounts not subscribed simply match nothing.
 	AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error
+	// UpsertThreadSubscriptionAdvancingLastSeen creates sub's (threadRoomId, userAccount)
+	// subscription when missing and advances its lastSeenAt to at, in a single write. It
+	// merges a $setOnInsert upsert with AdvanceThreadSubscriptionLastSeen for the replier
+	// on the hot path: replying implies the replier has seen up to their own reply (#396),
+	// so a new subscription is seeded with lastSeenAt=at and an existing one is moved
+	// forward, never backward.
+	UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error
 }
 
 // DegradeStore persists the site's history-degraded marker. Satisfied by

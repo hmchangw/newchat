@@ -327,3 +327,17 @@ func (mr *MockThreadStoreMockRecorder) UpsertThreadSubscription(ctx, sub any) *g
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertThreadSubscription", reflect.TypeOf((*MockThreadStore)(nil).UpsertThreadSubscription), ctx, sub)
 }
+
+// UpsertThreadSubscriptionAdvancingLastSeen mocks base method.
+func (m *MockThreadStore) UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpsertThreadSubscriptionAdvancingLastSeen", ctx, sub, at)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpsertThreadSubscriptionAdvancingLastSeen indicates an expected call of UpsertThreadSubscriptionAdvancingLastSeen.
+func (mr *MockThreadStoreMockRecorder) UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, at any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertThreadSubscriptionAdvancingLastSeen", reflect.TypeOf((*MockThreadStore)(nil).UpsertThreadSubscriptionAdvancingLastSeen), ctx, sub, at)
+}

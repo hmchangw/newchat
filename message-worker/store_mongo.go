@@ -125,6 +125,56 @@ func (s *threadStoreMongo) UpsertThreadSubscription(ctx context.Context, sub *mo
 	return nil
 }
 
+// UpsertThreadSubscriptionAdvancingLastSeen creates the (threadRoomId, userAccount)
+// subscription via $setOnInsert when missing and advances its lastSeenAt to at via $max,
+// in one write. It folds a $setOnInsert upsert and AdvanceThreadSubscriptionLastSeen for
+// the replier on the hot path. lastSeenAt is owned exclusively by $max and never appears
+// under $setOnInsert, so the two operators do not conflict: a new subscription is seeded
+// with lastSeenAt=at, an existing one only moves forward.
+func (s *threadStoreMongo) UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error {
+	if err := s.subIndex.Ready(ctx); err != nil {
+		return err
+	}
+	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
+	update := bson.M{
+		"$setOnInsert": bson.M{
+			"_id":             sub.ID,
+			"parentMessageId": sub.ParentMessageID,
+			"roomId":          sub.RoomID,
+			"threadRoomId":    sub.ThreadRoomID,
+			"userId":          sub.UserID,
+			"userAccount":     sub.UserAccount,
+			"siteId":          sub.SiteID,
+			"hasMention":      sub.HasMention,
+			"createdAt":       sub.CreatedAt,
+			"updatedAt":       sub.UpdatedAt,
+		},
+		"$max": bson.M{"lastSeenAt": at},
+	}
+	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("upsert thread subscription advancing lastSeen: %w", err)
+		}
+		// Lost the insert race to a concurrent reply by the same account in this thread:
+		// both missed the filter, both tried to insert, and the unique
+		// (threadRoomId, userAccount) index rejected this one. The subscription exists
+		// now, so replay the $max alone — without it the reply would NAK and the
+		// replier's lastSeenAt would ride on redelivery.
+		res, raceErr := s.threadSubscriptions.UpdateOne(ctx, filter, bson.M{"$max": bson.M{"lastSeenAt": at}})
+		if raceErr != nil {
+			return fmt.Errorf("advance thread subscription lastSeen after upsert race: %w", raceErr)
+		}
+		// Nothing matched (threadRoomId, userAccount), so the duplicate came from some
+		// other unique key — an _id already owned by an unrelated subscription, say — and
+		// this is a genuine conflict rather than the race above. Swallowing it would drop
+		// the write silently.
+		if res.MatchedCount == 0 {
+			return fmt.Errorf("upsert thread subscription advancing lastSeen: %w", err)
+		}
+	}
+	return nil
+}
+
 // MarkThreadSubscriptionMention sets hasMention=true, skipping subs that already
 // read past sub.CreatedAt (else this async write clobbers a read-clear, #467).
 // New subs go via $setOnInsert on the upsert; existing ones get a separate

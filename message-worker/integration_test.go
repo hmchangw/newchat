@@ -1012,7 +1012,29 @@ func TestThreadStoreMongo_CreateThreadRoom_RefusesWhenTheSubscriptionIndexConfli
 	assert.Zero(t, n, "no thread room is created while a key its subscriptions need is unconfirmed")
 }
 
+// UpsertThreadSubscription keeps its own gate test: it is still the write the
+// parent author's subscription takes, so the folded variant's gate does not
+// cover it.
 func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "message_worker_plain_sub_gate_test") // no seeded index, EnsureIndexes never called
+	store := newThreadStoreMongo(db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	sub := &model.ThreadSubscription{ID: "ts-1", ParentMessageID: "msg-parent", RoomID: "r-1",
+		ThreadRoomID: "tr-1", UserID: "u-1", UserAccount: "alice", SiteID: "site-a", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, store.UpsertThreadSubscription(ctx, sub))
+	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_subscriptions"))["threadRoomId:1,userAccount:1"],
+		"thread_subscriptions (threadRoomId,userAccount) must be unique before the first write")
+
+	dup := *sub
+	dup.ID = "ts-2"
+	err := store.InsertThreadSubscription(ctx, &dup)
+	require.Error(t, err)
+	assert.True(t, mongo.IsDuplicateKeyError(err), "a second document for the same key must be refused, got: %v", err)
+}
+
+func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_sub_gate_test") // no seeded index, EnsureIndexes never called
 	store := newThreadStoreMongo(db)
@@ -1020,7 +1042,7 @@ func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFre
 
 	sub := &model.ThreadSubscription{ID: "ts-1", ParentMessageID: "msg-parent", RoomID: "r-1",
 		ThreadRoomID: "tr-1", UserID: "u-1", UserAccount: "alice", SiteID: "site-a", CreatedAt: now, UpdatedAt: now}
-	require.NoError(t, store.UpsertThreadSubscription(ctx, sub))
+	require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, now))
 	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_subscriptions"))["threadRoomId:1,userAccount:1"],
 		"thread_subscriptions (threadRoomId,userAccount) must be unique before the first write")
 
@@ -1151,6 +1173,118 @@ func TestThreadStoreMongo_GetThreadRoomByParentMessageID(t *testing.T) {
 	t.Run("not found returns errThreadRoomNotFound", func(t *testing.T) {
 		_, err := store.GetThreadRoomByParentMessageID(ctx, "does-not-exist")
 		require.ErrorIs(t, err, errThreadRoomNotFound)
+	})
+}
+
+func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	newSub := func(id, account string) *model.ThreadSubscription {
+		return &model.ThreadSubscription{ID: id, ParentMessageID: "msg-parent", RoomID: "r-1",
+			ThreadRoomID: "tr-1", UserID: "u-1", UserAccount: account, SiteID: "site-a",
+			CreatedAt: now, UpdatedAt: now}
+	}
+	readSub := func(t *testing.T, account string) model.ThreadSubscription {
+		t.Helper()
+		var got model.ThreadSubscription
+		require.NoError(t, db.Collection("thread_subscriptions").
+			FindOne(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": account}).Decode(&got))
+		return got
+	}
+
+	t.Run("absent — inserts the subscription seeded with lastSeenAt", func(t *testing.T) {
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, newSub("ts-ins", "alice"), now))
+
+		got := readSub(t, "alice")
+		assert.Equal(t, "ts-ins", got.ID)
+		assert.Equal(t, "msg-parent", got.ParentMessageID)
+		require.NotNil(t, got.LastSeenAt, "a new subscription is seeded with lastSeenAt by the $max")
+		assert.Equal(t, now, got.LastSeenAt.UTC().Truncate(time.Millisecond))
+	})
+
+	t.Run("present — advances lastSeenAt without overwriting the document", func(t *testing.T) {
+		later := now.Add(10 * time.Minute)
+		candidate := newSub("ts-other", "bob")
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, candidate, now))
+
+		candidate.ID = "ts-would-clobber"
+		candidate.ParentMessageID = "msg-other-parent"
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, candidate, later))
+
+		got := readSub(t, "bob")
+		assert.Equal(t, "ts-other", got.ID, "$setOnInsert must not overwrite an existing subscription")
+		assert.Equal(t, "msg-parent", got.ParentMessageID)
+		require.NotNil(t, got.LastSeenAt)
+		assert.Equal(t, later, got.LastSeenAt.UTC().Truncate(time.Millisecond))
+	})
+
+	t.Run("lastSeenAt never moves backward", func(t *testing.T) {
+		later := now.Add(time.Hour)
+		sub := newSub("ts-max", "carol")
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, later))
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, now))
+
+		got := readSub(t, "carol")
+		require.NotNil(t, got.LastSeenAt)
+		assert.Equal(t, later, got.LastSeenAt.UTC().Truncate(time.Millisecond), "$max only moves forward")
+	})
+
+	// Concurrent replies by the SAME account in one thread all miss the filter and all try
+	// to insert; the unique (threadRoomId, userAccount) index lets exactly one through. The
+	// losers must recover by replaying the $max rather than failing the reply.
+	t.Run("concurrent replies by one account — no error, one document, newest lastSeenAt", func(t *testing.T) {
+		const callers = 8
+		var (
+			wg    sync.WaitGroup
+			mu    sync.Mutex
+			errs  []error
+			start = make(chan struct{})
+		)
+		newest := now.Add(time.Duration(callers-1) * time.Minute)
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				sub := newSub(fmt.Sprintf("ts-race-%d", i), "dave")
+				<-start
+				if err := store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, now.Add(time.Duration(i)*time.Minute)); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		require.Empty(t, errs, "the losers of the insert race recover by replaying the $max")
+		n, err := db.Collection("thread_subscriptions").
+			CountDocuments(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": "dave"})
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, n)
+
+		got := readSub(t, "dave")
+		require.NotNil(t, got.LastSeenAt)
+		assert.Equal(t, newest, got.LastSeenAt.UTC().Truncate(time.Millisecond))
+	})
+
+	// The recovery is narrow on purpose: a duplicate on any OTHER unique key matches nothing
+	// on the replayed $max, and must surface instead of silently dropping the write.
+	t.Run("duplicate on a different unique key is returned, not swallowed", func(t *testing.T) {
+		owner := newSub("ts-owned", "erin")
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, owner, now))
+
+		// Same _id as erin's document, but a (threadRoomId, userAccount) that matches nothing:
+		// the upsert tries to insert and collides on _id alone.
+		clash := newSub("ts-owned", "frank")
+		clash.ThreadRoomID = "tr-unrelated"
+		err := store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, clash, now)
+		require.Error(t, err, "an _id collision is a real conflict, not the same-account race")
+		assert.True(t, mongo.IsDuplicateKeyError(err), "the original duplicate-key error must survive: %v", err)
 	})
 }
 
