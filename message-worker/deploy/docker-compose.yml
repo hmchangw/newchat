@@ -44,6 +44,11 @@ services:
       # Unattended brake: caps destruction per pod per minute so a site-wide fault
       # that presents as a request error cannot destroy a whole feed unnoticed.
       - MAX_DROPS_PER_MINUTE=${MAX_DROPS_PER_MINUTE:-10}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (stream readiness, consumer bind, dual-lane drain) still runs.
+      # Placement is not asserted here — a single-server NATS reports no cluster.
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}

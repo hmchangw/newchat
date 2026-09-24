@@ -110,3 +110,38 @@ func TestValidateConsumerConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildFailoverConsumerConfig(t *testing.T) {
+	t.Run("durable and filter", func(t *testing.T) {
+		cc := buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a")
+
+		assert.Equal(t, "message-worker-failover", cc.Durable,
+			"distinct durable so the two lanes keep independent cursors")
+		assert.Equal(t, []string{"chat.failover.msg.canonical.site-a.created"}, cc.FilterSubjects,
+			"mirrors the home lane's .created filter, on the failover root")
+	})
+
+	t.Run("retries forever regardless of the env cap", func(t *testing.T) {
+		// The failover lane runs the same handler, writes the same keyspace and
+		// settles through the same settle.go as the home lane, so it needs the
+		// same redelivery policy. Under a finite cap JetStream terminates the
+		// message behind that decision — and on this lane the home site is
+		// already down, so every failure mode settle.go retries indefinitely
+		// (infra-class Cassandra, Mongo, user lookup, mention resolution) would
+		// instead be destroyed after the cap, while broadcast-worker has already
+		// delivered the message and search-sync-worker has already indexed it.
+		for _, envCap := range []int{0, 3, 5, stream.DefaultMaxDeliver, 1000} {
+			cc := buildFailoverConsumerConfig(stream.ConsumerSettings{MaxDeliver: envCap}, "site-a")
+			assert.Equal(t, -1, cc.MaxDeliver,
+				"the failover lane gives up where the home lane does — in settle.go, not at a delivery count (env cap %d)", envCap)
+		}
+	})
+
+	t.Run("passes the default-mode validation the home lane takes", func(t *testing.T) {
+		// main validates this config against "default" rather than cfg.Mode: the
+		// migration path is home-only, so this lane is always the live .created
+		// pipeline whatever mode the pod runs in.
+		cc := buildFailoverConsumerConfig(stream.ConsumerSettings{MaxDeliver: stream.DefaultMaxDeliver}, "site-a")
+		require.NoError(t, validateConsumerConfig(&cc, "default"))
+	})
+}

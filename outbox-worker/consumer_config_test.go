@@ -1,13 +1,16 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 func TestBuildConcurrentConsumerConfig(t *testing.T) {
@@ -16,7 +19,7 @@ func TestBuildConcurrentConsumerConfig(t *testing.T) {
 		MaxDeliver:    5,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
-	}, "site-a", "site-b")
+	}, "site-a", "site-b", subject.LaneHome)
 
 	// Per destination, not a single shared consumer: a down peer's parked events
 	// fill only its own ack-pending budget instead of stalling healthy peers.
@@ -57,7 +60,7 @@ func TestBuildOrderedConsumerConfig(t *testing.T) {
 		MaxDeliver:    5,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
-	}, "site-a", "site-b")
+	}, "site-a", "site-b", subject.LaneHome)
 
 	assert.Equal(t, "outbox-worker-ordered-site-b", cc.Durable)
 	// Order-sensitive events (membership + room rename) share one per-destination
@@ -96,4 +99,38 @@ func TestFederationPeers(t *testing.T) {
 			assert.Equal(t, tt.want, federationPeers(tt.siteID, tt.all))
 		})
 	}
+}
+
+func TestFailoverConsumerConfigs(t *testing.T) {
+	conc := buildConcurrentConsumerConfig(stream.ConsumerSettings{}, "site-a", "site-b", subject.LaneFailover)
+	ord := buildOrderedConsumerConfig(stream.ConsumerSettings{}, "site-a", "site-b", subject.LaneFailover)
+
+	t.Run("distinct durables from the live lanes", func(t *testing.T) {
+		live := buildConcurrentConsumerConfig(stream.ConsumerSettings{}, "site-a", "site-b", subject.LaneHome).Durable
+		assert.NotEqual(t, live, conc.Durable)
+		assert.NotEqual(t, conc.Durable, ord.Durable)
+		assert.Contains(t, conc.Durable, "failover")
+		assert.Contains(t, ord.Durable, "failover")
+	})
+
+	t.Run("a down peer still retries forever", func(t *testing.T) {
+		assert.Equal(t, -1, conc.MaxDeliver)
+		assert.Equal(t, -1, ord.MaxDeliver)
+	})
+
+	t.Run("ordered events cannot overtake each other", func(t *testing.T) {
+		assert.Equal(t, 1, ord.MaxAckPending)
+	})
+
+	// The two filter sets must partition the failover stream exactly as they do
+	// the live one, or an event type lands with no consumer and sits until
+	// retention deletes it.
+	t.Run("filters partition the failover stream", func(t *testing.T) {
+		assert.Len(t, conc.FilterSubjects, len(outbox.ConcurrentEventTypes))
+		assert.Len(t, ord.FilterSubjects, len(outbox.OrderedEventTypes))
+		for _, s := range append(append([]string{}, conc.FilterSubjects...), ord.FilterSubjects...) {
+			assert.True(t, strings.HasPrefix(s, "chat.failover.outbox.site-a.site-b."),
+				"failover filter must be on the failover root, got %q", s)
+		}
+	})
 }

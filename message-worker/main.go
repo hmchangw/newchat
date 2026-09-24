@@ -6,22 +6,22 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/histdegrade"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
-	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
@@ -69,6 +69,7 @@ type config struct {
 	DEKBreaker         atrest.BreakerConfig
 	Thread             threadcount.Policy
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy              natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
 	Vault              atrest.VaultConfig
@@ -176,14 +177,14 @@ func main() {
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
+	// Default mode only: teams is a one-time migration path with no standby
+	// stream, so it has no buddy lane and keeps the fail-fast home dial. With a
+	// buddy the dial is lazy, so a pod that restarts while home is down still
+	// boots and serves the buddy lane.
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile, sdk)
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -268,30 +269,6 @@ func main() {
 		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
-	publishFn := func(ctx context.Context, subj string, data []byte, msgID string) error {
-		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
-		// verbose-tracing intent ride onto downstream badge/inbox events.
-		msg := natsutil.NewMsg(ctx, subj, data)
-		if msgID == "" {
-			err := nc.PublishMsg(ctx, msg)
-			publishMetrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount, err)
-			if err != nil {
-				return fmt.Errorf("publish nats message to %s: %w", subj, err)
-			}
-			return nil
-		}
-		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-		publishMetrics.Failure(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish, err)
-		if err != nil {
-			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
-		}
-		return nil
-	}
-
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
-		slog.Error("bootstrap streams failed", "error", err)
-		os.Exit(1)
-	}
 
 	streamName := stream.MessagesCanonical(cfg.SiteID).Name
 	if cfg.Mode == "teams" {
@@ -304,36 +281,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		Site:   cfg.SiteID,
-		Stream: streamName, Consumer: consumerCfg.Durable,
-	})
-	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
+	// Validated against "default", not cfg.Mode: the failover lane carries no
+	// migration path, so it is the live .created pipeline whatever mode this pod
+	// runs in, and it answers to the same give-up policy as the home lane.
+	failoverConsumerCfg := buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID)
+	if err := validateConsumerConfig(&failoverConsumerCfg, "default"); err != nil {
+		slog.Error("invalid failover consumer config", "error", err)
 		os.Exit(1)
 	}
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-	consumerMetrics.LoopStarted(ctx)
 
 	mtr, err := newMetrics()
 	if err != nil {
 		slog.Error("init metrics failed", "error", err)
 		os.Exit(1)
 	}
-	stopLagPoller := startLagPoller(ctx, mtr, func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+
+	// The home consumer is created inside the deferred bind, so the pollers below
+	// resolve it per call rather than capturing it: during a home outage there is
+	// no consumer to read, and an error is the honest answer — the alternative is
+	// a nil capture taken before the cluster came back.
+	homeConsumerInfo := func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+		cons, err := js.Consumer(ctx, streamName, consumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("resolve home consumer %s: %w", consumerCfg.Durable, err)
+		}
 		return cons.Info(ctx)
-	}, 15*time.Second)
+	}
+	stopLagPoller := startLagPoller(ctx, mtr, homeConsumerInfo, 15*time.Second)
 
 	degradeTr := newDegradeTracker(histdegrade.NewStore(db), cfg.SiteID,
 		func(ctx context.Context) (uint64, uint64, error) {
-			ci, err := cons.Info(ctx)
+			ci, err := homeConsumerInfo(ctx)
 			if err != nil {
 				return 0, 0, fmt.Errorf("consumer info: %w", err)
 			}
@@ -348,17 +326,34 @@ func main() {
 	// coming up.
 	stopDegradeRefresher := startTicker(ctx, cfg.DegradeRefresh, tickAfterInterval, degradeTr.Refresh)
 
-	// The live handler sees a store that tags its own errors as history failures, so
-	// no call site can reopen the loss window by forgetting to wrap. teamsMigration
-	// below deliberately gets the bare store: that lane is a separate stream and
-	// durable, and a bulk-migration persist failure must not tell every live client
-	// on the site that their history is incomplete.
-	handler := NewHandler(historyStore{store}, us, threadStore, cfg.SiteID, publishFn, mtr, degradeTr,
-		newDropPolicy(cfg.InvalidRetryWindow, cfg.HistoryDropEnabled, cfg.MaxDropsPerMinute, nil),
-		withPersistenceMetrics(domainMetrics))
-
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	var wg sync.WaitGroup
+	// One handler per lane; see failoverlane.BuildHandler for why nothing that
+	// speaks NATS may be shared between them. An empty msgID is an ephemeral
+	// client delivery on core NATS; otherwise the publish is JetStream-backed,
+	// blocking on PubAck with msgID as the Nats-Msg-Id the server dedups on.
+	//
+	// Both lanes get historyStore{store}, so neither can reopen the loss window
+	// by forgetting to tag its own errors as history failures — a failover-lane
+	// message is still this site's message, written to this site's keyspace, and
+	// its degradation marker is this site's marker. teamsMigration below
+	// deliberately keeps the bare store: that lane is a separate stream and
+	// durable, and a bulk-migration persist failure must not tell every live
+	// client on the site that their history is incomplete.
+	newLaneHandler := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) *Handler {
+		core := natsutil.CorePublishFunc(conn, publishMetrics,
+			natsutil.WithPublishLabels(natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount))
+		js := natsutil.JetStreamPublishFunc(laneJS, publishMetrics,
+			natsutil.WithPublishLabels(natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish))
+		publish := func(ctx context.Context, subj string, data []byte, msgID string) error {
+			if msgID == "" {
+				return core(ctx, subj, data)
+			}
+			return js(ctx, subj, data, msgID)
+		}
+		return NewHandler(historyStore{store}, us, threadStore, cfg.SiteID, publish, mtr, degradeTr,
+			newDropPolicy(cfg.InvalidRetryWindow, cfg.HistoryDropEnabled, cfg.MaxDropsPerMinute, nil),
+			withPersistenceMetrics(domainMetrics), withLane(lane))
+	}
+	handler := newLaneHandler(nc, js, subject.LaneHome)
 
 	// Built unconditionally in both modes: the consumer filter already scopes each
 	// pod to its own mode's subject, so a default-mode pod never sees teamsBatchSubj
@@ -381,49 +376,41 @@ func main() {
 			return nil
 		}, domainMetrics)
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
-	process := canonicalProcessor(handler, teamsMigration, teamsBatchSubj)
 
+	// Armed before the lanes bind: a lane guard's SelfShutdown raises SIGTERM on
+	// this process, and a signal raised before the handler exists is fatal.
 	sig := shutdown.Signals()
-	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
-	wg.Add(1)
-	go func() {
-		// The loop itself is counted so shutdown, which stops the iterator and
-		// then waits on wg, cannot pass through while a message Next already
-		// returned is still on its way to a worker.
-		defer wg.Done()
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				if natsmetrics.Recoverable(err) {
-					slog.Warn("consume loop stalled; retrying", "loop", "consume-loop", "error", err)
-					continue
-				}
-				consumerMetrics.LoopFailed(context.Background(), err)
-				loop.Stopped(err)
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg) {
-				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
-				msg = tracked
-				msgCtx = tracked.Context(msgCtx)
-				// Mark retries so the thread-reply writer can tell a redelivery
-				// from a first delivery: its tcount increment is not idempotent.
-				msgCtx = natsutil.StampRedelivery(msgCtx, msg)
-				defer func() {
-					tracked.Finish(msgCtx)
-					<-sem
-					wg.Done()
-				}()
-				process(msgCtx, msg)
-			}(msgCtx, msg)
+
+	// One handler per lane; the migration path is home-only, so the failover
+	// lane's processor carries no teams handler. The buddy lane never fails
+	// startup — on any failure the service runs home-only.
+	lanes, err := failoverlane.BindLanes(ctx, nc, js, dialer, &failoverlane.LanesSpec{
+		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Metrics: sharedMetrics,
+		Bootstrap: cfg.Bootstrap.Enabled,
+		Home: failoverlane.HomeLane{
+			Stream: stream.Config{Name: streamName}, Consumer: consumerCfg,
+			Bootstrap: func(ctx context.Context, js o11ynats.JetStream) error {
+				return bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled)
+			},
+		},
+		Buddy: &failoverlane.BuddyLane{
+			Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
+			Consumer: failoverConsumerCfg,
+		},
+	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		if lane == subject.LaneHome {
+			return stampRedelivery(canonicalProcessor(handler, teamsMigration, teamsBatchSubj)), nil
 		}
-	}()
+		return stampRedelivery(canonicalProcessor(newLaneHandler(conn, laneJS, lane), nil, "")), nil
+	})
+	if err != nil {
+		slog.Error("bind lanes failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
-		loop.Check(),
+		lanes.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -432,26 +419,11 @@ func main() {
 
 	slog.Info("message-worker running", "site", cfg.SiteID)
 
-	shutdown.WaitOn(ctx, sig, 25*time.Second,
-		func(_ context.Context) error { loop.BeginShutdown(); return nil },
-		func(ctx context.Context) error {
-			consumerMetrics.LoopStopped(ctx)
-			iter.Stop()
-			return nil
-		},
-		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
-			}
-		},
-		func(ctx context.Context) error { stopLagPoller(); return nil },
-		func(ctx context.Context) error { stopDegradeRefresher(); return nil },
-		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+	// The lanes mark their own guards and stop both iterators inside StopHooks.
+	hooks := append(lanes.StopHooks(), lanes.DrainHooks()...)
+	hooks = append(hooks,
+		func(context.Context) error { stopLagPoller(); return nil },
+		func(context.Context) error { stopDegradeRefresher(); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error {
@@ -464,6 +436,22 @@ func main() {
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	// WaitOn, not Wait: a lane guard's SelfShutdown raises SIGTERM on this
+	// process, and only the armed channel routes that into the graceful path.
+	shutdown.WaitOn(ctx, sig, 25*time.Second, hooks...)
+}
+
+// stampRedelivery marks the context when a message is a JetStream redelivery,
+// so the thread-reply writer can tell one from a first delivery: its tcount
+// increment is not idempotent.
+//
+// Applied per lane rather than inside the shared pool because it is this
+// service's semantics, not every consumer's — and applied to both lanes,
+// because a redelivery on the buddy double-counts exactly as it would on home.
+func stampRedelivery(process func(context.Context, jetstream.Msg)) func(context.Context, jetstream.Msg) {
+	return func(ctx context.Context, msg jetstream.Msg) {
+		process(natsutil.StampRedelivery(ctx, msg), msg)
+	}
 }
 
 // teamsMaxDeliver is the redelivery cap teams mode falls back to when the
@@ -520,8 +508,10 @@ func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj str
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			// Dispatch by subject: the one-time .teams.batch migration writes
-			// straight to Cassandra; the live .created feed runs the normal pipeline.
-			if msg.Subject() == teamsBatchSubj {
+			// straight to Cassandra; the live .created feed runs the normal
+			// pipeline. A nil teams handler means this lane has no migration
+			// path at all (the failover lane), so never dispatch into it.
+			if teams != nil && msg.Subject() == teamsBatchSubj {
 				teams.consume(handlerCtx, msg)
 				return
 			}
@@ -553,4 +543,32 @@ func validateConsumerConfig(cc *jetstream.ConsumerConfig, mode string) error {
 // what main runs against a Valkey that is down. See TestValkeyStartupSurvivesOutage.
 func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Observability) valkeyutil.Client {
 	return valkeyutil.ConnectOptional(ctx, cfg, "DEK and user L2", valkeyutil.Instrumented(sdk))
+}
+
+// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// MESSAGES-CANONICAL-FAILOVER lane. Distinct durable from the home lane so the
+// two keep independent cursors; the handler and the Cassandra writes are
+// identical, because a failover-lane message is still this site's message and
+// still belongs in this site's keyspace.
+//
+// It takes stream.WithUnlimitedRedelivery for the same reason the home lane
+// does, and the reason is stronger here. The two lanes share one handler and
+// one settle.go, so a finite cap would let JetStream terminate a message behind
+// a give-up decision that has not been made — and settle.go retries
+// indefinitely on every failure class except a request-class Cassandra rejection
+// that outlived its window, so the cap would destroy exactly the failures the
+// give-up policy declines to destroy. A message reaching this lane has also
+// already been delivered by broadcast-worker and indexed by search-sync-worker,
+// so the loss is silent and one-sided. Applied to the settings rather than to
+// the built config because backOffSchedule clamps its steps against the cap;
+// see WithUnlimitedRedelivery's own note on that ordering.
+//
+// Default mode only — teams mode is a one-time migration path with no failover
+// lane, which is why main validates this config against "default" rather than
+// against cfg.Mode.
+func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
+	cc.Durable = "message-worker-failover"
+	cc.FilterSubjects = []string{subject.FailoverMsgCanonicalCreated(siteID)}
+	return cc
 }

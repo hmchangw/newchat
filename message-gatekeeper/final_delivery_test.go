@@ -103,12 +103,12 @@ func TestHandleJetStreamMsg_NonFinalDeliveryStaysSilent(t *testing.T) {
 	assert.Empty(t, captured, "a retryable delivery must not report failure to the sender")
 }
 
-// TestGuardedProcessor_RecoversPanic is the regression guard for panic
+// TestGuardedLaneHandler_RecoversPanic is the regression guard for panic
 // containment. natsmetrics.Consume spawns a goroutine per message with no
 // recover(), and MESSAGES has exactly one consumer — so an unrecovered panic
 // takes the process down with the message un-acked, and JetStream redelivers it
 // into a crash loop during which the site accepts no messages at all.
-func TestGuardedProcessor_RecoversPanic(t *testing.T) {
+func TestGuardedLaneHandler_RecoversPanic(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
@@ -124,7 +124,7 @@ func TestGuardedProcessor_RecoversPanic(t *testing.T) {
 	consumer.LoopStarted(ctx)
 	tracked := consumer.Track(ctx, msg, natsmetrics.EventSend, 6)
 
-	guarded := guardedProcessor(func(context.Context, *natsmetrics.Message) {
+	guarded := guardedLaneHandler(func(context.Context, jetstream.Msg) {
 		panic("handler exploded")
 	})
 

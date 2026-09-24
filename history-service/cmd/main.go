@@ -4,7 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
+
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
@@ -19,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/histdegrade"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -34,6 +38,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomtimescache"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -125,15 +130,12 @@ func main() {
 
 	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
-	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
+	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NATS.CredsFile, sdk)
+	// Lazy home dial so a pod restarting mid-outage can still boot and answer displaced clients
+	// on the buddy; see natsutil.BuddyDialer.ConnectHome.
+	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NATS.URL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
-		os.Exit(1)
-	}
-
-	js, err := nc.JetStream()
-	if err != nil {
-		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -372,40 +374,57 @@ func main() {
 	degradation := histdegrade.NewCachedReader(histdegrade.NewStore(db).Get, 5*time.Second)
 	opts = append(opts, service.WithDegradation(degradation))
 
-	pub := publisher.New(js, publisher.WithMetrics(publishMetrics))
+	// Per lane, from that lane's connection: a reply leaves on the connection
+	// the request arrived on, so it is that broker's max_payload that bounds it.
 	// A zero Budget disables trimming, so the toggle needs no handler branch.
-	pageBudget := pagefit.Budget{}
-	if cfg.PageTrimming {
-		pageBudget = pagefit.Resolve(cfg.MaxResponseBytes, nc.NatsConn().MaxPayload(), pagefit.DefaultReserve)
-	} else {
+	pageBudgetFor := func(conn *o11ynats.Conn) pagefit.Budget {
+		return natsutil.PageBudget(cfg.PageTrimming, cfg.MaxResponseBytes, conn)
+	}
+	if !cfg.PageTrimming {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
 	if !cfg.PreviewWarmBackEnabled {
 		slog.Warn("preview warm-back DISABLED — rooms without a stored preview re-walk Cassandra once per preview-cache TTL")
 	}
-	opts = append(opts, service.WithPageBudget(pageBudget))
 
 	// The service reads the tier on the degraded path; the seeder above writes it.
 	if roomTimes != nil {
 		opts = append(opts, service.WithRoomTimesCache(roomTimes))
 	}
 
-	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, opts...)
-
-	// Default middleware chain (Recovery, RequestID, Logging) plus this service's
-	// per-site + metrics router options and the guard's admission cap; the
-	// per-request timeout (free a connection stuck on a slow op) is applied after.
-	routerOpts := append([]natsrouter.Option{
-		natsrouter.WithSiteID(cfg.SiteID),
-		natsrouter.WithMetrics(publishMetrics),
-	}, cfg.Guard.Options()...)
-	router := natsrouter.Default(nc, "history-service", routerOpts...)
-	router.Use(cfg.Guard.TimeoutMiddleware()...)
-
-	svc.RegisterHandlers(router, cfg.SiteID)
+	// One service per lane; see failoverlane.BuildRouter for why nothing that
+	// speaks NATS may be shared between them. The stores, caches and the preview
+	// warm-back pool are site-local and up whichever lane is serving, so they are
+	// built once and shared; only the publisher is per lane.
+	// Nil when the kill switch is off: New then installs its no-op writer, and
+	// the shutdown hook below has nothing to drain.
+	var warmer *service.PreviewWarmer
+	if cfg.PreviewWarmBackEnabled {
+		warmer = service.NewPreviewWarmer(roomSource, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue)
+		opts = append(opts, service.WithPreviewWarmer(warmer))
+	}
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
+	routers, err := failoverlane.BindRouters(ctx, nc, js, dialer,
+		func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
+			svc := service.New(cassRepo, subSource, roomSource,
+				publisher.New(laneJS, publisher.WithMetrics(publishMetrics)),
+				threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg,
+				append(slices.Clone(opts), service.WithLane(lane), service.WithPageBudget(pageBudgetFor(conn)))...)
+			// Default middleware chain plus the guard's admission cap and
+			// per-request timeout, so a burst or a slow dependency cannot
+			// saturate the Mongo pool.
+			r := natsrouter.DefaultGuarded(conn, "history-service", cfg.Guard, routerOpts...)
+			svc.RegisterHandlers(r, cfg.SiteID)
+			return r, nil
+		})
+	if err != nil {
+		slog.Error("bind routers failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		routers.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -414,17 +433,22 @@ func main() {
 
 	slog.Info("history-service running", "site", cfg.SiteID)
 
-	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
+	// The lane routers stop and the buddy drains first, so neither lane accepts
+	// new work while the other is still finishing.
+	hooks := routers.ShutdownHooks()
+	hooks = append(hooks,
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		// After the router stops (no new warm-backs queued), before Mongo closes under them.
 		// On its own sub-budget: the drain is optional work, and letting a deep queue on a
 		// slow Mongo spend the shared window would starve the steps below it — Mongo,
 		// Cassandra, Vault, and the telemetry flush that reports this shutdown at all.
 		func(ctx context.Context) error {
+			if warmer == nil {
+				return nil
+			}
 			ctx, cancel := context.WithTimeout(ctx, previewDrainTimeout)
 			defer cancel()
-			return svc.Close(ctx)
+			return warmer.Close(ctx)
 		},
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
@@ -438,6 +462,7 @@ func main() {
 		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
 
 // valkeyDial is this service's Valkey dial, extracted so a test can run exactly
