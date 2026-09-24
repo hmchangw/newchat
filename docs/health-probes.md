@@ -86,7 +86,7 @@ creates pin their write timestamp").
 The driver reconnects on its own (SDAM) once MongoDB returns. A degraded pod
 resumes consuming at that moment, before a crashlooping fail-fast service has
 restarted and built the indexes it owns, so a write whose correctness rests on
-a unique index confirms it first: `message-worker` gates `CreateThreadRoom` on
+a unique index confirms it first: `message-worker` gates `EnsureThreadRoom` on
 `thread_rooms.parentMessageId` and its subscription inserts and upserts on
 `thread_subscriptions.(threadRoomId,userAccount)` (`mongoutil.IndexGate`), and
 NAKs the reply until the constraint is there. The hold is bounded by the

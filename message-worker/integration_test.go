@@ -884,51 +884,173 @@ func TestThreadStoreMongo_AddThreadUnread_EmptyAccountsNoop(t *testing.T) {
 	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", nil))
 }
 
-func TestThreadStoreMongo_CreateThreadRoom(t *testing.T) {
+func TestThreadStoreMongo_EnsureThreadRoom(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := newThreadStoreMongo(db)
 	require.NoError(t, store.EnsureIndexes(ctx))
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	room := &model.ThreadRoom{
-		ID:              "tr-1",
-		ParentMessageID: "msg-parent",
-		RoomID:          "r-1",
-		SiteID:          "site-a",
-		LastMsgAt:       now,
-		LastMsgID:       "msg-reply-1",
-		CreatedAt:       now,
-		UpdatedAt:       now,
+	// Each subtest owns its own parent AND its own room ids so none depends on
+	// another having run: the collection is shared across subtests, the keys are
+	// not — _id carries a unique index of its own, so reusing an id across
+	// subtests would collide there even with distinct parents.
+	newRoom := func(id, parentMessageID, lastMsgID string) *model.ThreadRoom {
+		return &model.ThreadRoom{
+			ID:              id,
+			ParentMessageID: parentMessageID,
+			RoomID:          "r-1",
+			SiteID:          "site-a",
+			LastMsgAt:       now,
+			LastMsgID:       lastMsgID,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
 	}
 
-	t.Run("first insert succeeds", func(t *testing.T) {
-		err := store.CreateThreadRoom(ctx, room)
+	t.Run("absent parent — inserts and reports created", func(t *testing.T) {
+		got, created, err := store.EnsureThreadRoom(ctx, newRoom("tr-absent", "msg-absent", "msg-reply-1"))
 		require.NoError(t, err)
-
-		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent")
-		require.NoError(t, err)
-		assert.Equal(t, "tr-1", got.ID)
-		assert.Equal(t, "msg-parent", got.ParentMessageID)
+		assert.True(t, created, "the first reply must report created")
+		assert.Equal(t, "tr-absent", got.ID)
+		assert.Equal(t, "msg-absent", got.ParentMessageID)
 		assert.Equal(t, "r-1", got.RoomID)
 		assert.Equal(t, "site-a", got.SiteID)
 		assert.Equal(t, "msg-reply-1", got.LastMsgID)
 	})
 
-	t.Run("duplicate insert returns errThreadRoomExists", func(t *testing.T) {
-		dup := &model.ThreadRoom{
-			ID:              "tr-2",
-			ParentMessageID: "msg-parent",
-			RoomID:          "r-1",
-			SiteID:          "site-a",
-			LastMsgAt:       now,
-			LastMsgID:       "msg-reply-2",
-			CreatedAt:       now,
-			UpdatedAt:       now,
-		}
-		err := store.CreateThreadRoom(ctx, dup)
-		require.ErrorIs(t, err, errThreadRoomExists)
+	// created must describe what the write did, not whether the stored room happens to
+	// carry the id this call offered. The handler mints a fresh id per attempt, so only a
+	// store-level test can pin it: resubmitting the winning candidate verbatim must still
+	// report created=false, or a caller that reused an id would re-run first-reply handling
+	// against an existing room.
+	t.Run("same candidate resubmitted — reports not created", func(t *testing.T) {
+		room := newRoom("tr-resubmit", "msg-resubmit", "msg-reply-1")
+		_, created, err := store.EnsureThreadRoom(ctx, room)
+		require.NoError(t, err)
+		require.True(t, created, "setup: the first call must insert")
+
+		got, created, err := store.EnsureThreadRoom(ctx, room)
+		require.NoError(t, err)
+		assert.False(t, created, "no insert happened, so created must be false even for the original candidate")
+		assert.Equal(t, "tr-resubmit", got.ID)
 	})
+
+	t.Run("existing parent — returns the stored room and reports not created", func(t *testing.T) {
+		_, created, err := store.EnsureThreadRoom(ctx, newRoom("tr-existing-stored", "msg-existing", "msg-reply-1"))
+		require.NoError(t, err)
+		require.True(t, created, "setup: the first call must insert")
+
+		got, created, err := store.EnsureThreadRoom(ctx, newRoom("tr-existing-candidate", "msg-existing", "msg-reply-2"))
+		require.NoError(t, err)
+		assert.False(t, created, "a subsequent reply must not report created")
+		assert.Equal(t, "tr-existing-stored", got.ID, "the stored room wins; the candidate is discarded")
+		assert.Equal(t, "msg-reply-1", got.LastMsgID, "$setOnInsert must not overwrite the stored room")
+
+		n, err := db.Collection("thread_rooms").CountDocuments(ctx, bson.M{"parentMessageId": "msg-existing"})
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, n, "one parent keeps exactly one thread room")
+	})
+}
+
+// A duplicate key that is NOT the parentMessageId race must surface, not be
+// reported as a lost race. The recovery branch reads the room back by
+// parentMessageId; when that finds nothing the duplicate came from some other
+// unique key — an _id already owned by an unrelated thread room, say — and
+// answering with a "read after race" error (or worse, a room) would hide a
+// genuine conflict behind the wrong diagnosis.
+func TestThreadStoreMongo_EnsureThreadRoom_ForeignDuplicateKeySurfaces(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	// tr-taken belongs to a different parent, so the upsert below misses the
+	// filter, attempts an insert, and collides on _id rather than parentMessageId.
+	_, created, err := store.EnsureThreadRoom(ctx, &model.ThreadRoom{
+		ID: "tr-taken", ParentMessageID: "msg-other", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "msg-reply-1", CreatedAt: now, UpdatedAt: now,
+	})
+	require.NoError(t, err)
+	require.True(t, created, "setup: the first room must insert")
+
+	_, _, err = store.EnsureThreadRoom(ctx, &model.ThreadRoom{
+		ID: "tr-taken", ParentMessageID: "msg-fresh", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "msg-reply-2", CreatedAt: now, UpdatedAt: now,
+	})
+	require.Error(t, err)
+	assert.True(t, mongo.IsDuplicateKeyError(err),
+		"the original duplicate-key error must survive the wrap, got: %v", err)
+	assert.ErrorContains(t, err, "msg-fresh")
+
+	n, cerr := db.Collection("thread_rooms").CountDocuments(ctx, bson.M{"parentMessageId": "msg-fresh"})
+	require.NoError(t, cerr)
+	assert.Zero(t, n, "nothing was written for the conflicting parent")
+}
+
+// Concurrent first replies to one parent race the same upsert. Exactly one may report
+// created (it decides who runs handleFirstThreadReply), every caller must agree on the
+// room, and the unique parentMessageId index must leave exactly one document — the
+// losers land on the duplicate-key branch and read the winner's room back.
+func TestThreadStoreMongo_EnsureThreadRoom_ConcurrentFirstReplies(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	const callers = 8
+
+	var (
+		mu       sync.Mutex
+		ids      []string
+		createds int
+		errs     []error
+		wg       sync.WaitGroup
+		start    = make(chan struct{})
+	)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			candidate := &model.ThreadRoom{
+				ID:              fmt.Sprintf("tr-race-%d", i),
+				ParentMessageID: "msg-parent-race",
+				RoomID:          "r-1",
+				SiteID:          "site-a",
+				LastMsgAt:       now,
+				LastMsgID:       fmt.Sprintf("m-%d", i),
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			}
+			<-start
+			got, created, err := store.EnsureThreadRoom(ctx, candidate)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			ids = append(ids, got.ID)
+			if created {
+				createds++
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	require.Empty(t, errs, "no caller may fail: the losers recover by reading the winner's room")
+	require.Len(t, ids, callers)
+	assert.Equal(t, 1, createds, "exactly one caller may claim the first reply")
+	for _, id := range ids {
+		assert.Equal(t, ids[0], id, "every caller must resolve the same thread room")
+	}
+
+	n, err := db.Collection("thread_rooms").CountDocuments(ctx, bson.M{"parentMessageId": "msg-parent-race"})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n, "one parent, one thread room")
 }
 
 // On a fresh site nothing orders room-service's EnsureIndexes before the first reply, so message-worker
@@ -945,8 +1067,9 @@ func TestThreadStoreMongo_EnsureIndexes_CreatesParentMessageIDUniqueOnFreshDB(t 
 }
 
 // The recovery race: a worker whose startup ensure failed resumes before room-service has rebuilt
-// the key, so CreateThreadRoom confirms it first and a second reply to one parent reads as exists.
-func TestThreadStoreMongo_CreateThreadRoom_ConfirmsIndexBeforeInsertOnFreshDB(t *testing.T) {
+// the key, so EnsureThreadRoom confirms it first. Without the unique key two concurrent first
+// replies would both miss the upsert filter and both insert, splitting one parent across two rooms.
+func TestThreadStoreMongo_EnsureThreadRoom_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_gate_test") // no seeded index, EnsureIndexes never called
 	store := newThreadStoreMongo(db)
@@ -954,11 +1077,16 @@ func TestThreadStoreMongo_CreateThreadRoom_ConfirmsIndexBeforeInsertOnFreshDB(t 
 
 	first := &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1", SiteID: "site-a",
 		LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now}
-	require.NoError(t, store.CreateThreadRoom(ctx, first))
+	_, created, err := store.EnsureThreadRoom(ctx, first)
+	require.NoError(t, err)
+	require.True(t, created)
 
 	second := &model.ThreadRoom{ID: "tr-2", ParentMessageID: "msg-parent", RoomID: "r-1", SiteID: "site-a",
 		LastMsgAt: now, LastMsgID: "m2", CreatedAt: now, UpdatedAt: now}
-	require.ErrorIs(t, store.CreateThreadRoom(ctx, second), errThreadRoomExists)
+	got, created, err := store.EnsureThreadRoom(ctx, second)
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, "tr-1", got.ID)
 
 	n, err := db.Collection("thread_rooms").CountDocuments(ctx, bson.M{"parentMessageId": "msg-parent"})
 	require.NoError(t, err)
@@ -967,7 +1095,7 @@ func TestThreadStoreMongo_CreateThreadRoom_ConfirmsIndexBeforeInsertOnFreshDB(t 
 }
 
 // A conflicting index is room-service's to repair: the gate refuses the write (NAK) and leaves it alone.
-func TestThreadStoreMongo_CreateThreadRoom_RefusesToRepairAConflictingIndex(t *testing.T) {
+func TestThreadStoreMongo_EnsureThreadRoom_RefusesToRepairAConflictingIndex(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_gate_conflict_test")
 	_, err := db.Collection("thread_rooms").Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -977,7 +1105,7 @@ func TestThreadStoreMongo_CreateThreadRoom_RefusesToRepairAConflictingIndex(t *t
 	store := newThreadStoreMongo(db)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
-	err = store.CreateThreadRoom(ctx, &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1",
+	_, _, err = store.EnsureThreadRoom(ctx, &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1",
 		SiteID: "site-a", LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now})
 	require.ErrorIs(t, err, mongoutil.ErrIndexSpecConflict)
 
@@ -993,7 +1121,7 @@ func TestThreadStoreMongo_CreateThreadRoom_RefusesToRepairAConflictingIndex(t *t
 // The room insert is the point of no return for a first reply: once it lands, a redelivery takes
 // the subsequent-reply path. Both keys are confirmed before it, so a subscription index the owner
 // still has to repair refuses the reply before any document is written.
-func TestThreadStoreMongo_CreateThreadRoom_RefusesWhenTheSubscriptionIndexConflicts(t *testing.T) {
+func TestThreadStoreMongo_EnsureThreadRoom_RefusesWhenTheSubscriptionIndexConflicts(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_gate_sub_conflict_test")
 	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -1003,7 +1131,7 @@ func TestThreadStoreMongo_CreateThreadRoom_RefusesWhenTheSubscriptionIndexConfli
 	store := newThreadStoreMongo(db)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
-	err = store.CreateThreadRoom(ctx, &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1",
+	_, _, err = store.EnsureThreadRoom(ctx, &model.ThreadRoom{ID: "tr-1", ParentMessageID: "msg-parent", RoomID: "r-1",
 		SiteID: "site-a", LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now})
 	require.ErrorIs(t, err, mongoutil.ErrIndexSpecConflict)
 
@@ -1012,7 +1140,29 @@ func TestThreadStoreMongo_CreateThreadRoom_RefusesWhenTheSubscriptionIndexConfli
 	assert.Zero(t, n, "no thread room is created while a key its subscriptions need is unconfirmed")
 }
 
+// UpsertThreadSubscription keeps its own gate test: it is still the write the
+// parent author's subscription takes, so the folded variant's gate does not
+// cover it.
 func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "message_worker_plain_sub_gate_test") // no seeded index, EnsureIndexes never called
+	store := newThreadStoreMongo(db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	sub := &model.ThreadSubscription{ID: "ts-1", ParentMessageID: "msg-parent", RoomID: "r-1",
+		ThreadRoomID: "tr-1", UserID: "u-1", UserAccount: "alice", SiteID: "site-a", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, store.UpsertThreadSubscription(ctx, sub))
+	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_subscriptions"))["threadRoomId:1,userAccount:1"],
+		"thread_subscriptions (threadRoomId,userAccount) must be unique before the first write")
+
+	dup := *sub
+	dup.ID = "ts-2"
+	err := store.InsertThreadSubscription(ctx, &dup)
+	require.Error(t, err)
+	assert.True(t, mongo.IsDuplicateKeyError(err), "a second document for the same key must be refused, got: %v", err)
+}
+
+func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen_ConfirmsIndexBeforeWriteOnFreshDB(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "message_worker_sub_gate_test") // no seeded index, EnsureIndexes never called
 	store := newThreadStoreMongo(db)
@@ -1020,7 +1170,7 @@ func TestThreadStoreMongo_UpsertThreadSubscription_ConfirmsIndexBeforeWriteOnFre
 
 	sub := &model.ThreadSubscription{ID: "ts-1", ParentMessageID: "msg-parent", RoomID: "r-1",
 		ThreadRoomID: "tr-1", UserID: "u-1", UserAccount: "alice", SiteID: "site-a", CreatedAt: now, UpdatedAt: now}
-	require.NoError(t, store.UpsertThreadSubscription(ctx, sub))
+	require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, now))
 	assert.True(t, testutil.IndexSpecs(t, db.Collection("thread_subscriptions"))["threadRoomId:1,userAccount:1"],
 		"thread_subscriptions (threadRoomId,userAccount) must be unique before the first write")
 
@@ -1045,28 +1195,38 @@ func TestThreadStoreMongo_MarkParentStamped(t *testing.T) {
 		ID: "tr-stamp", ParentMessageID: "msg-parent-stamp", RoomID: "r-1", SiteID: "site-a",
 		LastMsgAt: now, LastMsgID: "m1", CreatedAt: now, UpdatedAt: now,
 	}
-	require.NoError(t, store.CreateThreadRoom(ctx, room))
+	_, created, err := store.EnsureThreadRoom(ctx, room)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	// EnsureThreadRoom returns the pre-image on a match, so a probe carrying an
+	// existing parentMessageId reads the stored room back without writing.
+	probes := 0
+	read := func(t *testing.T, parentMessageID string) *model.ThreadRoom {
+		t.Helper()
+		probes++
+		got, created, err := store.EnsureThreadRoom(ctx, &model.ThreadRoom{
+			ID: fmt.Sprintf("tr-probe-%d", probes), ParentMessageID: parentMessageID,
+			RoomID: "r-1", SiteID: "site-a", LastMsgAt: now, LastMsgID: "m1",
+			CreatedAt: now, UpdatedAt: now,
+		})
+		require.NoError(t, err)
+		require.False(t, created, "the probe must read, not insert")
+		return got
+	}
 
 	t.Run("a freshly created room reads as not stamped", func(t *testing.T) {
-		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
-		require.NoError(t, err)
-		assert.False(t, got.ParentStamped, "nothing has confirmed the parent stamp yet")
+		assert.False(t, read(t, "msg-parent-stamp").ParentStamped, "nothing has confirmed the parent stamp yet")
 	})
 
 	t.Run("MarkParentStamped persists and round-trips", func(t *testing.T) {
 		require.NoError(t, store.MarkParentStamped(ctx, "tr-stamp"))
-
-		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
-		require.NoError(t, err)
-		assert.True(t, got.ParentStamped)
+		assert.True(t, read(t, "msg-parent-stamp").ParentStamped)
 	})
 
 	t.Run("re-marking is idempotent", func(t *testing.T) {
 		require.NoError(t, store.MarkParentStamped(ctx, "tr-stamp"))
-
-		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stamp")
-		require.NoError(t, err)
-		assert.True(t, got.ParentStamped)
+		assert.True(t, read(t, "msg-parent-stamp").ParentStamped)
 	})
 
 	t.Run("a document written without the field reads as not stamped", func(t *testing.T) {
@@ -1076,22 +1236,187 @@ func TestThreadStoreMongo_MarkParentStamped(t *testing.T) {
 			"createdAt": now, "updatedAt": now,
 		})
 		require.NoError(t, err)
-
-		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-legacy")
-		require.NoError(t, err)
-		assert.False(t, got.ParentStamped, "an absent field must repair, not read as done")
+		assert.False(t, read(t, "msg-parent-legacy").ParentStamped, "an absent field must repair, not read as done")
 	})
 }
 
-func TestThreadStoreMongo_GetThreadRoomByParentMessageID(t *testing.T) {
+// MarkParentSubscribed is the record the subsequent-reply heal reads, so it has
+// to persist, be idempotent, and — critically — read as false on rooms written
+// before the field existed, which is what makes those rooms repairable.
+func TestThreadStoreMongo_MarkParentSubscribed(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := newThreadStoreMongo(db)
 	require.NoError(t, store.EnsureIndexes(ctx))
 
-	t.Run("not found returns errThreadRoomNotFound", func(t *testing.T) {
-		_, err := store.GetThreadRoomByParentMessageID(ctx, "does-not-exist")
-		require.ErrorIs(t, err, errThreadRoomNotFound)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	room := &model.ThreadRoom{
+		ID: "tr-mark", ParentMessageID: "msg-parent-mark", RoomID: "r-1", SiteID: "site-a",
+		LastMsgAt: now, LastMsgID: "msg-reply-1", ReplyAccounts: []string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	_, created, err := store.EnsureThreadRoom(ctx, room)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	probes := 0
+	read := func(t *testing.T, parentMessageID string) *model.ThreadRoom {
+		t.Helper()
+		probes++
+		got, created, err := store.EnsureThreadRoom(ctx, &model.ThreadRoom{
+			ID: fmt.Sprintf("tr-mark-probe-%d", probes), ParentMessageID: parentMessageID,
+			RoomID: "r-1", SiteID: "site-a", LastMsgAt: now, LastMsgID: "msg-reply-1",
+			CreatedAt: now, UpdatedAt: now,
+		})
+		require.NoError(t, err)
+		require.False(t, created, "the probe must read, not insert")
+		return got
+	}
+
+	t.Run("a freshly created room is not marked", func(t *testing.T) {
+		assert.False(t, read(t, "msg-parent-mark").ParentSubscribed)
+	})
+
+	t.Run("marking persists and round-trips", func(t *testing.T) {
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-mark"))
+		assert.True(t, read(t, "msg-parent-mark").ParentSubscribed)
+	})
+
+	t.Run("marking twice is idempotent", func(t *testing.T) {
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-mark"))
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-mark"))
+		assert.True(t, read(t, "msg-parent-mark").ParentSubscribed)
+	})
+
+	// The population the heal exists to repair: written under the old order, so
+	// the author is in replyAccounts even though nothing vouches for their
+	// subscription. It must read as unmarked.
+	t.Run("a document written without the field reads as not marked", func(t *testing.T) {
+		_, err := db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+			"_id": "tr-legacy-mark", "parentMessageId": "msg-parent-legacy-mark",
+			"threadParentCreatedAt": now, "roomId": "r-1", "siteId": "site-a",
+			"lastMsgAt": now, "lastMsgId": "msg-reply-1",
+			"replyAccounts": []string{"parent-user"},
+			"createdAt":     now, "updatedAt": now,
+		})
+		require.NoError(t, err)
+		assert.False(t, read(t, "msg-parent-legacy-mark").ParentSubscribed,
+			"an absent field must read as false so the next reply repairs the room")
+	})
+
+	t.Run("marking a room that does not exist is not an error", func(t *testing.T) {
+		require.NoError(t, store.MarkParentSubscribed(ctx, "tr-does-not-exist"))
+	})
+}
+
+func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	newSub := func(id, account string) *model.ThreadSubscription {
+		return &model.ThreadSubscription{ID: id, ParentMessageID: "msg-parent", RoomID: "r-1",
+			ThreadRoomID: "tr-1", UserID: "u-1", UserAccount: account, SiteID: "site-a",
+			CreatedAt: now, UpdatedAt: now}
+	}
+	readSub := func(t *testing.T, account string) model.ThreadSubscription {
+		t.Helper()
+		var got model.ThreadSubscription
+		require.NoError(t, db.Collection("thread_subscriptions").
+			FindOne(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": account}).Decode(&got))
+		return got
+	}
+
+	t.Run("absent — inserts the subscription seeded with lastSeenAt", func(t *testing.T) {
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, newSub("ts-ins", "alice"), now))
+
+		got := readSub(t, "alice")
+		assert.Equal(t, "ts-ins", got.ID)
+		assert.Equal(t, "msg-parent", got.ParentMessageID)
+		require.NotNil(t, got.LastSeenAt, "a new subscription is seeded with lastSeenAt by the $max")
+		assert.Equal(t, now, got.LastSeenAt.UTC().Truncate(time.Millisecond))
+	})
+
+	t.Run("present — advances lastSeenAt without overwriting the document", func(t *testing.T) {
+		later := now.Add(10 * time.Minute)
+		candidate := newSub("ts-other", "bob")
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, candidate, now))
+
+		candidate.ID = "ts-would-clobber"
+		candidate.ParentMessageID = "msg-other-parent"
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, candidate, later))
+
+		got := readSub(t, "bob")
+		assert.Equal(t, "ts-other", got.ID, "$setOnInsert must not overwrite an existing subscription")
+		assert.Equal(t, "msg-parent", got.ParentMessageID)
+		require.NotNil(t, got.LastSeenAt)
+		assert.Equal(t, later, got.LastSeenAt.UTC().Truncate(time.Millisecond))
+	})
+
+	t.Run("lastSeenAt never moves backward", func(t *testing.T) {
+		later := now.Add(time.Hour)
+		sub := newSub("ts-max", "carol")
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, later))
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, now))
+
+		got := readSub(t, "carol")
+		require.NotNil(t, got.LastSeenAt)
+		assert.Equal(t, later, got.LastSeenAt.UTC().Truncate(time.Millisecond), "$max only moves forward")
+	})
+
+	// Concurrent replies by the SAME account in one thread all miss the filter and all try
+	// to insert; the unique (threadRoomId, userAccount) index lets exactly one through. The
+	// losers must recover by replaying the $max rather than failing the reply.
+	t.Run("concurrent replies by one account — no error, one document, newest lastSeenAt", func(t *testing.T) {
+		const callers = 8
+		var (
+			wg    sync.WaitGroup
+			mu    sync.Mutex
+			errs  []error
+			start = make(chan struct{})
+		)
+		newest := now.Add(time.Duration(callers-1) * time.Minute)
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				sub := newSub(fmt.Sprintf("ts-race-%d", i), "dave")
+				<-start
+				if err := store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, now.Add(time.Duration(i)*time.Minute)); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		require.Empty(t, errs, "the losers of the insert race recover by replaying the $max")
+		n, err := db.Collection("thread_subscriptions").
+			CountDocuments(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": "dave"})
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, n)
+
+		got := readSub(t, "dave")
+		require.NotNil(t, got.LastSeenAt)
+		assert.Equal(t, newest, got.LastSeenAt.UTC().Truncate(time.Millisecond))
+	})
+
+	// The recovery is narrow on purpose: a duplicate on any OTHER unique key matches nothing
+	// on the replayed $max, and must surface instead of silently dropping the write.
+	t.Run("duplicate on a different unique key is returned, not swallowed", func(t *testing.T) {
+		owner := newSub("ts-owned", "erin")
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, owner, now))
+
+		// Same _id as erin's document, but a (threadRoomId, userAccount) that matches nothing:
+		// the upsert tries to insert and collides on _id alone.
+		clash := newSub("ts-owned", "frank")
+		clash.ThreadRoomID = "tr-unrelated"
+		err := store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, clash, now)
+		require.Error(t, err, "an _id collision is a real conflict, not the same-account race")
+		assert.True(t, mongo.IsDuplicateKeyError(err), "the original duplicate-key error must survive: %v", err)
 	})
 }
 
@@ -1319,13 +1644,13 @@ func TestThreadStoreMongo_UpdateThreadRoomLastMessage(t *testing.T) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	require.NoError(t, store.CreateThreadRoom(ctx, room))
-
-	later := now.Add(10 * time.Minute)
-	err := store.UpdateThreadRoomLastMessage(ctx, "tr-update", "msg-5", []string{"bob"}, later)
+	_, _, err := store.EnsureThreadRoom(ctx, room)
 	require.NoError(t, err)
 
-	got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-update")
+	later := now.Add(10 * time.Minute)
+	require.NoError(t, store.UpdateThreadRoomLastMessage(ctx, "tr-update", "msg-5", []string{"bob"}, later))
+
+	got, _, err := store.EnsureThreadRoom(ctx, room)
 	require.NoError(t, err)
 	assert.Equal(t, "msg-5", got.LastMsgID)
 	assert.Equal(t, later, got.LastMsgAt.UTC().Truncate(time.Millisecond))

@@ -35,11 +35,17 @@ type Store interface {
 
 // ThreadStore defines MongoDB operations for thread room and subscription management.
 type ThreadStore interface {
-	CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error
+	// EnsureThreadRoom returns the thread room for room.ParentMessageID, creating it
+	// from room when absent — one upserting round trip, so the hot subsequent-reply
+	// path no longer pays a failed insert against the unique index followed by a read.
+	// created is true iff this call inserted the room, i.e. this is the first reply.
+	EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (stored *model.ThreadRoom, created bool, err error)
 	// MarkParentStamped records that the parent's thread_room_id was written, so
 	// later replies stop re-writing it.
 	MarkParentStamped(ctx context.Context, threadRoomID string) error
-	GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error)
+	// MarkParentSubscribed records that the parent author's thread subscription
+	// has been written, so subsequent replies stop re-writing it. Idempotent.
+	MarkParentSubscribed(ctx context.Context, threadRoomID string) error
 	InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// MarkThreadSubscriptionMention flags sub as mentioned, unless the account
@@ -66,6 +72,13 @@ type ThreadStore interface {
 	// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
 	// redelivery; accounts not subscribed simply match nothing.
 	AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error
+	// UpsertThreadSubscriptionAdvancingLastSeen creates sub's (threadRoomId, userAccount)
+	// subscription when missing and advances its lastSeenAt to at, in a single write. It
+	// merges a $setOnInsert upsert with AdvanceThreadSubscriptionLastSeen for the replier
+	// on the hot path: replying implies the replier has seen up to their own reply (#396),
+	// so a new subscription is seeded with lastSeenAt=at and an existing one is moved
+	// forward, never backward.
+	UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error
 }
 
 // DegradeStore persists the site's history-degraded marker. Satisfied by

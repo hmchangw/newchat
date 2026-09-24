@@ -14,11 +14,6 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
-var (
-	errThreadRoomExists   = errors.New("thread room already exists")
-	errThreadRoomNotFound = errors.New("thread room not found")
-)
-
 type threadStoreMongo struct {
 	threadRooms         *mongo.Collection
 	threadSubscriptions *mongo.Collection
@@ -54,39 +49,72 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 	return s.subIndex.Ready(ctx)
 }
 
-func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
-	// The duplicate-key branch is the thread's identity guarantee, so the index is confirmed first;
-	// a failure NAKs (see mongoutil.IndexGate). The subscriptions' key is confirmed here too: the room
-	// insert is the point of no return for a first reply (a redelivery takes the subsequent-reply path).
+// EnsureThreadRoom resolves the thread room for room.ParentMessageID in one round trip:
+// an upserting FindOneAndUpdate whose $setOnInsert seeds the room only when absent. The hot
+// subsequent-reply path matches the existing room — no insert, no duplicate key — where the
+// previous insert-then-read pattern paid a rejected write plus a follow-up find.
+//
+// created comes from the server rather than from the returned document: asking for the
+// PRE-image means an insert has no document to return and reports ErrNoDocuments, while a
+// match returns the room that was already there. Comparing the returned _id to the
+// candidate's would instead make created mean "the stored room happens to carry the id I
+// offered", which is the same answer only while every caller mints a fresh id — a
+// precondition this contract should not depend on. On an insert the stored room IS the
+// candidate, so returning it loses nothing; $setOnInsert changes nothing on a match, so the
+// pre-image and post-image are identical there too.
+func (s *threadStoreMongo) EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (*model.ThreadRoom, bool, error) {
+	// The unique parentMessageId index is what keeps one parent to one thread room: without
+	// it two concurrent first replies both miss the filter and both insert. So it is confirmed
+	// before the write, and a failure NAKs (see mongoutil.IndexGate). The subscriptions' key is
+	// confirmed here too: the room insert is the point of no return for a first reply (a
+	// redelivery takes the subsequent-reply path).
 	if err := s.parentIndex.Ready(ctx); err != nil {
-		return err
+		return nil, false, err
 	}
 	if err := s.subIndex.Ready(ctx); err != nil {
-		return err
+		return nil, false, err
 	}
-	toInsert := *room
-	if toInsert.ReplyAccounts == nil {
-		toInsert.ReplyAccounts = []string{}
+	candidate := *room
+	if candidate.ReplyAccounts == nil {
+		candidate.ReplyAccounts = []string{}
 	}
-	_, err := s.threadRooms.InsertOne(ctx, &toInsert)
-	if err != nil {
-		if mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("insert thread room: %w", errThreadRoomExists)
-		}
-		return fmt.Errorf("insert thread room: %w", err)
-	}
-	return nil
-}
+	// Deliberately unprojected, unlike the repo default. Both reads below hydrate a
+	// whole *model.ThreadRoom for handler code whose field set grows, so a projection
+	// naming today's fields would not fail when a new one is read — it would decode as
+	// the zero value and change behaviour silently. One small document per reply is
+	// the price; this matches the GetThreadRoomByParentMessageID read it replaces.
+	filter := bson.M{"parentMessageId": candidate.ParentMessageID}
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.Before)
 
-func (s *threadStoreMongo) GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error) {
-	var room model.ThreadRoom
-	if err := s.threadRooms.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}).Decode(&room); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, errThreadRoomNotFound)
+	var existing model.ThreadRoom
+	err := s.threadRooms.FindOneAndUpdate(ctx, filter, bson.M{"$setOnInsert": candidate}, opts).Decode(&existing)
+	switch {
+	case err == nil:
+		// A pre-image existed, so this call matched rather than inserted.
+		return &existing, false, nil
+	case errors.Is(err, mongo.ErrNoDocuments):
+		// No pre-image: the upsert inserted, and what it inserted is the candidate.
+		return &candidate, true, nil
+	case mongo.IsDuplicateKeyError(err):
+		// Probably lost the insert race to a concurrent first reply, in which case the
+		// room exists now and reading it back resolves this call.
+		var stored model.ThreadRoom
+		ferr := s.threadRooms.FindOne(ctx, filter).Decode(&stored)
+		switch {
+		case ferr == nil:
+			return &stored, false, nil
+		case errors.Is(ferr, mongo.ErrNoDocuments):
+			// Nothing is stored for this parent, so the duplicate was not the race —
+			// it came from some other unique key, an _id already owned by an unrelated
+			// thread room being the likely one. Reporting that as a failed post-race
+			// read would diagnose a genuine conflict as someone else's success.
+			return nil, false, fmt.Errorf("ensure thread room for parent %s: %w", candidate.ParentMessageID, err)
+		default:
+			return nil, false, fmt.Errorf("read thread room after upsert race for parent %s: %w", candidate.ParentMessageID, ferr)
 		}
-		return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
+	default:
+		return nil, false, fmt.Errorf("ensure thread room for parent %s: %w", candidate.ParentMessageID, err)
 	}
-	return &room, nil
 }
 
 // MarkParentStamped sets parentStamped on the thread room after the parent's
@@ -121,6 +149,56 @@ func (s *threadStoreMongo) UpsertThreadSubscription(ctx context.Context, sub *mo
 	update := bson.M{"$setOnInsert": sub}
 	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
 		return fmt.Errorf("upsert thread subscription: %w", err)
+	}
+	return nil
+}
+
+// UpsertThreadSubscriptionAdvancingLastSeen creates the (threadRoomId, userAccount)
+// subscription via $setOnInsert when missing and advances its lastSeenAt to at via $max,
+// in one write. It folds a $setOnInsert upsert and AdvanceThreadSubscriptionLastSeen for
+// the replier on the hot path. lastSeenAt is owned exclusively by $max and never appears
+// under $setOnInsert, so the two operators do not conflict: a new subscription is seeded
+// with lastSeenAt=at, an existing one only moves forward.
+func (s *threadStoreMongo) UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error {
+	if err := s.subIndex.Ready(ctx); err != nil {
+		return err
+	}
+	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
+	update := bson.M{
+		"$setOnInsert": bson.M{
+			"_id":             sub.ID,
+			"parentMessageId": sub.ParentMessageID,
+			"roomId":          sub.RoomID,
+			"threadRoomId":    sub.ThreadRoomID,
+			"userId":          sub.UserID,
+			"userAccount":     sub.UserAccount,
+			"siteId":          sub.SiteID,
+			"hasMention":      sub.HasMention,
+			"createdAt":       sub.CreatedAt,
+			"updatedAt":       sub.UpdatedAt,
+		},
+		"$max": bson.M{"lastSeenAt": at},
+	}
+	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("upsert thread subscription advancing lastSeen: %w", err)
+		}
+		// Lost the insert race to a concurrent reply by the same account in this thread:
+		// both missed the filter, both tried to insert, and the unique
+		// (threadRoomId, userAccount) index rejected this one. The subscription exists
+		// now, so replay the $max alone — without it the reply would NAK and the
+		// replier's lastSeenAt would ride on redelivery.
+		res, raceErr := s.threadSubscriptions.UpdateOne(ctx, filter, bson.M{"$max": bson.M{"lastSeenAt": at}})
+		if raceErr != nil {
+			return fmt.Errorf("advance thread subscription lastSeen after upsert race: %w", raceErr)
+		}
+		// Nothing matched (threadRoomId, userAccount), so the duplicate came from some
+		// other unique key — an _id already owned by an unrelated subscription, say — and
+		// this is a genuine conflict rather than the race above. Swallowing it would drop
+		// the write silently.
+		if res.MatchedCount == 0 {
+			return fmt.Errorf("upsert thread subscription advancing lastSeen: %w", err)
+		}
 	}
 	return nil
 }
@@ -192,6 +270,19 @@ func (s *threadStoreMongo) AdvanceThreadSubscriptionLastSeen(ctx context.Context
 		bson.M{"$max": bson.M{"lastSeenAt": at}},
 	); err != nil {
 		return fmt.Errorf("advance thread lastSeenAt for %q in thread room %q: %w", account, threadRoomID, err)
+	}
+	return nil
+}
+
+// MarkParentSubscribed flips thread_rooms.parentSubscribed, the record that the
+// parent author's subscription for this thread has been written. Idempotent: a
+// re-run writes the same value.
+func (s *threadStoreMongo) MarkParentSubscribed(ctx context.Context, threadRoomID string) error {
+	_, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, bson.M{
+		"$set": bson.M{"parentSubscribed": true},
+	})
+	if err != nil {
+		return fmt.Errorf("mark parent subscribed on thread room %s: %w", threadRoomID, err)
 	}
 	return nil
 }
