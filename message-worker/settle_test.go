@@ -6,16 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/gocql/gocql"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/caarlos0/env/v11"
+
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/retrylane"
 )
 
 // fakeCQLError is a gocql.RequestError double. gocql v1.7.0 returns its
@@ -44,7 +50,11 @@ type fakeJetStreamMsg struct {
 	nakDelay     time.Duration
 	// ackErr forces the Ack network call to fail, which means nothing was destroyed.
 	ackErr error
+	// headers carry X-Retry-Attempt for a delivery that arrived via the retry lane.
+	headers nats.Header
 }
+
+func (m *fakeJetStreamMsg) Headers() nats.Header { return m.headers }
 
 func (m *fakeJetStreamMsg) Subject() string { return m.subject }
 func (m *fakeJetStreamMsg) Data() []byte    { return m.data }
@@ -138,7 +148,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("success acks", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
 		msg := &fakeJetStreamMsg{numDelivered: 1}
-		h.settle(context.Background(), msg, nil)
+		h.settle(context.Background(), msg, h.laneDisposition(nil), nil)
 		assert.True(t, msg.acked)
 		assert.False(t, msg.naked)
 	})
@@ -146,7 +156,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("permanent decode failure acks", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
 		msg := &fakeJetStreamMsg{numDelivered: 1}
-		h.settle(context.Background(), msg, errcode.Permanent(errcode.BadRequest("malformed message event")))
+		h.settle(context.Background(), msg, h.laneDisposition(nil), errcode.Permanent(errcode.BadRequest("malformed message event")))
 		assert.True(t, msg.acked, "poison bytes are dropped ahead of every other error case — unchanged")
 		assert.False(t, msg.naked)
 	})
@@ -154,7 +164,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("non-history failure naks indefinitely and never drops", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
 		msg := &fakeJetStreamMsg{numDelivered: 500}
-		h.settle(context.Background(), msg, errors.New("lookup user: mongo down"))
+		h.settle(context.Background(), msg, h.laneDisposition(nil), errors.New("lookup user: mongo down"))
 
 		assert.True(t, msg.naked)
 		assert.False(t, msg.acked,
@@ -165,7 +175,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("infra-class failure naks indefinitely", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
 		msg := &fakeJetStreamMsg{numDelivered: 500}
-		h.settle(context.Background(), msg, infraClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), infraClassErr())
 		assert.True(t, msg.naked)
 		assert.False(t, msg.acked)
 		// The shared schedule jitters each delay into [half, full] of its entry, so
@@ -179,7 +189,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("request-class failure naks inside the retry window", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
 		msg := &fakeJetStreamMsg{numDelivered: 3} // 6s accumulated, window is 10s
-		h.settle(context.Background(), msg, requestClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg.naked)
 		assert.False(t, msg.acked)
 	})
@@ -187,7 +197,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("request-class failure drops past the retry window", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
 		msg := &fakeJetStreamMsg{numDelivered: 4} // 36s accumulated, window is 10s
-		h.settle(context.Background(), msg, requestClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg.acked, "a message Cassandra rejects deterministically is retired")
 		assert.False(t, msg.naked)
 	})
@@ -195,7 +205,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("the kill switch turns a drop back into a nak", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, newDropPolicy(10*time.Second, false, 10, nil))
 		msg := &fakeJetStreamMsg{numDelivered: 400}
-		h.settle(context.Background(), msg, requestClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg.naked, "HISTORY_DROP_ENABLED=false is the operator's brake on a migration-wide wave")
 		assert.False(t, msg.acked)
 	})
@@ -207,14 +217,14 @@ func TestHandler_Settle(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, true, shortWindow)
 		require.True(t, h.degrade.Degraded())
 		msg := &fakeJetStreamMsg{numDelivered: 4}
-		h.settle(context.Background(), msg, requestClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg.acked, "a request-class failure is dropped on its own evidence, degraded or not")
 	})
 
 	t.Run("unknown delivery count retries instead of dropping", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, newDropPolicy(time.Nanosecond, true, 10, nil))
 		msg := &metadataErrMsg{fakeJetStreamMsg{numDelivered: 99}}
-		h.settle(context.Background(), msg, requestClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg.naked, "without a delivery count there is no retry time to measure")
 		assert.False(t, msg.acked)
 	})
@@ -227,7 +237,7 @@ func TestHandler_Settle(t *testing.T) {
 		readErr := fmt.Errorf("resolve thread parent createdAt: %w",
 			historyWriteError{errors.New("gocql: no hosts available")})
 		msg := &fakeJetStreamMsg{numDelivered: 1}
-		h.settle(context.Background(), msg, readErr)
+		h.settle(context.Background(), msg, h.laneDisposition(nil), readErr)
 
 		assert.True(t, h.degrade.Degraded(),
 			"a read failure at the onset of an outage must set the marker before any write has failed")
@@ -242,7 +252,7 @@ func TestHandler_Settle(t *testing.T) {
 		// Marking on it turns one bad message into a site-wide "history is incomplete".
 		h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
 		msg := &fakeJetStreamMsg{numDelivered: 2}
-		h.settle(context.Background(), msg, requestClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg.naked, "inside the window it still retries")
 		assert.False(t, h.degrade.Degraded(),
 			"one unwritable row must not tell every client on the site that history is incomplete")
@@ -251,7 +261,7 @@ func TestHandler_Settle(t *testing.T) {
 	t.Run("an untagged parent-not-yet-persisted failure naks", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
 		msg := &fakeJetStreamMsg{numDelivered: 900}
-		h.settle(context.Background(), msg,
+		h.settle(context.Background(), msg, h.laneDisposition(nil),
 			historyWriteError{errors.New("thread parent p-1 not yet persisted in messages_by_id")})
 		assert.True(t, msg.naked, "a parent still replaying is infra class: unrecognised errors retry")
 		assert.False(t, msg.acked)
@@ -265,13 +275,13 @@ func TestHandler_Settle(t *testing.T) {
 		// config is a duration and not a delivery count.
 		under := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
 		msg16 := &fakeJetStreamMsg{numDelivered: 16}
-		under.settle(context.Background(), msg16, requestClassErr())
+		under.settle(context.Background(), msg16, under.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg16.naked)
 		assert.False(t, msg16.acked)
 
 		over := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
 		msg17 := &fakeJetStreamMsg{numDelivered: 17}
-		over.settle(context.Background(), msg17, requestClassErr())
+		over.settle(context.Background(), msg17, over.laneDisposition(nil), requestClassErr())
 		assert.True(t, msg17.acked)
 		assert.False(t, msg17.naked)
 	})
@@ -313,7 +323,7 @@ func TestHandler_Settle_InfraClassNeverDrops(t *testing.T) {
 			for _, numDelivered := range []uint64{1, 5, 500, 100000} {
 				h := newDegradeStateHandler(t, nil, noopPublish, false, policy())
 				msg := &fakeJetStreamMsg{numDelivered: numDelivered}
-				h.settle(context.Background(), msg, err)
+				h.settle(context.Background(), msg, h.laneDisposition(nil), err)
 
 				require.False(t, msg.acked,
 					"numDelivered=%d: an infra-class failure must never be dropped — acking here is the silent message loss this branch exists to remove", numDelivered)
@@ -359,7 +369,7 @@ func TestHandler_Settle_DropLogNamesTheMessageWithoutLeakingIt(t *testing.T) {
 	require.NoError(t, err)
 
 	msg := &fakeJetStreamMsg{subject: "chat.msg.canonical.site-a.created", data: payload, numDelivered: 40}
-	h.settle(context.Background(), msg, requestClassErr())
+	h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 	require.True(t, msg.acked)
 
 	fields := rec.fieldsOf(slog.LevelError,
@@ -444,7 +454,7 @@ func TestHandler_Settle_SuppressedDropsNameTheirReason(t *testing.T) {
 			for range tt.settles {
 				rec.reset()
 				msg = &fakeJetStreamMsg{numDelivered: 40, data: []byte(`{"message":{"id":"m-1","roomId":"r-1"}}`)}
-				h.settle(context.Background(), msg, leakyErr)
+				h.settle(context.Background(), msg, h.laneDisposition(nil), leakyErr)
 			}
 
 			assert.True(t, msg.naked, "a suppressed drop must retry")
@@ -479,10 +489,95 @@ func TestHandler_Settle_FailedAckOnDropIsNotADrop(t *testing.T) {
 
 	msg := &fakeJetStreamMsg{numDelivered: 40, data: []byte(`{"message":{"id":"m-1","roomId":"r-1"}}`),
 		ackErr: errors.New("nats: connection closed")}
-	h.settle(context.Background(), msg, requestClassErr())
+	h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 
 	assert.False(t, msg.acked)
 	fields := rec.fieldsOf(slog.LevelError, "failed to ack dropped message — it will be redelivered")
 	require.NotNil(t, fields, "an unacked drop must be visible as a non-drop")
 	assert.Equal(t, "m-1", fields["message_id"])
+}
+
+// retryLaneHeaders is a delivery that arrived on RETRY-{siteID} after `prior`
+// deliveries on the hot lane.
+func retryLaneHeaders(prior int) nats.Header {
+	h := nats.Header{}
+	h.Set(retrylane.HeaderAttempt, strconv.Itoa(prior))
+	return h
+}
+
+func TestRetriedFor_HotLaneChargesTheFastSchedule(t *testing.T) {
+	slow := retrylane.SlowBackoff(3, jsretry.DefaultBackoff)
+
+	got, measurable := retriedFor(&fakeJetStreamMsg{numDelivered: 4}, slow)
+
+	require.True(t, measurable)
+	assert.Equal(t, jsretry.MinWindow(jsretry.DefaultBackoff, 4), got,
+		"a message with no retry-lane header never left the hot consumer")
+}
+
+func TestRetriedFor_UnmeasurableMessageIsNeverDestroyed(t *testing.T) {
+	_, measurable := retriedFor(&metadataErrMsg{}, jsretry.DefaultBackoff)
+
+	assert.False(t, measurable, "no delivery count means no window, so the caller must retry")
+}
+
+// The regression this merge exists for. RETRY-{siteID} counts a message's
+// deliveries from 1, so measuring the window from NumDelivered alone silently
+// resets an escalated message's retry history — and the drop it is owed never
+// comes, because MinWindow over the fast schedule cannot reach an hour from two
+// deliveries. The message instead exhausts the retry consumer and is abandoned
+// with no drop log, no counter and no rate cap: the silent loss the drop policy
+// was written to remove, reintroduced through the lane.
+func TestRetriedFor_RetryLaneSpansBothSchedules(t *testing.T) {
+	const (
+		prior     = 4 // deliveries on the hot lane before escalation
+		delivered = 6 // deliveries since, on RETRY
+	)
+	slow := retrylane.SlowBackoff(3, jsretry.DefaultBackoff)
+	msg := &fakeJetStreamMsg{numDelivered: delivered, headers: retryLaneHeaders(prior)}
+
+	got, measurable := retriedFor(msg, slow)
+
+	require.True(t, measurable)
+	want := jsretry.MinWindow(jsretry.DefaultBackoff, prior) + jsretry.MinWindow(slow, delivered)
+	assert.Equal(t, want, got)
+
+	naive := jsretry.MinWindow(jsretry.DefaultBackoff, delivered)
+	assert.Greater(t, got, naive,
+		"the pre-merge formula read an escalated message as barely retried at all")
+}
+
+// End-to-end through the policy: an escalated poison row must still be dropped,
+// with the drop accounted, rather than NAKed past its window forever.
+func TestSettle_DropsAnEscalatedRequestClassFailure(t *testing.T) {
+	slow := retrylane.SlowBackoff(3, jsretry.DefaultBackoff)
+	// Enough cumulative retry time on both schedules to clear a one-hour window.
+	msg := &fakeJetStreamMsg{
+		data:         []byte(`{"message":{"id":"m-1","roomId":"room-1"}}`),
+		numDelivered: 14,
+		headers:      retryLaneHeaders(5),
+	}
+	retried, measurable := retriedFor(msg, slow)
+	require.True(t, measurable)
+	require.Greater(t, retried, time.Hour, "fixture must clear the drop window")
+
+	h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
+	h.slowBackoff = slow
+
+	h.settle(context.Background(), msg, h.slowDisposition(), requestClassErr())
+
+	assert.True(t, msg.acked, "the drop is an Ack; NAKing forever is the silent loss")
+	assert.False(t, msg.naked)
+}
+
+// The other half of the invariant: settle can only be the sole give-up authority
+// if JetStream never retires an escalated message behind it.
+func TestRetryConsumerConfig_NeverRetiresBehindSettle(t *testing.T) {
+	s := &retrylane.Settings{}
+	require.NoError(t, env.Parse(s))
+
+	cc := retryConsumerConfig("site-a", s, retrylane.SlowBackoff(3, jsretry.DefaultBackoff))
+
+	assert.Equal(t, -1, cc.MaxDeliver,
+		"a finite cap lets JetStream abandon a message with none of settle's accounting")
 }

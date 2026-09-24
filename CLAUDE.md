@@ -351,7 +351,14 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 
 ### JetStream Redelivery Backoff
 
-Three levers space redeliveries, and they fire on **disjoint** failure modes. Set all three.
+Four levers govern redelivery. `BackOff` fires on a failure mode disjoint from the
+rest; `jsretry.Heartbeat` runs the other way, holding a live handler's deadline open
+rather than spacing a retry; and `pkg/retrylane` shares `jsretry`'s trigger but moves
+where the wait happens once the fast rungs are spent. Consider all four; set the ones
+that apply. The first two govern every consumer. The last two are selective:
+`jsretry.Heartbeat` only where honest slow work needs its deadline held open, and
+`pkg/retrylane` only where escalation is safe — it is opt-in per service and excluded
+by design from the ordering-sensitive lanes named below.
 
 - **Consumer `BackOff`** (server-side, `pkg/stream.ConsumerSettings`) fires only when a
   message goes un-acked past `AckWait` — pod crash, OOM, hang, or a handler slower than
@@ -372,6 +379,32 @@ Three levers space redeliveries, and they fire on **disjoint** failure modes. Se
   budget hands the message back to that lever. Note it does not un-wedge the handler
   goroutine, which keeps its worker slot until it returns. Adopted by `room-worker`;
   every other consumer still rides `AckWait` alone.
+- **`pkg/retrylane`** (client-side escalation) fires when a handler's transient failures
+  exhaust the in-place fast rungs. It republishes the message to `RETRY-{siteID}` and Acks,
+  so the long waits stop occupying the hot consumer's ack-pending budget — a Nak'd-with-delay
+  message holds its slot for the whole backoff, so at ~5 failures/s the default 1000-slot
+  budget is exhausted in ~200s and the consumer stalls for healthy traffic too. The total
+  retry budget is unchanged — the retry consumer's `MaxDeliver` default is reinterpreted
+  against the slow schedule to cover `stream.OutageRetryWindow`, because escalation Acks
+  the hot message and ends the hot consumer's budget — only the occupancy moves. Opt-in per service via
+  `RETRY_LANE_ENABLED` (`pkg/retrylane.Settings`, envPrefix `RETRY_`, default `false` —
+  disabling stops new escalations but the retry consumer keeps draining what's already
+  parked); excluded by design from the FIFO lanes (`outbox-worker` ordered consumers,
+  `hr-sync-worker`, both `MaxAckPending=1`) and from `search-sync-worker`, which rely on
+  delivery order that escalation does not preserve.
+  **A service that owns its own give-up decision must carry it across escalation.**
+  `RETRY-{siteID}` counts a message's deliveries from 1, so any policy measured from
+  `NumDelivered` silently resets when the lane escalates, and the message is then
+  abandoned by the retry consumer's `MaxDeliver` instead — with none of that policy's
+  logging, counters or rate caps, which is the silent loss such a policy exists to
+  remove. `message-worker` is the one such service: `settle.go` drops a request-class
+  Cassandra failure past `INVALID_RETRY_WINDOW`, so its `retriedFor` reads the
+  cumulative `X-Retry-Attempt` header (`retrylane.PriorAttempts`) and charges
+  post-escalation deliveries at the slow schedule, and its retry consumer runs
+  `MaxDeliver=-1` so JetStream never retires a message behind that decision. Both lanes
+  settle through the same policy via a `disposition`. A service with no give-up path of
+  its own (`notification-worker`, `broadcast-worker`) keeps the shared outage-budget cap,
+  which is what retires a message for it.
 
 Three server rules the code must respect (`nats-io/nats-server`, `server/consumer.go`):
 

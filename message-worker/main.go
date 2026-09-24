@@ -7,10 +7,14 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
@@ -28,6 +32,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -73,7 +78,11 @@ type config struct {
 	Atrest             atrest.Config
 	Vault              atrest.VaultConfig
 	DebugLog           logctx.Config `envPrefix:"DEBUG_LOG_"`
-	DegradeRefresh     time.Duration `env:"DEGRADE_REFRESH_INTERVAL" envDefault:"5s"`
+	// Retry is the tiered-redelivery lane; disabled by default. See pkg/retrylane.
+	// Only meaningful for default mode's live .created feed — teamsbatch.go's
+	// Teams-migration path settles with plain jsretry.Settle regardless of it.
+	Retry          retrylane.Settings `envPrefix:"RETRY_"`
+	DegradeRefresh time.Duration      `env:"DEGRADE_REFRESH_INTERVAL" envDefault:"5s"`
 	// DegradeMarkDelay is how long history writes must keep failing before the site
 	// is marked degraded. The marker is site-wide and is held for drainTailGrace (20
 	// minutes) past the drain, so marking on the first failed write turned any
@@ -101,6 +110,15 @@ type config struct {
 	MaxDropsPerMinute uint64 `env:"MAX_DROPS_PER_MINUTE" envDefault:"10"`
 }
 
+// Durables for the two consumers a message-worker pod can bind, one per MODE.
+// Shared between buildConsumerConfig and the retry lane so the lane's Consumer
+// identity (which routes an escalation's subject back to this consumer) can
+// never drift from the hot consumer's own Durable.
+const (
+	defaultConsumerDurable = "message-worker"
+	teamsConsumerDurable   = "message-worker-teams"
+)
+
 func main() {
 	logctx.SetupDefault(os.Stdout)
 	pretouchJSON()
@@ -115,6 +133,18 @@ func main() {
 	if cfg.Mode != "default" && cfg.Mode != "teams" {
 		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
 		os.Exit(1)
+	}
+
+	// A retry lane that cannot drain is worse than none: the failure is silent, and
+	// the consumer binds even with the lane off (see retrylane.Settings.Validate).
+	// Default mode only — teams mode neither binds the retry consumer nor settles
+	// through the lane, so failing it over a knob it never reads would take the
+	// Teams-migration worker down for a value that cannot affect it.
+	if cfg.Mode == "default" {
+		if err := cfg.Retry.Validate(); err != nil {
+			slog.Error("invalid retry lane config", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	if err := cfg.Pool.Validate(); err != nil {
@@ -268,6 +298,30 @@ func main() {
 		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
+
+	// retryLane escalates a message off the hot consumer's ack-pending budget once its
+	// in-place fast-rung budget is spent. It backs only the default-mode live .created
+	// feed handled by HandleJetStreamMsg — teamsbatch.go's Teams-migration path settles
+	// with plain jsretry.Settle regardless, a different stream with batch semantics,
+	// out of scope. RETRY_LANE_ENABLED gates new escalations only: the retry consumer
+	// bound below (default mode only) drains regardless of the flag, so disabling it
+	// cannot strand messages already parked on RETRY-{siteID}. See pkg/retrylane.
+	// Derived here rather than beside the consumer config below because three things
+	// need it: the retry consumer's MaxDeliver sizing, the retry loop's in-place
+	// settling, and — the reason it is hoisted — retriedFor, which charges a
+	// post-escalation delivery at these rungs instead of the fast ones.
+	slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.DefaultBackoff)
+	retryLane := &retrylane.Lane{
+		Consumer:  defaultConsumerDurable,
+		SiteID:    cfg.SiteID,
+		Enabled:   cfg.Retry.Enabled,
+		FastSteps: cfg.Retry.FastSteps,
+		Publish: func(ctx context.Context, subj string, data []byte, hdr nats.Header, msgID string) error {
+			_, err := js.PublishMsg(ctx, &nats.Msg{Subject: subj, Data: data, Header: hdr},
+				jetstream.WithMsgID(msgID))
+			return err
+		},
+	}
 	publishFn := func(ctx context.Context, subj string, data []byte, msgID string) error {
 		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
 		// verbose-tracing intent ride onto downstream badge/inbox events.
@@ -331,17 +385,21 @@ func main() {
 		return cons.Info(ctx)
 	}, 15*time.Second)
 
+	// Stored once the retry consumer is bound, below. The handoff is atomic because
+	// the drain callback runs on the refresh goroutine, while the bind happens on
+	// this one; the tracker has to exist first, since the handler the retry loop
+	// processes with depends on it.
+	var retryBacklog atomic.Pointer[consumerInfoFunc]
 	degradeTr := newDegradeTracker(histdegrade.NewStore(db), cfg.SiteID,
 		func(ctx context.Context) (uint64, uint64, error) {
-			ci, err := cons.Info(ctx)
-			if err != nil {
-				return 0, 0, fmt.Errorf("consumer info: %w", err)
-			}
 			// NumAckPending rides along with NumPending: history has caught up only
 			// when nothing is left to deliver AND nothing is still cycling through
-			// redelivery.
-			// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
-			return ci.NumPending, uint64(ci.NumAckPending), nil
+			// redelivery — on either lane.
+			var retry consumerInfoFunc
+			if f := retryBacklog.Load(); f != nil {
+				retry = *f
+			}
+			return historyBacklog(ctx, cons.Info, retry)
 		}, mtr, nil, cfg.DegradeMarkDelay)
 	// tickAfterInterval, not tickOnStart: the marker is read at startup by the
 	// first message that needs it, and an immediate tick would race the consumer
@@ -355,7 +413,8 @@ func main() {
 	// on the site that their history is incomplete.
 	handler := NewHandler(historyStore{store}, us, threadStore, cfg.SiteID, publishFn, mtr, degradeTr,
 		newDropPolicy(cfg.InvalidRetryWindow, cfg.HistoryDropEnabled, cfg.MaxDropsPerMinute, nil),
-		withPersistenceMetrics(domainMetrics))
+		withPersistenceMetrics(domainMetrics),
+		withRetryLane(retryLane, jsretry.DefaultBackoff, slowBackoff))
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
@@ -416,10 +475,109 @@ func main() {
 					<-sem
 					wg.Done()
 				}()
-				process(msgCtx, msg)
+				// tracked.Escalated is derived per message: the hook closes over this
+				// delivery's own recorder, so passing it down (rather than mutating a
+				// shared Lane) keeps the escalation label race-free across goroutines.
+				process(msgCtx, msg, tracked.Escalated)
 			}(msgCtx, msg)
 		}
 	}()
+
+	// The retry consumer only exists for default mode — HandleJetStreamMsg (the
+	// only settler that ever escalates onto RETRY-{siteID}) is never invoked in
+	// teams mode, whose filter subject excludes it entirely. Left nil in teams
+	// mode; the shutdown step below checks for that before stopping it.
+	var (
+		retryIter            o11ynats.MessagesContext
+		retryConsumerMetrics *natsmetrics.Consumer
+		retryCons            o11ynats.Consumer
+		retryConsumerCfg     jetstream.ConsumerConfig
+	)
+	if cfg.Mode == "default" {
+		retryStreamCfg := stream.Retry(cfg.SiteID)
+		retryConsumerCfg = retryConsumerConfig(cfg.SiteID, &cfg.Retry, slowBackoff)
+		retryConsumerMetrics = sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+			Site:   cfg.SiteID,
+			Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
+		})
+		retryConsumerMetrics.LoopStopped(ctx)
+		// The retry consumer binds whenever RETRY-{siteID} exists — see the
+		// rollback-asymmetry note above. The one tolerated failure is the stream
+		// simply not being provisioned while the lane is off: phase 1 ships dark,
+		// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
+		var bindErr error
+		retryCons, bindErr = js.CreateOrUpdateConsumer(ctx, retryStreamCfg.Name, retryConsumerCfg)
+		if bindErr != nil && !retrylane.SkipMissingStream(ctx, retryStreamCfg.Name, cfg.Retry.Enabled, bindErr) {
+			slog.Error("create retry consumer failed", "error", bindErr)
+			os.Exit(1)
+		}
+	}
+	// nil outside default mode, and when the lane is off with RETRY-{siteID}
+	// unprovisioned — in which case nothing can be parked there to drain.
+	if retryCons != nil {
+		// Publish this lane's backlog to the degrade tracker before the loop starts:
+		// once it is draining, its successes can clear the marker, so its depth has to
+		// be visible to the check that decides whether history has caught up.
+		info := consumerInfoFunc(retryCons.Info)
+		retryBacklog.Store(&info)
+
+		// The retry lane does not escalate again in phases 0-3: HandleRetryMsg settles
+		// in place on the slow-rung schedule relocated off the hot consumer.
+		retryProcess := retryProcessor(handler)
+
+		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.Retry.Consumer.MaxWorkers))
+		if err != nil {
+			slog.Error("retry messages failed", "error", err)
+			os.Exit(1)
+		}
+		retryConsumerMetrics.LoopStarted(ctx)
+
+		// Sized off RETRY_CONSUMER_MAX_WORKERS (default 10), not the hot loop's
+		// MAX_WORKERS: both loops run in this process, so reusing MaxWorkers would make
+		// the in-flight cap 2×MaxWorkers exactly during the incident that fills the retry
+		// lane. Its own semaphore, never shared with the hot loop — sharing one would let
+		// a retry backlog starve live deliveries of slots.
+		retrySem := make(chan struct{}, cfg.Retry.Consumer.MaxWorkers)
+
+		wg.Add(1)
+		go func() {
+			// Counted on the same wg as the hot loop so shutdown's single wg.Wait()
+			// step covers both consume loops.
+			defer wg.Done()
+			for {
+				msgCtx, msg, err := retryIter.Next()
+				if err != nil {
+					// Same stall handling natsmetrics.Consume applies to the hot loop: a
+					// recoverable Next failure is a blip, and returning on it would end the
+					// drain for the life of the pod, stranding everything parked on RETRY.
+					if natsmetrics.Recoverable(err) {
+						slog.Warn("retry consume loop stalled; retrying", "error", err)
+						continue
+					}
+					retryConsumerMetrics.LoopFailed(context.Background(), err)
+					return
+				}
+				retrySem <- struct{}{}
+				wg.Add(1)
+				go func(msgCtx context.Context, msg jetstream.Msg) {
+					// Classified from X-Retry-Origin-Subject: a retry subject's tail is
+					// "slow", so classifying from msg.Subject() would label every
+					// retry-lane delivery event_type="unknown".
+					tracked := retryConsumerMetrics.Track(msgCtx, msg,
+						natsmetrics.EventTypeFromSubject(retrylane.OriginSubject(msg.Headers(), msg.Subject())),
+						retryConsumerCfg.MaxDeliver)
+					msg = tracked
+					msgCtx = tracked.Context(msgCtx)
+					defer func() {
+						tracked.Finish(msgCtx)
+						<-retrySem
+						wg.Done()
+					}()
+					jobguard.Run(msg, func() { retryProcess(msgCtx, msg) })
+				}(msgCtx, msg)
+			}
+		}()
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -430,13 +588,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("message-worker running", "site", cfg.SiteID)
+	slog.Info("message-worker running", "site", cfg.SiteID, "retry_lane_enabled", cfg.Retry.Enabled)
 
 	shutdown.WaitOn(ctx, sig, 25*time.Second,
 		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
+			// Stopped unconditionally alongside the hot iterator whenever it exists
+			// (default mode only) — see the rollback-asymmetry note above.
+			if retryIter != nil {
+				retryConsumerMetrics.LoopStopped(ctx)
+				retryIter.Stop()
+			}
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -494,7 +658,7 @@ const teamsMaxDeliver = 5
 func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstream.ConsumerConfig {
 	if mode == "teams" {
 		cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff))
-		cc.Durable = "message-worker-teams"
+		cc.Durable = teamsConsumerDurable
 		cc.FilterSubjects = []string{subject.MsgTeamsCanonicalBatch(siteID)}
 		if cc.MaxDeliver <= 0 {
 			// -1 (or jetstream's 0 "unset") would turn the batch handler's Nak into
@@ -505,9 +669,83 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 		return cc
 	}
 	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
-	cc.Durable = "message-worker"
+	cc.Durable = defaultConsumerDurable
 	cc.FilterSubjects = []string{subject.MsgCanonicalCreated(siteID)}
 	return cc
+}
+
+// historyBacklog reports the combined pending and ack-pending depth of every
+// consumer whose deliveries can clear the degraded marker. retry may be nil —
+// teams mode binds no retry consumer, and neither does default mode when the lane
+// is off and RETRY-{siteID} is unprovisioned.
+//
+// Both lanes must be counted because settle calls OnWriteSuccess for a delivery
+// from either. Counting the hot consumer alone was correct only while it was the
+// only lane: after escalation drains it, one successful retry delivery would
+// observe zero pending work and clear the marker while escalated history messages
+// are still parked on RETRY, telling clients their history is complete when it is
+// not. An unreadable backlog is an error rather than a zero for the same reason —
+// the marker must not clear on a number nobody could fetch.
+func historyBacklog(ctx context.Context, hot, retry consumerInfoFunc) (uint64, uint64, error) {
+	ci, err := hot(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("consumer info: %w", err)
+	}
+	// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
+	pending, ackPending := ci.NumPending, uint64(ci.NumAckPending)
+	if retry == nil {
+		return pending, ackPending, nil
+	}
+	rci, err := retry(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("retry consumer info: %w", err)
+	}
+	// #nosec G115 -- as above
+	return pending + rci.NumPending, ackPending + uint64(rci.NumAckPending), nil
+}
+
+// retryConsumerConfig is retrylane.ConsumerConfig plus the one invariant this
+// service adds: the retry consumer never retires a message on its own.
+//
+// settle.go is the sole give-up authority in default mode — it drops a
+// request-class Cassandra failure past INVALID_RETRY_WINDOW, and every drop is
+// logged, counted and rate-capped. A finite MaxDeliver here would let JetStream
+// abandon an escalated message behind that decision with none of the accounting,
+// which is precisely the silent loss the policy removed. The hot consumer runs
+// -1 for the same reason (buildConsumerConfig), so the lane must not reintroduce
+// a cap on the way past it.
+//
+// This is message-worker's rule, not the lane's: notification-worker and
+// broadcast-worker have no give-up path of their own and keep the shared
+// outage-budget cap, which is what retires a message for them.
+func retryConsumerConfig(siteID string, s *retrylane.Settings, slow []time.Duration) jetstream.ConsumerConfig {
+	cc := retrylane.ConsumerConfig(siteID, defaultConsumerDurable, s, slow)
+	cc.MaxDeliver = -1
+	return cc
+}
+
+// retryProcessor is the retry lane's per-message body, named rather than inlined
+// so the redelivery stamping below is covered by a test instead of living only
+// inside main.
+//
+// natsutil.WithRedelivery is unconditional, and StampRedelivery would be wrong
+// here. A message only reaches this lane after the hot consumer already ran the
+// handler FastSteps+1 times, but on the RETRY stream its own NumDelivered
+// restarts at 1 — so StampRedelivery, which reads that counter, would report a
+// first delivery. message-worker's thread-reply writer keys a NON-idempotent
+// tcount increment off natsutil.IsRedelivery (store_cassandra.go), so an
+// unstamped retry delivery counts the same reply a second time.
+func retryProcessor(handler *Handler) func(context.Context, jetstream.Msg) {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+		handlerCtx = natsutil.WithRedelivery(handlerCtx)
+		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+		// HandleRetryMsg, not a bare jsretry.Settle: settle.go owns the give-up
+		// decision on both lanes. Settling directly here would leave an escalated
+		// poison row NAKing past its window with no drop log, counter or rate cap.
+		handler.HandleRetryMsg(handlerCtx, msg)
+	}
 }
 
 // canonicalProcessor returns the consume loop's per-message body: subject
@@ -515,8 +753,8 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 // handler panic Acks instead of crash-looping on JetStream redelivery. Named
 // rather than inlined in main so the consumer test drives this exact
 // composition, matching broadcast-worker's guardedProcessor.
-func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj string) func(context.Context, jetstream.Msg) {
-	return func(msgCtx context.Context, msg jetstream.Msg) {
+func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj string) func(context.Context, jetstream.Msg, func()) {
+	return func(msgCtx context.Context, msg jetstream.Msg, onEscalate func()) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			// Dispatch by subject: the one-time .teams.batch migration writes
@@ -525,7 +763,7 @@ func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj str
 				teams.consume(handlerCtx, msg)
 				return
 			}
-			h.HandleJetStreamMsg(handlerCtx, msg)
+			h.HandleJetStreamMsg(handlerCtx, msg, onEscalate)
 		})
 	}
 }

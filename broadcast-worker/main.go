@@ -29,6 +29,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/preview"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
@@ -98,6 +99,8 @@ type config struct {
 	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption               encryptionConfig        `envPrefix:"ENCRYPTION_"`
 	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	// Retry is the tiered-redelivery lane; disabled by default. See pkg/retrylane.
+	Retry retrylane.Settings `envPrefix:"RETRY_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 
@@ -132,6 +135,13 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+
+	// A retry lane that cannot drain is worse than none: the failure is silent, and
+	// the consumer binds even with the lane off. See retrylane.Settings.Validate.
+	if err := cfg.Retry.Validate(); err != nil {
+		slog.Error("invalid retry lane config", "error", err)
+		os.Exit(1)
+	}
 
 	if err := cfg.Pool.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
@@ -332,12 +342,14 @@ func main() {
 
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
 
-	if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled); err != nil {
+	retryStreamCfg := stream.Retry(cfg.SiteID)
+	if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, retryStreamCfg.Name, retryStreamCfg.Subjects[0], cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
-	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("broadcast-worker"), wiring.CanonicalWildcard)
+	consumerName := cfg.Mode.ConsumerName("broadcast-worker")
+	consumerCfg := buildConsumerConfig(cfg.Consumer, consumerName, wiring.CanonicalWildcard)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
@@ -348,6 +360,55 @@ func main() {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
+
+	// retryLane escalates a message off the hot consumer's ack-pending budget once its
+	// in-place fast-rung budget is spent. RETRY_LANE_ENABLED gates new escalations only:
+	// the retry consumer bound below drains regardless of the flag, so disabling it
+	// cannot strand messages already parked on RETRY-{siteID}. See pkg/retrylane.
+	retryLane := &retrylane.Lane{
+		Consumer:  consumerName,
+		SiteID:    cfg.SiteID,
+		Enabled:   cfg.Retry.Enabled,
+		FastSteps: cfg.Retry.FastSteps,
+		Publish: func(ctx context.Context, subj string, data []byte, hdr nats.Header, msgID string) error {
+			_, err := js.PublishMsg(ctx, &nats.Msg{Subject: subj, Data: data, Header: hdr},
+				jetstream.WithMsgID(msgID))
+			return err
+		},
+	}
+	// The hot consumer's fast rungs are truncated per message inside broadcastProcessor,
+	// not precomputed here: settleBackoff picks the curve from the error (a shedding
+	// downstream gets BackpressureBackoff, not LowLatencyBackoff's 200ms first rung), so
+	// the truncation has to follow whichever curve that message actually settles on.
+
+	// The retry consumer binds whenever RETRY-{siteID} exists — see the
+	// rollback-asymmetry note above. The one tolerated failure is the stream
+	// simply not being provisioned while the lane is off: phase 1 ships dark,
+	// so that must not crash-loop this hot-path worker (retrylane.SkipMissingStream).
+	// Derived before the consumer config: ConsumerConfig sizes the retry lane's
+	// MaxDeliver against this schedule so the outage budget survives escalation.
+	slowBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.LowLatencyBackoff)
+	// The backpressure tail, kept per-message by slowBackoffFor: settleBackoff routes a
+	// shedding downstream onto the slower curve on the hot lane, and escalation must not
+	// drop that choice. MaxDeliver stays derived from the faster schedule above — see
+	// slowBackoffFor on why that still covers the outage window for both.
+	slowBackpressureBackoff := retrylane.SlowBackoff(cfg.Retry.FastSteps, jsretry.BackpressureBackoff)
+	retryConsumerCfg := retrylane.ConsumerConfig(cfg.SiteID, consumerName, &cfg.Retry, slowBackoff)
+	retryConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		Site:   cfg.SiteID,
+		Stream: retryStreamCfg.Name, Consumer: retryConsumerCfg.Durable,
+	})
+	retryConsumerMetrics.LoopStopped(ctx)
+	retryCons, err := js.CreateOrUpdateConsumer(ctx, retryStreamCfg.Name, retryConsumerCfg)
+	if err != nil {
+		if !retrylane.SkipMissingStream(ctx, retryStreamCfg.Name, cfg.Retry.Enabled, err) {
+			slog.Error("create retry consumer failed", "error", err)
+			os.Exit(1)
+		}
+		retryCons = nil
+	}
+	// The retry lane does not escalate again in phases 0-3, so it settles with plain
+	// jsretry.Settle on the slow-rung schedule SlowBackoff relocated off the hot consumer.
 
 	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
 	// The cross-site room-position announce. It used to ride the rooms.lastMsgAt
@@ -445,8 +506,44 @@ func main() {
 	var wg sync.WaitGroup
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		guardedProcessor(broadcastProcessor(handler)),
+		guardedProcessor(broadcastProcessor(handler, retryLane)),
 		loop.Stopped)
+
+	// The retry consumer binds and drains regardless of cfg.Retry.Enabled (the rollback
+	// asymmetry from spec §4): disabling the lane stops new escalations onto RETRY-{siteID},
+	// but must not strand messages already parked there. It never escalates again in
+	// phases 0-3, so it settles with plain jsretry.Settle over slowBackoff. Counted on the
+	// same wg as the hot loop (natsmetrics.Start registers it before returning), so
+	// shutdown's single wg.Wait() step below covers both consume loops.
+	// retryCons is nil only when the lane is off and RETRY-{siteID} is unprovisioned —
+	// in which case nothing can be parked there to drain.
+	var retryIter o11ynats.MessagesContext
+	if retryCons != nil {
+		retryIter, err = retryCons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.Retry.Consumer.MaxWorkers))
+		if err != nil {
+			slog.Error("retry messages failed", "error", err)
+			os.Exit(1)
+		}
+		retryConsumerMetrics.LoopStarted(ctx)
+		// Sized off RETRY_CONSUMER_MAX_WORKERS (default 10), not the hot loop's
+		// MAX_WORKERS: both loops run in this process, so reusing MaxWorkers would make
+		// the in-flight cap 2×MaxWorkers exactly during the incident that fills the retry
+		// lane. natsmetrics.Start gives it its own semaphore, never shared with the hot
+		// loop — sharing one would let a retry backlog starve live deliveries of slots.
+		natsmetrics.Start(ctx, retryIter, retryConsumerMetrics, cfg.Retry.Consumer.MaxWorkers, retryConsumerCfg.MaxDeliver, &wg,
+			// Classified from X-Retry-Origin-Subject: a retry subject's tail is "slow", so
+			// classifying from msg.Subject() would label every retry-lane delivery
+			// event_type="unknown".
+			func(msg jetstream.Msg) natsmetrics.EventType {
+				return natsmetrics.EventTypeFromSubject(retrylane.OriginSubject(msg.Headers(), msg.Subject()))
+			},
+			guardedProcessor(retryProcessor(handler, slowBackoff, slowBackpressureBackoff)),
+			// No loopguard: the retry loop draining is not a liveness condition for
+			// live fan-out, and SelfShutdown here would kill a healthy pod over a
+			// stalled drain. natsmetrics.Consume still records LoopFailed, so a dead
+			// retry loop is visible in metrics — matching notification-worker.
+			nil)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -457,7 +554,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("broadcast-worker started", "site", cfg.SiteID, "encryption", cfg.Encryption.Enabled)
+	slog.Info("broadcast-worker started", "site", cfg.SiteID, "encryption", cfg.Encryption.Enabled,
+		"retry_lane_enabled", cfg.Retry.Enabled)
 
 	hooks := []func(context.Context) error{
 		func(_ context.Context) error { loop.BeginShutdown(); return nil },
@@ -467,6 +565,12 @@ func main() {
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
+			// Stopped alongside the hot iterator whenever it exists, regardless of
+			// cfg.Retry.Enabled — see the rollback-asymmetry note above.
+			if retryIter != nil {
+				retryConsumerMetrics.LoopStopped(ctx)
+				retryIter.Stop()
+			}
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -529,8 +633,9 @@ func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte
 type messageProcessor func(msgCtx context.Context, msg jetstream.Msg)
 
 // broadcastProcessor builds the per-message processing closure: stamp the request ID, run
-// the handler, then settle via jsretry (short first retry; malformed events Ack-drop).
-func broadcastProcessor(handler *Handler) messageProcessor {
+// the handler, then settle via the retry lane (short first retry; malformed events Ack-drop;
+// budget-spent deliveries escalate to RETRY-{siteID} when the lane is enabled).
+func broadcastProcessor(handler *Handler, lane *retrylane.Lane) messageProcessor {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		// X-Migration: live events are NOT filtered here — during the legacy→new backend release
 		// switch we still need broadcast to fan them out so live clients see the messages.
@@ -548,9 +653,47 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 		}
 		// The schedule is chosen from the error, not fixed: a downstream that is
 		// shedding must not be retried at LowLatencyBackoff's 200ms first rung.
-		// See settleBackoff.
+		// See settleBackoff. Settle takes the FULL curve: it walks only as far as
+		// this delivery, so the fast rungs are already what an in-place nak gets,
+		// and a failed republish can still fall back onto the relocated tail.
 		err := handler.HandleMessage(handlerCtx, msg.Data())
-		jsretry.Settle(handlerCtx, msg, settleBackoff(err), err)
+		sched := settleBackoff(err)
+		// Derived per message: the hook closes over this delivery's own metrics
+		// recorder, so setting OnEscalate on the shared lane would race across the
+		// worker's message goroutines. msg is always the *natsmetrics.Message that
+		// guardedProcessor wraps in production; a plain jetstream.Msg double (as in
+		// a unit test) simply leaves escalation unhooked rather than panicking.
+		var onEscalate func()
+		if tracked, ok := msg.(*natsmetrics.Message); ok {
+			onEscalate = tracked.Escalated
+		} else {
+			// Cannot happen through the production path (guardedProcessor always wraps
+			// a *natsmetrics.Message), but a future refactor that broke the invariant
+			// would otherwise fail silently: escalation would still Ack correctly, just
+			// with no "escalated" outcome recorded — indistinguishable from no
+			// escalation at all, on the exact metric this feature exists to surface
+			// early. Loud here so that regression is visible instead of silent.
+			slog.WarnContext(handlerCtx, "broadcast processor: message not natsmetrics-tracked, escalation will be unlabeled",
+				"request_id", natsutil.RequestIDFromContext(handlerCtx))
+		}
+		lane.WithEscalationHook(onEscalate).Settle(handlerCtx, msg, sched, err)
+	}
+}
+
+// retryProcessor builds the retry-lane's per-message processing closure. Deliveries reaching
+// RETRY-{siteID} already spent their fast-rung budget on the hot consumer, so this settles
+// with plain jsretry.Settle — the retry lane does not escalate a second time.
+//
+// The curve is chosen per message from X-Retry-Reason rather than fixed, so the
+// backpressure schedule the hot lane picked for a shedding downstream survives
+// escalation. See slowBackoffFor.
+func retryProcessor(handler *Handler, slowBackoff, slowBackpressureBackoff []time.Duration) messageProcessor {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+		sched := slowBackoffFor(msg.Headers(), slowBackoff, slowBackpressureBackoff)
+		jsretry.Settle(handlerCtx, msg, sched, handler.HandleMessage(handlerCtx, msg.Data()))
 	}
 }
 

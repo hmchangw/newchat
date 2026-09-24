@@ -18,9 +18,11 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -2622,7 +2624,7 @@ func TestHandler_HandleJetStreamMsg(t *testing.T) {
 			}, nil, testDegradeTracker(), testDropPolicy())
 
 			fakeMsg := &fakeJSMsg{data: tt.msgData}
-			h.HandleJetStreamMsg(context.Background(), fakeMsg)
+			h.HandleJetStreamMsg(context.Background(), fakeMsg, nil)
 
 			assert.Equal(t, tt.wantAck, fakeMsg.acked, "acked")
 			assert.Equal(t, tt.wantNak, fakeMsg.naked, "naked")
@@ -3391,6 +3393,167 @@ func TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery(t *test
 		assert.Nil(t, saved.ThreadParentMessageCreatedAt, "no parent coords are available to stamp")
 		assert.Equal(t, "msg-parent", saved.ThreadParentMessageID, "thread linkage on the reply is preserved")
 	})
+}
+
+// retryFakeMsg is a retrylane.Msg double for the escalation tests.
+type retryFakeMsg struct {
+	data         []byte
+	subject      string
+	headers      nats.Header
+	stream       string
+	seq          uint64
+	numDelivered uint64
+	acked        bool
+	naked        bool
+}
+
+func (m *retryFakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{
+		Stream:       m.stream,
+		NumDelivered: m.numDelivered,
+		Sequence:     jetstream.SequencePair{Stream: m.seq},
+	}, nil
+}
+func (m *retryFakeMsg) Ack() error                         { m.acked = true; return nil }
+func (m *retryFakeMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
+func (m *retryFakeMsg) Data() []byte                       { return m.data }
+func (m *retryFakeMsg) Subject() string                    { return m.subject }
+func (m *retryFakeMsg) Headers() nats.Header               { return m.headers }
+
+func TestHandlerEscalatesWhenFastBudgetSpent(t *testing.T) {
+	var (
+		published bool
+		gotSubj   string
+		gotData   []byte
+	)
+	lane := &retrylane.Lane{
+		Consumer:  "message-worker",
+		SiteID:    "site1",
+		Enabled:   true,
+		FastSteps: 3,
+		Publish: func(_ context.Context, subj string, data []byte, _ nats.Header, _ string) error {
+			published = true
+			gotSubj = subj
+			gotData = data
+			return nil
+		},
+	}
+
+	body := []byte(`{"messageId":"abc"}`)
+	msg := &retryFakeMsg{
+		data:         body,
+		subject:      "chat.msg.canonical.site1.created",
+		headers:      nats.Header{},
+		stream:       "MESSAGES-CANONICAL-site1",
+		seq:          7,
+		numDelivered: 4, // past FastSteps=3
+	}
+
+	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff, errors.New("cassandra unavailable"))
+
+	require.True(t, published, "delivery 4 must escalate rather than park another 12 minutes")
+	assert.Equal(t, "chat.retry.site1.message-worker.slow", gotSubj)
+	assert.Equal(t, body, gotData, "the body must reach Cassandra byte-identical after a replay")
+	assert.True(t, msg.acked)
+	assert.False(t, msg.naked)
+}
+
+func TestHandlerStillNaksWithinFastBudget(t *testing.T) {
+	lane := &retrylane.Lane{
+		Consumer: "message-worker", SiteID: "site1", Enabled: true, FastSteps: 3,
+		Publish: func(_ context.Context, _ string, _ []byte, _ nats.Header, _ string) error {
+			t.Fatal("must not escalate within the fast budget")
+			return nil
+		},
+	}
+	msg := &retryFakeMsg{
+		data: []byte(`{}`), subject: "s", headers: nats.Header{},
+		stream: "MESSAGES-CANONICAL-site1", seq: 1, numDelivered: 2,
+	}
+
+	lane.Settle(context.Background(), msg, jsretry.DefaultBackoff, errors.New("cassandra unavailable"))
+
+	assert.True(t, msg.naked)
+	assert.False(t, msg.acked)
+}
+
+// TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane drives the real
+// wiring — NewHandler(…, withRetryLane(…)) then HandleJetStreamMsg — rather than
+// calling retrylane.Lane.Settle directly. Without it, deleting the withRetryLane
+// option from main.go's NewHandler call would break no test in this package.
+func TestHandler_HandleJetStreamMsg_EscalatesThroughInjectedLane(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Message:   model.Message{ID: "msg-1", RoomID: "r1", UserAccount: "alice", Content: "hello", CreatedAt: now},
+		SiteID:    "site-a",
+		Timestamp: now.UnixMilli(),
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	ctrl := gomock.NewController(t)
+	mockUserStore := NewMockUserStore(ctrl)
+	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
+	// A user-lookup failure fails open (the sender is projected from the event), so it is
+	// not the transient error the lane sees. The Cassandra write is: process returns a
+	// plain wrapped error, so the lane may escalate — a permanent errcode would Ack-drop.
+	mockStore := NewMockStore(ctrl)
+	mockStore.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(errors.New("cassandra unavailable"))
+
+	var gotSubject string
+	lane := &retrylane.Lane{
+		Consumer: "message-worker", SiteID: "site1", Enabled: true, FastSteps: 3,
+		Publish: func(_ context.Context, subj string, _ []byte, _ nats.Header, _ string) error {
+			gotSubject = subj
+			return nil
+		},
+	}
+
+	var escalated bool
+	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		nil, testDegradeTracker(), testDropPolicy(),
+		withRetryLane(lane, jsretry.DefaultBackoff, retrylane.SlowBackoff(2, jsretry.DefaultBackoff)))
+
+	msg := &fakeJSMsg{data: data, numDelivered: 4} // past FastSteps=3
+	h.HandleJetStreamMsg(context.Background(), msg, func() { escalated = true })
+
+	assert.Equal(t, "chat.retry.site1.message-worker.slow", gotSubject,
+		"the injected lane must be the one HandleJetStreamMsg settles through")
+	assert.True(t, escalated, "the per-delivery onEscalate hook must reach the injected lane")
+	assert.True(t, msg.acked, "an escalated message is Acked once it is safely on RETRY")
+	assert.False(t, msg.naked)
+}
+
+func TestHandler_HandleJetStreamMsg_NaksWhenNoLaneIsInjected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Message:   model.Message{ID: "msg-1", RoomID: "r1", UserAccount: "alice", Content: "hello", CreatedAt: now},
+		SiteID:    "site-a",
+		Timestamp: now.UnixMilli(),
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	ctrl := gomock.NewController(t)
+	mockUserStore := NewMockUserStore(ctrl)
+	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
+	// Same transient path as the escalating test above: the user lookup fails open, the
+	// Cassandra write is what actually fails, so the settle decision is the lane's alone.
+	mockStore := NewMockStore(ctrl)
+	mockStore.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(errors.New("cassandra unavailable"))
+
+	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		nil, testDegradeTracker(), testDropPolicy())
+
+	msg := &fakeJSMsg{data: data, numDelivered: 4}
+	h.HandleJetStreamMsg(context.Background(), msg, nil)
+
+	assert.True(t, msg.naked, "with no lane injected the default is in-place redelivery")
+	assert.False(t, msg.acked)
 }
 
 // TestHandler_ProcessMessage_ThreadReply_ReplierLastSeenAdvancedExactlyOnce pins

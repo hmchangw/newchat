@@ -1,0 +1,163 @@
+// Package retrylane moves the long tail of JetStream retries off a hot
+// consumer lane and onto the RETRY stream.
+//
+// A message Nak'd with a delay keeps its ack-pending slot for the whole
+// backoff, so jsretry.DefaultBackoff spends 756s of a shared 1000-slot budget
+// per failing message. At a sustained 5 failures/s the budget is exhausted in
+// ~200s and the consumer stops delivering anything, healthy messages included
+// — the stall arrives long before the MaxDeliver drop does.
+//
+// This package keeps the fast rungs in place and republishes the message onto
+// RETRY-{siteID} when they are spent, where a second per-service consumer runs
+// the same handler on the slow rungs. The total retry budget is unchanged; only
+// the ack-pending occupancy moves.
+//
+// How much occupancy stays behind depends on the schedule, so the "~36s" figure
+// is DefaultBackoff's, not a universal one: the fast rungs are 36s on
+// jsretry.DefaultBackoff ({1s,5s,30s}) and 6.2s on jsretry.LowLatencyBackoff
+// ({200ms,1s,5s}), which broadcast-worker runs.
+package retrylane
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/hmchangw/chat/pkg/errcode"
+)
+
+// Escalation headers. Metadata rides in headers so the body stays
+// byte-identical: message-worker writes those bytes to Cassandra, and the
+// hot-path workers marshal via sonic whose output is not byte-identical to
+// stdlib, so a re-marshal could change bytes that dedup keys pin.
+const (
+	HeaderOriginStream  = "X-Retry-Origin-Stream"
+	HeaderOriginSeq     = "X-Retry-Origin-Seq"
+	HeaderOriginSubject = "X-Retry-Origin-Subject"
+	HeaderConsumer      = "X-Retry-Consumer"
+	HeaderAttempt       = "X-Retry-Attempt"
+	HeaderFirstFailedAt = "X-Retry-First-Failed-At"
+	HeaderReason        = "X-Retry-Reason"
+)
+
+// jetstreamPublishHeaders address the ORIGIN stream, not the escalation: a
+// forwarded Nats-Msg-Id would fight the escalation's own deterministic dedup id,
+// and a forwarded Nats-Expected-* would assert the origin stream's sequence
+// state against RETRY-{siteID} and reject the publish. They are the only
+// headers escalation drops.
+var jetstreamPublishHeaders = []string{
+	jetstream.MsgIDHeader,
+	jetstream.ExpectedStreamHeader,
+	jetstream.ExpectedLastSeqHeader,
+	jetstream.ExpectedLastSubjSeqHeader,
+	jetstream.ExpectedLastSubjSeqSubjHeader,
+	jetstream.ExpectedLastMsgIDHeader,
+}
+
+// DedupID is the escalation's Nats-Msg-Id. Escalation is publish-then-Ack and
+// therefore at-least-once: a crash between the two re-runs the handler and
+// re-escalates, and this deterministic id makes the second publish a dedup
+// no-op — while the stream's duplicate window holds, which is ops-owned.
+func DedupID(originStream string, originSeq uint64, consumer string) string {
+	return fmt.Sprintf("%s:%d:%s", originStream, originSeq, consumer)
+}
+
+// ReasonFor maps an error to a bounded category label. It returns the errcode
+// Code when one is in the chain and "internal" otherwise. It never returns the
+// error text: the reason reaches a header and a metric label, and a raw cause
+// can carry a message body or token.
+func ReasonFor(err error) string {
+	var ec *errcode.Error
+	if errors.As(err, &ec) && ec.Code.Valid() {
+		return string(ec.Code)
+	}
+	return string(errcode.CodeInternal)
+}
+
+// BuildHeaders returns the headers for an escalated message. in is the live
+// message's headers and is never mutated. Attempts accumulate across lanes and
+// the first-failure timestamp survives every hop, so time-to-dead-letter stays
+// truthful however many times a message is re-escalated.
+//
+// It copies every inbound header and overrides the X-Retry-* set on top, rather
+// than allow-listing the few it knows about. An escalation is a relocation of
+// the same delivery, so the handler on the retry lane must see what the handler
+// on the hot lane saw: X-Request-ID and traceparent for lineage, X-Debug and
+// X-Debug-Payload so an operator who stamped a rung keeps visibility on exactly
+// the messages that failed, and above all X-Migration — message-worker skips
+// thread-subscription, mention and badge side effects on migrated events, and
+// dropping the header would re-notify users about migrated history. The same
+// reasoning covers headers no adopter reads yet: Data() is forwarded
+// byte-identically, so a future Nats-Encoding payload must keep the header that
+// says how to decode it.
+func BuildHeaders(in nats.Header, meta *jetstream.MsgMetadata,
+	originSubject, consumer, reason string, now time.Time,
+) nats.Header {
+	// Values are copied, not aliased: out is handed to a publish that may add to
+	// it while the live message still holds in.
+	out := nats.Header{}
+	for k, vs := range in {
+		out[k] = append([]string(nil), vs...)
+	}
+	for _, h := range jetstreamPublishHeaders {
+		out.Del(h)
+	}
+
+	out.Set(HeaderOriginSubject, originSubject)
+	out.Set(HeaderConsumer, consumer)
+	out.Set(HeaderReason, reason)
+
+	var delivered uint64
+	if meta != nil {
+		out.Set(HeaderOriginStream, meta.Stream)
+		out.Set(HeaderOriginSeq, strconv.FormatUint(meta.Sequence.Stream, 10))
+		delivered = meta.NumDelivered
+	}
+
+	prior, _ := strconv.ParseUint(in.Get(HeaderAttempt), 10, 64)
+	out.Set(HeaderAttempt, strconv.FormatUint(prior+delivered, 10))
+
+	firstFailed := in.Get(HeaderFirstFailedAt)
+	if firstFailed == "" {
+		firstFailed = strconv.FormatInt(now.UTC().UnixMilli(), 10)
+	}
+	out.Set(HeaderFirstFailedAt, firstFailed)
+
+	return out
+}
+
+// OriginSubject returns the subject a message was first delivered on:
+// X-Retry-Origin-Subject when the message arrived via the retry lane, and
+// fallback (the caller's own msg.Subject()) otherwise.
+//
+// A retry-lane subject's tail is "slow", so classifying a retry delivery from
+// its own subject yields EventUnknown on every metric and log line — exactly
+// the deliveries an operator is looking at. The origin subject is written for
+// this purpose; this is what reads it.
+func OriginSubject(h nats.Header, fallback string) string {
+	if v := h.Get(HeaderOriginSubject); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// PriorAttempts reports how many deliveries a message accumulated before it was
+// escalated onto RETRY, from the cumulative X-Retry-Attempt header BuildHeaders
+// stamps. Zero means the message is not a retry-lane delivery at all — a hot-lane
+// message carries no such header.
+//
+// This exists because a consumer's own NumDelivered restarts at 1 on
+// RETRY-{siteID}: any policy that measures elapsed retry time from the delivery
+// count alone silently resets when the lane escalates, and the message's real
+// retry history is only recoverable from this header.
+func PriorAttempts(h nats.Header) int {
+	n, err := strconv.ParseUint(h.Get(HeaderAttempt), 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int(n)
+}

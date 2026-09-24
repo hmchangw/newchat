@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
@@ -31,4 +32,22 @@ func TestConfig_ReadPreferenceDefault(t *testing.T) {
 func TestConfig_ReadPreferenceRejectsGarbage(t *testing.T) {
 	_, err := mongoutil.ParseReadPreference("quorum")
 	require.Error(t, err)
+}
+
+func TestConfigRetryLaneDefaultsOff(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site1")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Retry.Enabled, "the retry lane must be opt-in per service")
+	assert.Equal(t, 3, cfg.Retry.FastSteps)
+	assert.Equal(t, 40000, cfg.Retry.Consumer.MaxAckPending,
+		"the retry lane holds the long waits and needs its own large budget")
+	assert.Equal(t, 10, cfg.Retry.Consumer.MaxWorkers,
+		"spec §4: RETRY_CONSUMER_MAX_WORKERS is deliberately small — it doubles as the recovery-herd damper")
+	assert.NotEqual(t, cfg.MaxWorkers, cfg.Retry.Consumer.MaxWorkers,
+		"the two loops run in one process: reusing the hot lane's budget would double the in-flight cap")
 }

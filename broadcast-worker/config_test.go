@@ -6,10 +6,13 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -187,4 +190,42 @@ func TestConfig_KeyReadPreferenceWireName(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "nearest", cfg.MongoKeyReadPreference,
 		"the field must bind to MONGO_KEY_READ_PREFERENCE, not a prefixed variant")
+}
+
+func TestConfigRetryLaneDefaultsOff(t *testing.T) {
+	t.Setenv("MODE", "user")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Retry.Enabled, "the retry lane must be opt-in per service")
+	assert.Equal(t, 3, cfg.Retry.FastSteps)
+	assert.Equal(t, 40000, cfg.Retry.Consumer.MaxAckPending,
+		"the retry lane holds the long waits and needs its own large budget")
+	assert.Equal(t, 10, cfg.Retry.Consumer.MaxWorkers,
+		"spec §4: RETRY_CONSUMER_MAX_WORKERS is deliberately small — it doubles as the recovery-herd damper")
+	assert.NotEqual(t, cfg.MaxWorkers, cfg.Retry.Consumer.MaxWorkers,
+		"the two loops run in one process: reusing the hot lane's budget would double the in-flight cap")
+}
+
+// TestRetryLaneUsesLowLatencyScheduleNotDefault pins broadcast-worker's fast/slow
+// split to jsretry.LowLatencyBackoff, not jsretry.DefaultBackoff: this is the
+// user-visible fan-out path and its first retry is deliberately sub-second, so
+// swapping the base schedule would be a user-visible regression.
+func TestRetryLaneUsesLowLatencyScheduleNotDefault(t *testing.T) {
+	fast := jsretry.LowLatencyBackoff[:3]
+	slow := retrylane.SlowBackoff(3, jsretry.LowLatencyBackoff)
+
+	assert.Equal(t, 200*time.Millisecond, fast[0],
+		"the fan-out path's first retry stays sub-second — a user is waiting on it")
+
+	var total time.Duration
+	for _, d := range append(append([]time.Duration{}, fast...), slow...) {
+		total += d
+	}
+	var original time.Duration
+	for _, d := range jsretry.LowLatencyBackoff {
+		original += d
+	}
+	assert.Equal(t, original, total, "the budget is relocated, not redefined")
 }

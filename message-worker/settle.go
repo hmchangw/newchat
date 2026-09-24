@@ -13,7 +13,54 @@ import (
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/retrylane"
 )
+
+// disposition is how settle hands a message back to JetStream once it has decided
+// to retry rather than drop. It exists so the give-up policy below is the single
+// authority on both of this service's lanes: the hot consumer passes the retry
+// lane's (which may escalate to RETRY-{siteID} once the fast rungs are spent),
+// while the retry-lane loop passes plain jsretry over the slow schedule, since a
+// message already on RETRY is never escalated a second time.
+//
+// Without this the two lanes settled through different code and only the hot one
+// consulted the drop policy — an escalated poison row would NAK past its window
+// with no drop log, no counter and no rate cap, which is the silent loss the
+// policy exists to remove.
+type disposition struct {
+	// settle is the ordinary hand-back; err == nil means Ack.
+	settle func(ctx context.Context, msg jetstream.Msg, err error)
+	// settleQuiet is settle without jsretry's failure log, for suppressDrop, which
+	// has already logged the failure without the untrusted CQL error text.
+	settleQuiet func(ctx context.Context, msg jetstream.Msg, err error)
+}
+
+// laneDisposition settles through the retry lane over the fast schedule. onEscalate
+// is the per-delivery metrics hook and must never be shared across goroutines.
+func (h *Handler) laneDisposition(onEscalate func()) disposition {
+	lane := h.lane.WithEscalationHook(onEscalate)
+	return disposition{
+		settle: func(ctx context.Context, msg jetstream.Msg, err error) {
+			lane.Settle(ctx, msg, h.fastBackoff, err)
+		},
+		settleQuiet: func(ctx context.Context, msg jetstream.Msg, err error) {
+			lane.SettleQuiet(ctx, msg, h.fastBackoff, err)
+		},
+	}
+}
+
+// slowDisposition settles a message already parked on RETRY-{siteID}: in place, on
+// the slow schedule, never escalating again.
+func (h *Handler) slowDisposition() disposition {
+	return disposition{
+		settle: func(ctx context.Context, msg jetstream.Msg, err error) {
+			jsretry.Settle(ctx, msg, h.slowBackoff, err)
+		},
+		settleQuiet: func(ctx context.Context, msg jetstream.Msg, err error) {
+			jsretry.SettleQuiet(ctx, msg, h.slowBackoff, err)
+		},
+	}
+}
 
 // settle resolves a processed message. The give-up decision is made by asking
 // Cassandra why the write failed, not by inspecting the site's health:
@@ -37,18 +84,18 @@ import (
 // own failure destroyed the evidence needed to condemn it. cassutil.ClassifyCQL answers
 // the question the marker was standing in for — is this failure specific to this
 // message? — directly, per failure, with no site-wide state in the way.
-func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
+func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, d disposition, err error) {
 	if err == nil {
 		h.degrade.OnWriteSuccess(ctx)
-		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, nil)
+		d.settle(ctx, msg, nil)
 		return
 	}
 	if _, isPermanent := errcode.IsPermanent(err); isPermanent {
-		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		d.settle(ctx, msg, err)
 		return
 	}
 	if !isHistoryWriteError(err) {
-		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		d.settle(ctx, msg, err)
 		return
 	}
 
@@ -74,13 +121,13 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 	// per-message was never a correct stand-in for it: it fired on one poison row too.
 	if class == cassutil.CQLInfra {
 		h.degrade.OnWriteFailure(ctx)
-		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		d.settle(ctx, msg, err)
 		return
 	}
 
-	retried, measurable := retriedFor(msg)
+	retried, measurable := retriedFor(msg, h.slowBackoff)
 	if !measurable || retried < h.drop.RetryWindow {
-		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		d.settle(ctx, msg, err)
 		return
 	}
 
@@ -92,13 +139,13 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 	case !h.drop.Enabled:
 		// The operator's brake for a migration that turns every write request-class:
 		// without it, stopping the bleeding would need a deploy.
-		h.suppressDrop(ctx, msg, err, code, retried, dropSuppressedDisabled)
+		h.suppressDrop(ctx, msg, d, err, code, retried, dropSuppressedDisabled)
 		return
 	case !h.drop.limiter.Allow():
 		// The unattended brake: `Invalid` is mostly a site-wide fault in practice
 		// (unconfigured table, undefined column, failed re-prepare), so the cap is
 		// what bounds loss when nobody is watching the class-labelled metric.
-		h.suppressDrop(ctx, msg, err, code, retried, dropSuppressedRateLimited)
+		h.suppressDrop(ctx, msg, d, err, code, retried, dropSuppressedRateLimited)
 		return
 	}
 
@@ -146,12 +193,12 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 // constantly, so an error field would pour that text into the log at volume. Truncating
 // or sanitizing it is not the fix; the point is that the text cannot be trusted at all.
 // SettleQuiet keeps jsretry from logging it either.
-func (h *Handler) suppressDrop(ctx context.Context, msg jetstream.Msg, err error, code string, retried time.Duration, reason string) {
+func (h *Handler) suppressDrop(ctx context.Context, msg jetstream.Msg, d disposition, err error, code string, retried time.Duration, reason string) {
 	h.histMetrics.onDropSuppressed(reason)
 	slog.WarnContext(ctx, "history drop suppressed — retrying instead",
 		"reason", reason, "cql_code", code, "retried_for", retried.String(),
 		"request_id", natsutil.RequestIDFromContext(ctx))
-	jsretry.SettleQuiet(ctx, msg, jsretry.DefaultBackoff, err)
+	d.settleQuiet(ctx, msg, err)
 }
 
 // droppedIdentity extracts just enough of the event to name what was destroyed.
@@ -181,13 +228,30 @@ func droppedIdentity(data []byte) (messageID, roomID string) {
 //
 // A message whose metadata cannot be read has no delivery count, so the answer is
 // false and the caller retries: an unmeasurable message is never destroyed.
-func retriedFor(msg jetstream.Msg) (time.Duration, bool) {
+func retriedFor(msg jetstream.Msg, slow []time.Duration) (time.Duration, bool) {
 	meta, err := msg.Metadata()
 	if err != nil || meta == nil {
 		return 0, false
 	}
 	// #nosec G115 -- NumDelivered is a delivery count, never large enough to overflow int
-	return jsretry.MinWindow(jsretry.DefaultBackoff, int(meta.NumDelivered)), true
+	delivered := int(meta.NumDelivered)
+
+	// A retry-lane delivery is counted by RETRY-{siteID}, whose NumDelivered restarts
+	// at 1 — so the count alone says this message has never been retried, and the
+	// window it is compared against (an hour) would never be reached. The drop would
+	// not merely be late: the retry consumer would exhaust its own MaxDeliver first
+	// and abandon the message with none of the log, counter or rate cap below. The
+	// cumulative attempt count survives escalation in a header precisely so the
+	// window keeps measuring retry time rather than restarting at zero.
+	prior := retrylane.PriorAttempts(msg.Headers())
+	if prior == 0 {
+		return jsretry.MinWindow(jsretry.DefaultBackoff, delivered), true
+	}
+	// Two schedules, because the message rode two: the gaps before escalation were
+	// fast rungs, the gaps since are slow ones. MinWindow sums n-1 gaps for n
+	// deliveries, so the escalation hop itself — near-instant — is correctly counted
+	// as neither.
+	return jsretry.MinWindow(jsretry.DefaultBackoff, prior) + jsretry.MinWindow(slow, delivered), true
 }
 
 // deliveriesToDrop reports the redelivery number a request-class failure is dropped

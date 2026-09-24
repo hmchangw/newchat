@@ -58,10 +58,10 @@ func TestBootstrapStreams(t *testing.T) {
 			wantErrSub: "verify stream MESSAGES-CANONICAL-test",
 		},
 		{
-			name:        "enabled - creates MESSAGES-CANONICAL",
+			name:        "enabled - creates MESSAGES-CANONICAL + RETRY",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"MESSAGES-CANONICAL-test"},
+			wantCreated: []string{"MESSAGES-CANONICAL-test", "RETRY-test"},
 		},
 		{
 			name:       "enabled - wraps MESSAGES-CANONICAL creator error",
@@ -71,11 +71,19 @@ func TestBootstrapStreams(t *testing.T) {
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create stream MESSAGES-CANONICAL-test",
 		},
+		{
+			name:       "enabled - wraps RETRY creator error",
+			enabled:    true,
+			existing:   map[string]bool{},
+			failOn:     "RETRY-test",
+			failErr:    errors.New("nats down"),
+			wantErrSub: "create stream RETRY-test",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing}
-			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "RETRY-test", "chat.retry.test.>", tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
