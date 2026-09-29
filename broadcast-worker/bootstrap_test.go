@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/stream"
+
 	o11ynats "github.com/flywindy/o11y/nats"
 )
 
@@ -83,7 +85,7 @@ func TestBootstrapStreams(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing}
-			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "RETRY-test", "chat.retry.test.>", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", stream.Retry("test"), tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)

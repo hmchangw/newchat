@@ -136,7 +136,7 @@ func TestBootstrapStreams(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing, dedup: tc.dedup, lookupErr: tc.lookupErr}
-			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.notification.test", "RETRY-test", "chat.retry.test.>", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.notification.test", stream.Retry("test"), tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -162,7 +162,7 @@ func TestBootstrapStreams_PushStreamDedupWindowCoversTheRetryBudget(t *testing.T
 	js := &fakeStreamManager{}
 	require.NoError(t, bootstrapStreams(context.Background(), js,
 		"MESSAGES-CANONICAL-test", "chat.msg.canonical.test.>", "PUSH-NOTIFICATION-test", "chat.push.test.>",
-		"RETRY-test", "chat.retry.test.>", true))
+		stream.Retry("test"), true))
 	cfg, ok := js.configs["PUSH-NOTIFICATION-test"]
 	require.True(t, ok)
 	assert.GreaterOrEqual(t, cfg.Duplicates, stream.OutageRetryWindow)

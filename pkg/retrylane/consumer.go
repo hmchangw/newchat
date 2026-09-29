@@ -134,7 +134,7 @@ func DurableName(consumer string) string { return consumer + "-retry" }
 // nak, which would burn the retry lane's MaxDeliver in milliseconds.
 func SlowBackoff(fastSteps int, full []time.Duration) []time.Duration {
 	if len(full) == 0 {
-		return jsretryFallback()
+		return emptyScheduleFallback()
 	}
 	if fastSteps < 0 {
 		fastSteps = 0
@@ -145,8 +145,12 @@ func SlowBackoff(fastSteps int, full []time.Duration) []time.Duration {
 	return full[fastSteps:]
 }
 
-// jsretryFallback is the schedule used when a caller supplies none.
-func jsretryFallback() []time.Duration {
+// emptyScheduleFallback stands in when a caller supplies no schedule at all. It
+// is jsretry.DefaultBackoff's own tail, written out rather than sliced: the two
+// are the same values for the same reason, but slicing would make a future edit
+// to DefaultBackoff's length silently re-cut this floor. A function, not a var,
+// so no caller can mutate the floor every other caller falls back to.
+func emptyScheduleFallback() []time.Duration {
 	return []time.Duration{2 * time.Minute, 10 * time.Minute}
 }
 
@@ -154,6 +158,18 @@ func jsretryFallback() []time.Duration {
 // as a sentinel so ConsumerConfig can tell "operator left it alone" from
 // "operator chose 3". The two must not drift.
 const DefaultMaxDeliver = 3
+
+// Option adjusts a service's retry-consumer settings before the shared defaults
+// derive AckWait and BackOff from them. stream.WithUnlimitedRedelivery is the
+// one in use.
+//
+// It takes and returns settings rather than the built jetstream.ConsumerConfig
+// for the reason that helper documents: backOffSchedule clamps the number of
+// BackOff steps against MaxDeliver and skips that clamp precisely when the cap
+// is unlimited, so a cap raised afterwards has already lost the clamp it was
+// meant to escape. Routing it through here makes that ordering the only one
+// expressible.
+type Option func(stream.ConsumerSettings) stream.ConsumerSettings
 
 // ConsumerConfig is the retry lane's durable consumer for one service, filtered
 // to its own escalations. Built through stream.DurableConsumerDefaults so the
@@ -174,15 +190,20 @@ const DefaultMaxDeliver = 3
 // stream.WithOutageRetryBudget does for the hot lane. It cannot reuse that
 // helper: that one keys off stream.DefaultMaxDeliver, a different sentinel from
 // this package's. An explicitly configured cap always wins, and the budget is
-// only ever raised.
-func ConsumerConfig(siteID, consumer string, s *Settings, slow []time.Duration) jetstream.ConsumerConfig {
+// only ever raised. A service that owns its own give-up decision opts out of the
+// cap entirely by passing stream.WithUnlimitedRedelivery.
+func ConsumerConfig(siteID, consumer string, s *Settings, slow []time.Duration, opts ...Option) jetstream.ConsumerConfig {
 	settings := s.Consumer
 	if settings.MaxDeliver == DefaultMaxDeliver && len(slow) > 0 {
 		if n := jsretry.DeliveriesFor(slow, stream.OutageRetryWindow); n > settings.MaxDeliver {
 			settings.MaxDeliver = n
 		}
 	}
-	cc := stream.DurableConsumerDefaults(settings.streamSettings())
+	ss := settings.streamSettings()
+	for _, opt := range opts {
+		ss = opt(ss)
+	}
+	cc := stream.DurableConsumerDefaults(ss)
 	cc.Durable = DurableName(consumer)
 	cc.FilterSubjects = []string{subject.RetryConsumerWildcard(siteID, consumer)}
 	return cc

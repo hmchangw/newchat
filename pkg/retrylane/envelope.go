@@ -78,6 +78,10 @@ func ReasonFor(err error) string {
 	return string(errcode.CodeInternal)
 }
 
+// retryHeaderCount is how many X-Retry-* keys BuildHeaders can set, used only to
+// size the map it builds.
+const retryHeaderCount = 7
+
 // BuildHeaders returns the headers for an escalated message. in is the live
 // message's headers and is never mutated. Attempts accumulate across lanes and
 // the first-failure timestamp survives every hop, so time-to-dead-letter stays
@@ -98,8 +102,9 @@ func BuildHeaders(in nats.Header, meta *jetstream.MsgMetadata,
 	originSubject, consumer, reason string, now time.Time,
 ) nats.Header {
 	// Values are copied, not aliased: out is handed to a publish that may add to
-	// it while the live message still holds in.
-	out := nats.Header{}
+	// it while the live message still holds in. Sized for the inbound set plus the
+	// X-Retry-* keys set below, so a typical envelope never rehashes.
+	out := make(nats.Header, len(in)+retryHeaderCount)
 	for k, vs := range in {
 		out[k] = append([]string(nil), vs...)
 	}

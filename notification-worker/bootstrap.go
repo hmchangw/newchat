@@ -31,7 +31,7 @@ type streamManager interface {
 // RETRY_LANE_ENABLED=false the worker runs without the retry consumer rather than refusing to start
 // (main.go, retrylane.SkipMissingStream), so the lane ships dark. With the lane on, the bind in main.go is
 // the fail-fast point.
-func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubject, retryStream, retrySubject string, enabled bool) error {
+func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubject string, retryCfg stream.Config, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     inputStream,
@@ -51,10 +51,10 @@ func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputS
 			return fmt.Errorf("create stream %s: %w", outputStream, err)
 		}
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     retryStream,
-			Subjects: []string{retrySubject},
+			Name:     retryCfg.Name,
+			Subjects: retryCfg.Subjects,
 		}); err != nil {
-			return fmt.Errorf("create stream %s: %w", retryStream, err)
+			return fmt.Errorf("create stream %s: %w", retryCfg.Name, err)
 		}
 		return nil
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/retrylane"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 // fakeCQLError is a gocql.RequestError double. gocql v1.7.0 returns its
@@ -576,7 +577,8 @@ func TestRetryConsumerConfig_NeverRetiresBehindSettle(t *testing.T) {
 	s := &retrylane.Settings{}
 	require.NoError(t, env.Parse(s))
 
-	cc := retryConsumerConfig("site-a", s, retrylane.SlowBackoff(3, jsretry.DefaultBackoff))
+	cc := retrylane.ConsumerConfig("site-a", defaultConsumerDurable, s, retrylane.SlowBackoff(3, jsretry.DefaultBackoff),
+		stream.WithUnlimitedRedelivery)
 
 	assert.Equal(t, -1, cc.MaxDeliver,
 		"a finite cap lets JetStream abandon a message with none of settle's accounting")

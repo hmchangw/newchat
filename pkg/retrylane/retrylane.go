@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -20,6 +21,25 @@ import (
 // without a real NATS connection. It carries headers, unlike outbox's form —
 // the escalation's metadata is entirely in headers.
 type PublishFunc func(ctx context.Context, subj string, data []byte, hdr nats.Header, msgID string) error
+
+// MsgPublisher is the one JetStream method escalation needs. Both
+// jetstream.JetStream and o11y's wrapper satisfy it, so the constructor below
+// takes either without this package importing the o11y nats wrapper.
+type MsgPublisher interface {
+	PublishMsg(ctx context.Context, m *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
+}
+
+// JetStreamPublish is the PublishFunc every adopter wants: a plain JetStream
+// publish carrying the escalation's headers, with the deterministic msgID as
+// Nats-Msg-Id so a crash between publish and Ack re-escalates as a no-op inside
+// the stream's Duplicates window.
+func JetStreamPublish(js MsgPublisher) PublishFunc {
+	return func(ctx context.Context, subj string, data []byte, hdr nats.Header, msgID string) error {
+		_, err := js.PublishMsg(ctx, &nats.Msg{Subject: subj, Data: data, Header: hdr},
+			jetstream.WithMsgID(msgID))
+		return err
+	}
+}
 
 // Msg widens jsretry.Msg with the accessors escalation needs. jetstream.Msg and
 // oteljetstream.Msg both satisfy it.
@@ -102,11 +122,12 @@ func (l *Lane) SettleQuiet(ctx context.Context, msg Msg, backoff []time.Duration
 func (l *Lane) settle(ctx context.Context, msg Msg, backoff []time.Duration, err error,
 	inPlace func(context.Context, jsretry.Msg, []time.Duration, error),
 ) {
-	if !l.shouldEscalate(msg, err) {
+	meta, ok := l.shouldEscalate(msg, err)
+	if !ok {
 		inPlace(ctx, msg, backoff, err)
 		return
 	}
-	hdr, escErr := l.escalate(ctx, msg, err)
+	hdr, escErr := l.escalate(ctx, msg, meta, err)
 	if escErr != nil {
 		slog.ErrorContext(ctx, "retry-lane escalation failed — falling back to in-place redelivery",
 			"consumer", l.Consumer, "error", escErr,
@@ -133,32 +154,30 @@ func (l *Lane) settle(ctx context.Context, msg Msg, backoff []time.Duration, err
 	}
 }
 
-// shouldEscalate reports whether this delivery has spent its in-place budget.
-// Every negative answer routes to jsretry, which keeps the existing semantics
-// as the single fallback path.
-func (l *Lane) shouldEscalate(msg Msg, err error) bool {
+// shouldEscalate reports whether this delivery has spent its in-place budget,
+// returning the metadata it had to read to decide so escalate does not parse it
+// a second time — jetstream.Msg.Metadata re-tokenizes the ack subject on every
+// call. Every negative answer routes to jsretry, which keeps the existing
+// semantics as the single fallback path.
+func (l *Lane) shouldEscalate(msg Msg, err error) (*jetstream.MsgMetadata, bool) {
 	if err == nil || !l.Enabled || l.Publish == nil || l.FastSteps <= 0 {
-		return false
+		return nil, false
 	}
 	if _, isPermanent := errcode.IsPermanent(err); isPermanent {
-		return false
+		return nil, false
 	}
 	meta, metaErr := msg.Metadata()
 	if metaErr != nil || meta == nil {
-		return false
+		return nil, false
 	}
-	return meta.NumDelivered > uint64(l.FastSteps)
+	return meta, meta.NumDelivered > uint64(l.FastSteps)
 }
 
 // escalate republishes the message onto the RETRY stream and returns the headers
 // it published with, so the caller can log the escalation from the same bounded
 // values that went on the wire. The body is passed through untouched —
 // re-marshalling could change bytes that dedup keys and wire-compat tests pin.
-func (l *Lane) escalate(ctx context.Context, msg Msg, err error) (nats.Header, error) {
-	meta, metaErr := msg.Metadata()
-	if metaErr != nil {
-		return nil, fmt.Errorf("read message metadata: %w", metaErr)
-	}
+func (l *Lane) escalate(ctx context.Context, msg Msg, meta *jetstream.MsgMetadata, err error) (nats.Header, error) {
 	hdr := BuildHeaders(msg.Headers(), meta, msg.Subject(), l.Consumer, ReasonFor(err), time.Now())
 	subj := subject.Retry(l.SiteID, l.Consumer, subject.RetryTierSlow)
 	msgID := DedupID(meta.Stream, meta.Sequence.Stream, l.Consumer)
