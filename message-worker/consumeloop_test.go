@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,10 +15,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -220,7 +223,7 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 				lastAttempt.Store(attempt)
 				attemptVisible.Store(true)
 			}
-			process(msgCtx, tracked)
+			process(msgCtx, tracked, tracked.Escalated)
 			tracked.Finish(msgCtx)
 		}
 	}()
@@ -270,4 +273,43 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 
 	assert.Never(t, func() bool { return len(store.savedMessages()) > 1 }, 2*time.Second, 200*time.Millisecond,
 		"the salvaged reply must not be persisted twice")
+}
+
+// A retry-lane delivery is never a first delivery: escalation only happens once
+// the hot consumer has already run the handler FastSteps+1 times. message-worker's
+// thread-reply writer keys a NON-idempotent tcount increment off
+// natsutil.IsRedelivery (store_cassandra.go), so a retry-lane message that
+// arrives unstamped counts the same reply twice — its own NumDelivered is 1 on
+// the RETRY stream, which is why StampRedelivery is not enough here.
+func TestRetryProcessor_MarksTheDeliveryAsARedelivery(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Message:   model.Message{ID: "msg-1", RoomID: "r1", UserAccount: "alice", Content: "hello", CreatedAt: now},
+		SiteID:    "site-a",
+		Timestamp: now.UnixMilli(),
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	ctrl := gomock.NewController(t)
+	mockUserStore := NewMockUserStore(ctrl)
+	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down")).AnyTimes()
+
+	var sawRedelivery bool
+	mockStore := NewMockStore(ctrl)
+	mockStore.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, _, _, _ any) error {
+			sawRedelivery = natsutil.IsRedelivery(ctx)
+			return nil
+		})
+
+	h := NewHandler(mockStore, mockUserStore, NewMockThreadStore(ctrl), "site-a",
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		nil, testDegradeTracker(), testDropPolicy())
+
+	msg := &fakeJSMsg{data: data, numDelivered: 1} // first delivery ON THE RETRY STREAM
+	retryProcessor(h)(context.Background(), msg)
+
+	assert.True(t, sawRedelivery,
+		"the retry lane must hand the store a redelivery, or a non-idempotent write runs twice")
 }

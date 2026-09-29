@@ -90,7 +90,7 @@ func TestDropLimiter_UsedByHandler(t *testing.T) {
 
 	settleOne := func() *fakeJetStreamMsg {
 		msg := &fakeJetStreamMsg{numDelivered: 40, data: []byte(`{"message":{"id":"m-1","roomId":"r-1"}}`)}
-		h.settle(context.Background(), msg, requestClassErr())
+		h.settle(context.Background(), msg, h.laneDisposition(nil), requestClassErr())
 		return msg
 	}
 

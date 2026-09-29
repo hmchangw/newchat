@@ -113,3 +113,18 @@ func OrgSyncStream(centralSiteID string) Config {
 		Subjects: []string{fmt.Sprintf("chat.hr.%s.>", centralSiteID)},
 	}
 }
+
+// Retry returns RETRY-{siteID}: the tiered-redelivery lane where a message
+// goes when its in-place fast-rung budget is spent, so the long waits stop
+// occupying the hot consumer's ack-pending budget. Each participating service
+// binds its own consumer filtered to chat.retry.{siteID}.{its name}.>.
+//
+// Duplicates (the dedup window) and retention are ops/IaC-owned, as for every
+// stream here; pkg/retrylane's deterministic Nats-Msg-Id only deduplicates a
+// crash-retried escalation while that window holds.
+func Retry(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("RETRY-%s", siteID),
+		Subjects: []string{subject.RetryWildcard(siteID)},
+	}
+}

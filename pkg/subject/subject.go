@@ -1836,3 +1836,34 @@ func TranslateRequest(account, siteID string) string {
 func TranslateRequestPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.translate.%s.text", siteID)
 }
+
+// Retry tier tokens. A tier distinguishes how an entry arrived on the RETRY
+// stream: slow is an organic escalation from a hot lane, replay is an
+// operator-triggered re-run. Both are drained by the same per-service consumer
+// (RetryConsumerWildcard); the tier exists so a replay is distinguishable from
+// a real failure in metrics and logs.
+const (
+	RetryTierSlow   = "slow"
+	RetryTierReplay = "replay"
+)
+
+// Retry is the RETRY-{siteID} subject for one consumer's escalated message:
+// chat.retry.{siteID}.{consumer}.{tier}. The consumer token routes the message
+// back to exactly one consumer — JetStream filters by subject, not by header,
+// so republishing to the origin subject would re-run every consumer of that
+// stream when only one failed.
+func Retry(siteID, consumer, tier string) string {
+	return fmt.Sprintf("chat.retry.%s.%s.%s", siteID, consumer, tier)
+}
+
+// RetryConsumerWildcard is the FilterSubject for one service's retry consumer:
+// chat.retry.{siteID}.{consumer}.>, covering every tier.
+func RetryConsumerWildcard(siteID, consumer string) string {
+	return fmt.Sprintf("chat.retry.%s.%s.>", siteID, consumer)
+}
+
+// RetryWildcard matches every retry subject on a site: chat.retry.{siteID}.>.
+// Use as the RETRY-{siteID} stream's subject pattern.
+func RetryWildcard(siteID string) string {
+	return fmt.Sprintf("chat.retry.%s.>", siteID)
+}

@@ -3303,7 +3303,7 @@ func TestHandler_Integration_CassandraOutageDoesNotLoseMessages(t *testing.T) {
 		// failure into a drop. i==0 covers the first failure of the whole outage,
 		// before the tracker has recorded anything.
 		msg := &fakeJetStreamMsg{subject: subject.MsgCanonicalCreated("site-a"), data: newEvent(id, at), numDelivered: uint64(i) * 500}
-		h.settle(ctx, msg, procErr)
+		h.settle(ctx, msg, h.laneDisposition(nil), procErr)
 		assert.True(t, msg.naked, "an infra-class failure must NAK, not give up")
 		assert.False(t, msg.acked, "no delivery count may turn a Cassandra outage into a drop")
 	}
@@ -3327,7 +3327,7 @@ func TestHandler_Integration_CassandraOutageDoesNotLoseMessages(t *testing.T) {
 		msg := &fakeJetStreamMsg{subject: subject.MsgCanonicalCreated("site-a"), data: newEvent(id, at), numDelivered: 401}
 		procErr := h.processMessage(ctx, newEvent(id, at), false)
 		require.NoError(t, procErr)
-		h.settle(ctx, msg, procErr)
+		h.settle(ctx, msg, h.laneDisposition(nil), procErr)
 		assert.True(t, msg.acked)
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/retrylane"
 )
 
 func TestSettleBackoff(t *testing.T) {
@@ -93,4 +94,37 @@ func TestSettleBackoff_TailMatchesDeliveryBudget(t *testing.T) {
 	require.NotEmpty(t, back)
 	assert.Equal(t, low[len(low)-1], back[len(back)-1],
 		"schedules must share a repeating tail or MaxDeliver stops covering the outage window")
+}
+
+// The retry lane must not discard settleBackoff's choice. With the lane on and the
+// curve fixed at startup, a message shed by a downstream escalates off the
+// backpressure curve and drains on LowLatencyBackoff's tail — a 30s first retry
+// where the curve called for 5m. Enabling the lane would then hammer a shedding
+// dependency HARDER than leaving it off, which inverts the point of both features.
+//
+// retryProcessor runs the handler itself, so it settles on this delivery's own
+// error through the same settleBackoff the hot lane uses; the property below is
+// what that buys, and it holds without any reason header on the wire.
+func TestRetrySchedule_KeepsTheBackpressureCurveAcrossEscalation(t *testing.T) {
+	const fastSteps = 3
+	normal := retrylane.SlowBackoff(fastSteps, jsretry.LowLatencyBackoff)
+	backpressure := retrylane.SlowBackoff(fastSteps, jsretry.BackpressureBackoff)
+	require.NotEqual(t, normal[0], backpressure[0], "fixture is meaningless if the tails match here")
+
+	tests := []struct {
+		name string
+		err  error
+		want []time.Duration
+	}{
+		{"downstream shedding: service busy", errcode.Unavailable("service busy"), backpressure},
+		{"downstream shedding: rate limited", errcode.TooManyRequests("slow down"), backpressure},
+		{"shedding survives wrapping", fmt.Errorf("fetch thread parent abc: %w", errcode.Unavailable("busy")), backpressure},
+		{"ordinary transient failure", errors.New("mongo: connection reset"), normal},
+		{"an internal error is not backpressure", errcode.Internal("boom"), normal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, retrylane.SlowBackoff(fastSteps, settleBackoff(tt.err)))
+		})
+	}
 }

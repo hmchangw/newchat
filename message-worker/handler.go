@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
@@ -22,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -69,6 +71,14 @@ type Handler struct {
 	siteID      string
 	publish     PublishFunc
 	metrics     *persistenceMetrics
+	// lane, fastBackoff and slowBackoff back the two dispositions in settle.go.
+	// lane holds no per-message OnEscalate hook — laneDisposition derives a
+	// per-delivery copy via WithEscalationHook so the hook (a metrics recorder
+	// closure) never mutates state shared across the worker's message goroutines.
+	// slowBackoff is also what retriedFor charges post-escalation deliveries at.
+	lane        *retrylane.Lane
+	fastBackoff []time.Duration
+	slowBackoff []time.Duration
 	// histMetrics carries the history-degradation series (write failures, drops,
 	// drop suppression, degraded gauge) — distinct from the persistence-outcome
 	// counter above, which labels every write by message kind.
@@ -80,11 +90,28 @@ type Handler struct {
 type messageWorkerHandlerOption func(*messageWorkerHandlerOptions)
 
 type messageWorkerHandlerOptions struct {
-	metrics *persistenceMetrics
+	metrics     *persistenceMetrics
+	lane        *retrylane.Lane
+	fastBackoff []time.Duration
+	slowBackoff []time.Duration
 }
 
 func withPersistenceMetrics(metrics *persistenceMetrics) messageWorkerHandlerOption {
 	return func(opts *messageWorkerHandlerOptions) { opts.metrics = metrics }
+}
+
+// withRetryLane injects the base tiered-redelivery lane plus the two schedules it
+// settles with: fast rungs in place before escalating, slow rungs once parked on
+// RETRY-{siteID}. Omitted (as in every pre-existing NewHandler call site), the
+// handler falls back to a disabled zero-value Lane and jsretry.DefaultBackoff for
+// both — exactly today's behavior, since a disabled lane never escalates and so
+// never reaches the slow schedule.
+func withRetryLane(lane *retrylane.Lane, fastBackoff, slowBackoff []time.Duration) messageWorkerHandlerOption {
+	return func(opts *messageWorkerHandlerOptions) {
+		opts.lane = lane
+		opts.fastBackoff = fastBackoff
+		opts.slowBackoff = slowBackoff
+	}
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string,
@@ -97,6 +124,15 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 	if opts.metrics == nil {
 		opts.metrics = newPersistenceMetrics(otel.Meter("message-worker"))
 	}
+	if opts.lane == nil {
+		opts.lane = &retrylane.Lane{} // zero value: Settle degrades to plain jsretry.Settle
+	}
+	if opts.fastBackoff == nil {
+		opts.fastBackoff = jsretry.DefaultBackoff
+	}
+	if opts.slowBackoff == nil {
+		opts.slowBackoff = jsretry.DefaultBackoff
+	}
 	return &Handler{
 		store:       store,
 		userStore:   userStore,
@@ -104,13 +140,20 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 		siteID:      siteID,
 		publish:     publish,
 		metrics:     opts.metrics,
+		lane:        opts.lane,
+		fastBackoff: opts.fastBackoff,
+		slowBackoff: opts.slowBackoff,
 		histMetrics: m,
 		degrade:     degrade,
 		drop:        drop,
 	}
 }
 
-func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
+// onEscalate is called when the retry lane hands this delivery to RETRY-{siteID}
+// instead of settling it in place — the per-delivery metrics hook (typically
+// (*natsmetrics.Message).Escalated), so it must never be shared across message
+// goroutines. Nil is safe: WithEscalationHook(nil) simply leaves OnEscalate unset.
+func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg, onEscalate func()) {
 	// flow: hop entry — stream-wait latency the inter-hop time-diff can't see.
 	// Gate the whole block so msg.Metadata() and arg-building are skipped on the
 	// unflagged hot path (slog.Log evaluates its args before Enabled runs).
@@ -124,11 +167,30 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			"subject", msg.Subject(), "bytes", len(msg.Data()), "stream_wait_ms", streamWaitMs)
 	}
 
-	// Migrated (X-Migration: live) events are persisted, but downstream thread side-effects are suppressed (see processMessage).
-	isMigration := natsutil.IsMigrationLiveHeader(msg.Headers())
 	// Sole persister of message history to Cassandra: transient failures must
 	// retry with backoff (never drop); malformed events Ack-drop as poison.
-	h.settle(ctx, msg, h.processMessage(ctx, msg.Data(), isMigration))
+	// settle owns the give-up decision on both lanes; laneDisposition only changes
+	// how a retry is handed back — in place on the fast rungs, or escalated to
+	// RETRY-{siteID} once they are spent. With the lane disabled this is exactly
+	// jsretry.Settle over the full schedule.
+	h.settle(ctx, msg, h.laneDisposition(onEscalate), h.process(ctx, msg))
+}
+
+// process decodes and persists one delivery, without settling it — the caller
+// decides which disposition settle hands it back with. HandleJetStreamMsg uses
+// the retry lane's; main.go's retry-consumer loop uses the slow one. Both share
+// this one path so the two lanes can never diverge on what "processed" means.
+func (h *Handler) process(ctx context.Context, msg jetstream.Msg) error {
+	// Migrated (X-Migration: live) events are persisted, but downstream thread side-effects are suppressed (see processMessage).
+	isMigration := natsutil.IsMigrationLiveHeader(msg.Headers())
+	return h.processMessage(ctx, msg.Data(), isMigration)
+}
+
+// HandleRetryMsg is the retry-consumer entry point: the same policy, settled in
+// place on the slow schedule because a message already on RETRY-{siteID} is never
+// escalated a second time.
+func (h *Handler) HandleRetryMsg(ctx context.Context, msg jetstream.Msg) {
+	h.settle(ctx, msg, h.slowDisposition(), h.process(ctx, msg))
 }
 
 func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration bool) error {

@@ -293,3 +293,45 @@ func TestClassifiersAreBounded(t *testing.T) {
 		assert.Equal(t, tt.want, ClassifyPublishError(tt.err))
 	}
 }
+
+// An escalation whose Ack fails has NOT released its ack-pending slot: the
+// delivery will time out on AckWait and redeliver. Recording it as "escalated"
+// would hide exactly the slot-holding the retry lane exists to prevent, so the
+// Ack result, not the escalation, decides the label.
+func TestEscalatedWithFailedAckRecordsLeftPending(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	msg := &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 4}, ackErr: errors.New("connection closed")}
+	tracked := c.Track(context.Background(), msg, EventCreated, 6)
+
+	tracked.Escalated()
+	require.Error(t, tracked.Ack())
+
+	rm := collect(t, reader)
+	messages := metricPoints[int64](t, rm, "chat.nats.consumer.messages")
+	require.Len(t, messages, 1, "one delivery must record exactly one outcome")
+	assert.Equal(t, string(OutcomeLeftPending), attrs(messages[0])["outcome"],
+		"a failed Ack leaves the slot held; the escalation label would mask that")
+}
+
+// An escalation Acks the message, so without its own outcome it would be
+// indistinguishable from a completed one — and outcome="escalated" is what
+// on-call is directed to (tools/observability/METRICS.md). Assert the recorded
+// label rather than membership of a registration slice: options are now built
+// lazily per label set (optTable), so there is no list to be absent from.
+func TestEscalatedRecordsItsOwnOutcome(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 4}}, EventCreated, 6)
+
+	tracked.Escalated()
+	// The Ack that follows an escalation must not overwrite the label: both
+	// converge on the disposeOnce-guarded recorder, so the first one wins.
+	_ = tracked.Ack()
+
+	rm := collect(t, reader)
+	messages := metricPoints[int64](t, rm, "chat.nats.consumer.messages")
+	require.Len(t, messages, 1, "one delivery must record exactly one outcome")
+	assert.Equal(t, string(OutcomeEscalated), attrs(messages[0])["outcome"])
+	assert.Equal(t, Outcome("escalated"), OutcomeEscalated, "wire value is a documented contract")
+}

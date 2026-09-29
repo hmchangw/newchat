@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/retrylane"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
@@ -3328,6 +3330,96 @@ func (s stubJSMsg) NakWithDelay(time.Duration) error { return nil }
 func (s stubJSMsg) InProgress() error                { return nil }
 func (s stubJSMsg) Term() error                      { return nil }
 func (s stubJSMsg) TermWithReason(string) error      { return nil }
+
+// nakRecordingMsg records the delay broadcastProcessor settles with, which is
+// the only externally visible evidence of which schedule it used.
+type nakRecordingMsg struct {
+	stubJSMsg
+	delivered uint64
+	nakDelay  time.Duration
+	naked     bool
+}
+
+func (m *nakRecordingMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: m.delivered, Stream: "MESSAGES-CANONICAL-site-a"}, nil
+}
+func (m *nakRecordingMsg) NakWithDelay(d time.Duration) error {
+	m.naked, m.nakDelay = true, d
+	return nil
+}
+
+// When the republish to RETRY-{siteID} fails, the message falls back to in-place
+// redelivery — and it must do so on the schedule it would have had without the
+// lane. Handing Settle a pre-truncated prefix instead makes jsretry.backoffFor
+// reuse the last fast rung for every later delivery, so the hot consumer burns
+// its MaxDeliver far sooner than the outage budget intends. LowLatencyBackoff is
+// {200ms, 1s, 5s, 30s, 2m, 10m}: at delivery 4 the truncated prefix yields the 5s
+// rung, the full schedule the 30s one.
+func TestBroadcastProcessor_PublishFailureFallsBackOnTheFullSchedule(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	// A plain (non-errcode) failure: transient, and not downstream shedding, so
+	// settleBackoff picks LowLatencyBackoff rather than BackpressureBackoff.
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), errors.New("mongo down")).AnyTimes()
+	keyStore.EXPECT().Get(gomock.Any(), gomock.Any()).Return(testRoomKey(t), nil).AnyTimes()
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	lane := &retrylane.Lane{
+		Consumer: "broadcast-worker", SiteID: "site-a", Enabled: true, FastSteps: 3,
+		Publish: func(context.Context, string, []byte, nats.Header, string) error {
+			return errors.New("retry stream unavailable")
+		},
+	}
+
+	msgTime := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	msg := &nakRecordingMsg{
+		stubJSMsg: stubJSMsg{subject: "chat.msg.canonical.site-a.created", data: makeMessageEvent("room-1", "hello", msgTime)},
+		delivered: 4, // first delivery past FastSteps=3
+	}
+	broadcastProcessor(h, lane)(context.Background(), msg)
+
+	require.True(t, msg.naked, "a failed republish must fall back to in-place redelivery, never Ack")
+	assert.Greater(t, msg.nakDelay, 5*time.Second,
+		"the fallback must ride LowLatencyBackoff's 30s rung, not the last fast rung (5s)")
+	assert.LessOrEqual(t, msg.nakDelay, 30*time.Second)
+}
+
+// TestBroadcastProcessor_UntrackedMessageLogsInsteadOfPanicking proves the
+// msg.(*natsmetrics.Message) assertion in broadcastProcessor degrades safely:
+// guardedProcessor always hands it a tracked message in production, but a
+// plain jetstream.Msg (stubJSMsg stands in for a future call site that broke
+// that invariant) must not panic. It must instead log — silently dropping
+// the OnEscalate hook would only ever show up as a missing "escalated"
+// metric label, indistinguishable from no escalation happening at all.
+func TestBroadcastProcessor_UntrackedMessageLogsInsteadOfPanicking(t *testing.T) {
+	rec := installRecorder(t)
+
+	msgTime := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	lane := &retrylane.Lane{Consumer: "broadcast-worker", SiteID: "site-a"} // zero-value Enabled: disabled
+	process := broadcastProcessor(h, lane)
+
+	msg := stubJSMsg{subject: "chat.msg.canonical.site-a.created", data: makeMessageEvent("room-1", "hello", msgTime)}
+	require.NotPanics(t, func() { process(context.Background(), msg) })
+
+	assert.True(t, rec.has(slog.LevelWarn, "broadcast processor: message not natsmetrics-tracked, escalation will be unlabeled"),
+		"an untracked message must log instead of silently dropping the escalation label")
+}
 
 // terminalCountFor runs fn under a tracked delivery and returns how many
 // terminal failures it recorded for reason. A log-and-drop path returns nil, so
