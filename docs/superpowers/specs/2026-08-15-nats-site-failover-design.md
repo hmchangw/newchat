@@ -1,4 +1,4 @@
-# NATS Site Failover: Full Chat Continuity via a Buddy-Hosted Standby Lane
+# NATS Site Failover: Full Chat Continuity via a Failover-Hosted Standby Lane
 
 A site's NATS cluster is lost while the rest of the site — pods, MongoDB,
 Cassandra, Valkey, Elasticsearch — stays healthy. Today this takes every user of
@@ -32,8 +32,8 @@ stores.
 | Failover subject builders | `pkg/subject` |
 | Standby stream configs | `pkg/stream` |
 | Inbound redirect fallback helper | `pkg/outbox`, used by `outbox-worker` + direct publishers |
-| Buddy connection + failover-lane consumers | 7 pipeline services |
-| Buddy connection + queue subscriptions | 5 RPC services |
+| Failover connection + failover-lane consumers | 7 pipeline services |
+| Failover connection + queue subscriptions | 5 RPC services |
 | Forced global room routing on the failover lane | `broadcast-worker`, `room-service` |
 | Client failover: shuffle, walk, stick, revert | `chat-frontend` |
 | Two-server test harness | `pkg/testutil` |
@@ -90,7 +90,7 @@ path plus `PUSH-NOTIFICATION-{site}` and `OUTBOX-{site}`. Everything else either
 writes to a database that is up, or publishes on a plane that still routes.
 
 **Inbound federation is redirected, not parked.** Peers that cannot reach a down
-site's INBOX publish to its buddy-hosted `INBOX-FAILOVER` instead, where the
+site's INBOX publish to its failover-hosted `INBOX-FAILOVER` instead, where the
 site's own `inbox-worker` consumes it and writes to the site's own MongoDB. See
 §H.
 
@@ -113,52 +113,78 @@ depends on that: cross-site federation is a direct JetStream publish into
 SubjectTransform. Where a client connects therefore does not constrain where the
 lane lives.
 
+**The premise: a pod can open a client connection to its own cluster and to one
+other.** Site-to-site gateway links carry federation today and are unaffected by
+this. What does not exist is a path from a *pod* at site A to site B's client
+port — that port is not exposed across sites, and opening it pairwise is N×(N−1)
+firewall rules nobody wants to own. One cluster is given the firewall exception
+instead, and every site's pods may reach it. Everything below follows from that.
+
 | | Placement | Rationale |
 |---|---|---|
-| Displaced clients | **Every surviving peer**, uniform shuffle | No hotspot, no coordination, no health tracking — depends on §E's forced global routing, without which only the buddy is reachable |
-| Standby lane | **One designated buddy** | 5 streams per site, not 5×(N−1); workers hold 2 connections, not N−1 |
+| Displaced clients | **Every surviving peer**, uniform shuffle | No hotspot, no coordination, no health tracking. Unaffected by the premise: browsers reach a site through its public ingress, not from inside another site's network |
+| Standby lane | **One shared failover site**, the same one for every site | It is the only cluster a displaced service can dial. 5 streams per site, workers hold 2 connections |
 
-Buddy assignment is a ring (`a→b, b→c, c→a`) so each cluster absorbs exactly one
-peer's pipeline.
-
-**Each site knows only its own buddy — no service holds the full pairing.**
+There is no ring and no pairing. Every site names the same cluster, so
+`FAILOVER_SITE_ID` and `FAILOVER_NATS_URL` are two fleet-wide constants rather
+than per-site values — which removes the assignment table, the rotation
+procedure, and the class of incident where two sites disagree about who covers
+whom.
 
 | Who | Knows | Why |
 |---|---|---|
-| A site's own services | Its own buddy | To open the buddy connection (§D) |
+| Every site's services | The one failover site | To open the failover connection (§D) |
 | Peer sites | Nothing | They publish `chat.failover.inbox.{dest}.external.*`; interest routing finds the stream wherever it is hosted (§H) |
-| Clients | Nothing | They shuffle the portal registry (§F); the buddy concept never reaches the frontend |
-| A site acting *as* a buddy | Nothing at runtime | The standby streams it hosts are consumed by the **origin** site's services over their buddy connection, not by its own |
-| Ops/IaC | The full ring | Provisioning, placement, and capacity sizing |
+| Clients | Nothing | They shuffle the portal registry (§F); the failover site never reaches the frontend |
+| Ops/IaC | Which cluster it is, and its capacity | Provisioning, placement, and sizing |
 
-No N×N matrix exists in any service's config, so adding a site or rotating the
-ring touches only the affected sites. The one thing a buddy must absorb without
-being told is **capacity** — its own load plus one peer's pipeline — which is a
-sizing fact, not runtime config.
+**What this costs, stated plainly.** A per-site buddy spread the standby load
+across the ring and bounded each failure: a buddy's death cost one site its
+standby lane. A shared site concentrates both.
 
-Config per site is two values: `BUDDY_SITE_ID` and `BUDDY_NATS_URL`. **NATS
+- **Capacity.** It permanently hosts `5 × N` standby streams — idle, but
+  provisioned — and must absorb *any one site's* full pipeline on demand, not a
+  known peer's. Size it against the largest site, not the average.
+- **Blast radius.** It is a fleet-wide single point of failure for failover. If
+  it is down, no site has a standby lane. That is strictly worse than the ring,
+  and it is the price of the premise: with no pod-to-pod path between ordinary
+  sites, there is nowhere else for a displaced service to go.
+- **Self-reference.** A fleet-wide constant reaches the site that *hosts* the
+  failover cluster too. If that site also runs chat services, they would bind a
+  standby lane on the very cluster the lane exists to outlive — and the
+  placement assertion would pass, because it compares against this same site ID.
+  `natsutil.NewFailoverDialer` refuses the lane and logs ERROR rather than
+  letting it read as configured. Under a buddy ring this case could not arise;
+  under one shared site it is reachable by config alone.
+
+The cheapest way to spend none of the above is to make the failover cluster a
+dedicated one that runs no chat services of its own.
+
+Config per site is two values: `FAILOVER_SITE_ID` and `FAILOVER_NATS_URL`. **NATS
 cluster names match site IDs in this deployment** (confirmed), so
-`BUDDY_SITE_ID` doubles as the expected `StreamInfo.Cluster.Name` for the
-placement assertion (§C) and no separate `BUDDY_CLUSTER_NAME` is needed. Treat
+`FAILOVER_SITE_ID` doubles as the expected `StreamInfo.Cluster.Name` for the
+placement assertion (§C) and no separate `FAILOVER_CLUSTER_NAME` is needed. Treat
 that correspondence as an ops invariant: were a cluster ever renamed away from
 its site ID, the assertion would fail at startup — loudly, which is the right
 direction, but it would need the third value at that point.
 
-That assertion is also what catches a **ring disagreement**, not merely an
-accidental placement. If ops provisions a site's standby streams on the wrong
-cluster, `js.Stream()` still finds them — the JetStream API is supercluster-wide,
-so lookup succeeds regardless of where an asset is hosted. Only the
-`Cluster.Name` comparison detects that ops config and service config disagree
-about the ring, which is exactly the split-brain that would otherwise stay
-invisible until an incident.
+That assertion is also what catches ops and service config **disagreeing about
+which cluster is the failover site**, not merely an accidental placement. If ops
+provisions a site's standby streams somewhere else, `js.Stream()` still finds
+them — the JetStream API is supercluster-wide, so lookup succeeds regardless of
+where an asset is hosted. Only the `Cluster.Name` comparison detects the
+disagreement, which is exactly the split-brain that would otherwise stay
+invisible until an incident. With one fleet-wide value the assertion is also a
+fleet-wide one: every site asserts the same cluster name, so a wrong value fails
+every site's startup at once rather than silently stranding one.
 
-**Why services pin to the buddy while clients spread.** The asymmetry is
+**Why services pin to the failover site while clients spread.** The asymmetry is
 principled, not incidental, and it follows from the same load split above.
 
 The decisive reason: **load follows the streams, not the connections.** The
-standby lane is pinned to the buddy, so the JetStream work — append, replicate,
+standby lane is pinned to the failover site, so the JetStream work — append, replicate,
 consumer state, acks — lands there no matter which cluster a service connects
-from. Spreading service connections cannot reduce the buddy's load by one byte;
+from. Spreading service connections cannot reduce the failover site's load by one byte;
 it would only add gateway hops to reach the same streams. Clients are the
 opposite case: their connection *is* the load (WebSockets, subscription state,
 per-client fanout), so spreading them moves real work.
@@ -166,7 +192,7 @@ per-client fanout), so spreading them moves real work.
 Three supporting reasons:
 
 - **Consuming is chatty.** A pull consumer continuously exchanges pull requests,
-  deliveries and acks. On the buddy that traffic is intra-cluster; from a random
+  deliveries and acks. On the failover site that traffic is intra-cluster; from a random
   peer every ack is a WAN round trip to the stream leader. At `MAX_WORKERS=100`
   that is a large avoidable cost.
 - **Scale does not warrant it.** A site is a dozen services times a few replicas
@@ -176,9 +202,11 @@ Three supporting reasons:
   to face mid-incident. Pinning makes capacity planning arithmetic.
 
 Random placement also buys nothing in the double-failure case where it looks
-most attractive: if the buddy is down too, the standby streams are unavailable
-regardless of what a service is connected to. A live connection elsewhere does
-not resurrect them.
+most attractive: if the failover site is down too, the standby streams are
+unavailable regardless of what a service is connected to. A live connection
+elsewhere does not resurrect them — and under a shared failover site there is no
+"elsewhere" to connect to anyway, since no other cluster accepts a pod's client
+connection.
 
 The RPC services (`room-service`, `user-service`, `history-service`,
 `search-service`, `user-presence-service`) are the one arguable case — they
@@ -210,7 +238,7 @@ placement. It is also why `js.Stream(ctx, name)` resolves from any cluster, and
 therefore why a successful lookup says nothing about placement (§C).
 
 The standby streams are accordingly named for the **origin** site
-(`INBOX-FAILOVER-site-a`), never the hosting buddy.
+(`INBOX-FAILOVER-site-a`), never the hosting failover site.
 
 **Subject filters cannot overlap.** Failover subjects therefore cannot simply
 append a token to a live filter. But they also cannot go
@@ -249,7 +277,7 @@ the same account, now or as new streams are added.
 advertisement across the supercluster. This is load-bearing in two places: the
 client-facing subject must cross the gateway for a displaced client to reach
 its home site's `MESSAGES-FAILOVER` stream, and the internal subjects must cross
-it for the buddy-hosted lane to be publishable from a site-A process. Choosing
+it for the failover-hosted lane to be publishable from a site-A process. Choosing
 either root under `chat.local.` would have silently disabled the whole design.
 
 New builders in `pkg/subject` mirroring the live ones, so no call site builds a
@@ -257,11 +285,11 @@ failover subject with `fmt.Sprintf`.
 
 ### C. Standby streams
 
-Five per site, hosted on that site's buddy cluster, named for the **origin**
+Five per site, hosted on that site's failover cluster, named for the **origin**
 site. Ops/IaC-owned in production; `BOOTSTRAP_STREAMS=true` stands them up in
 dev, per the existing convention.
 
-| Stream (on buddy's cluster) | Subjects |
+| Stream (on failover site's cluster) | Subjects |
 |---|---|
 | `MESSAGES-FAILOVER-{site}` | `chat.user.*.room.*.{site}.failover.msg.>` |
 | `MESSAGES-CANONICAL-FAILOVER-{site}` | `chat.failover.msg.canonical.{site}.>` |
@@ -279,7 +307,7 @@ A stream created without `StreamConfig.Placement` is placed wherever the
 supercluster's meta-leader chooses. For these five that is fatal: if
 `INBOX-FAILOVER-site-a` lands on cluster A, it dies with site A and every
 failover silently fails with the lane looking correctly provisioned. Each
-standby stream MUST carry an explicit `Placement.Cluster` naming the **buddy's**
+standby stream MUST carry an explicit `Placement.Cluster` naming the **failover site's**
 cluster.
 
 **Relocating a live stream is not an alternative.** Placement is changeable at
@@ -293,18 +321,20 @@ failure mode this design targets.
 
 **Nothing is ever moved at runtime.** Placement is set once at creation and never
 updated; a failover is simply traffic arriving at streams that already exist in
-the right place. Even buddy reassignment does not need a migration — because
-standby streams sit empty in steady state, the operation is delete-and-recreate
-on the new buddy, with no catch-up and no partially-moved state to reason about.
-The one precondition is that consumers have drained, which only matters when
-reassigning shortly after a real failover, while the stream still holds that
-incident's residue.
+the right place. Even moving the failover site to a different cluster does not
+need a migration — because standby streams sit empty in steady state, the
+operation is delete-and-recreate on the new cluster, with no catch-up and no
+partially-moved state to reason about. The one precondition is that consumers
+have drained, which only matters when moving shortly after a real failover,
+while the streams still hold that incident's residue. Under one shared failover
+site this is a single fleet-wide operation covering all `5 × N` streams, rather
+than a per-site one — larger, but done once and with nothing to keep in step.
 
 **Ownership and verification.** Placement is topology, so it stays with ops/IaC
 per the existing rule that a service's `bootstrap.go` sets only `Name +
 Subjects`. But the production path in each `bootstrapStreams` already calls
 `js.Stream(ctx, name)` to fail fast on a missing stream; for the standby streams
-it additionally asserts `info.Cluster.Name` equals the configured buddy cluster.
+it additionally asserts `info.Cluster.Name` equals the configured failover cluster.
 That is the same fail-fast check one field deeper, and it converts the one
 misconfiguration that would otherwise be silent and catastrophic into a startup
 error.
@@ -317,11 +347,11 @@ rollout checklist rather than the test suite.
 
 ### D. Dual connections, no mode flag
 
-Each affected service opens **two** NATS connections — home and buddy — and
+Each affected service opens **two** NATS connections — home and failover site — and
 binds each lane's consumers on its own connection.
 
 A `nats.Conn` attaches to exactly one server at a time, so a comma-separated
-`NATS_URL` cannot express this: a worker that reconnected to the buddy could not
+`NATS_URL` cannot express this: a worker that reconnected to the failover site could not
 also drain its home backlog, which would force an explicit failover-mode flag
 and with it the possibility of half the workers flipping and half not.
 
@@ -329,7 +359,7 @@ Two connections removes the question entirely:
 
 | Home NATS | Behavior |
 |---|---|
-| Down | Home consumers idle; buddy consumers run |
+| Down | Home consumers idle; failover consumers run |
 | Up | Both run; the pre-outage backlog drains alongside the failover lane |
 
 There is no detection, no flag, and no cross-service agreement to reach.
@@ -342,8 +372,8 @@ servers do. That is a timestamp each process reads from its own connection, not
 a mode flag and not shared state — the no-coordination property survives.
 
 Connect semantics differ by role. **Home stays fail-fast** per CLAUDE.md — if the
-home bus is unreachable at startup, log and exit. **Buddy connect failure at
-startup logs a warning and the service runs without a failover lane.** A buddy
+home bus is unreachable at startup, log and exit. **Failover connect failure at
+startup logs a warning and the service runs without a failover lane.** A failover site
 that is already down when we start is a double fault; a retry loop for it is not
 worth the goroutine.
 
@@ -396,12 +426,12 @@ silent depends on which peer each client's shuffle happened to pick.
 
 - **Server** — routing is decided per message, by which connection the triggering
   work arrived on (a failover-lane JetStream message for a worker, a
-  buddy-connection request for an RPC service) and, on the home connection, by
+  failover site-connection request for an RPC service) and, on the home connection, by
   how recently the home connection was restored:
 
   | Work arrived on | Routing |
   |---|---|
-  | Buddy connection | Global only |
+  | Failover connection | Global only |
   | Home connection, within `FAILOVER_REVERT_GRACE` of home restoration | **Dual — local then global** |
   | Home connection, outside the window | Configured `ROOM_SUBJECT_MODE` |
 
@@ -454,10 +484,10 @@ global.
 This section and §A's client spreading are one mechanism, not two concerns.
 
 Without forced global routing, a displaced client would receive a same-site
-room's events only by connecting to the **buddy** — the single cluster where
+room's events only by connecting to the **failover site** — the single cluster where
 `broadcast-worker`'s publish reaches it without crossing a gateway. Every other
 peer would be silent for most of that user's rooms. The uniform shuffle would be
-unusable, the buddy would become the only viable destination, and it would
+unusable, the failover site would become the only viable destination, and it would
 absorb the entire displaced client population: precisely the hotspot that
 spreading exists to prevent.
 
@@ -471,7 +501,7 @@ gracefully — it collapses §A's topology back onto one cluster.
 The local/global optimization assumes **a user's connection location equals
 their home site**. Exactly two things break that assumption:
 
-- **Failover**, handled here by forcing global routing on the buddy connection.
+- **Failover**, handled here by forcing global routing on the failover connection.
 - **Travel.** A US-homed user in Tokyo who connected to the Japan cluster would
   miss every same-site room's events, for the identical reason. Today this
   cannot happen: portal resolves `natsUrl` from the directory entry's `siteId`
@@ -538,7 +568,7 @@ so clients connect to the nearest peer defeats the purpose of spreading. A
 site's users are geographically co-located — that is why they are homed there —
 so ranking by latency makes them overwhelmingly agree on one answer and
 converge on a single peer, recreating the hotspot uniform shuffle exists to
-prevent. It would amount to an implicitly-chosen buddy, selected by network
+prevent. It would amount to an implicitly-chosen failover site, selected by network
 topology rather than deliberately with capacity in mind. Two lesser objections
 reinforce it: a dynamic list means probing peers continuously during normal
 operation to optimize an event that should almost never happen, and measuring at
@@ -554,17 +584,17 @@ peers that matter. Worth doing only if sites actually span regions — and note
 that a region holding a single peer collapses back to one destination, at which
 point sizing that peer is the real answer rather than the selection algorithm.
 
-No `buddySiteId` field — an earlier draft proposed one, and uniform client
+No `failoverSiteId` field — an earlier draft proposed one, and uniform client
 spreading makes it unnecessary, since the client picks from the peer list rather
-than from a designated buddy. But a peer-list field **is** required, per step 2:
+than from a designated failover site. But a peer-list field **is** required, per step 2:
 portal serves only the caller's own site today.
 
 ### G. Services affected
 
 | Plane | Services | Change |
 |---|---|---|
-| RPC | `room-service`, `user-service`, `history-service`, `search-service`, `user-presence-service` | Buddy connection + the same `QueueSubscribe` calls on it. RPC subjects already carry `{siteID}`, so site-B's copy of a service cannot answer site-A's requests. `room-service` also §E. |
-| Pipeline | `message-gatekeeper`, `message-worker`, `broadcast-worker`, `notification-worker`, `search-sync-worker`, `push-notification-service`, `outbox-worker` | Buddy connection + failover-lane consumers. `broadcast-worker` also §E. |
+| RPC | `room-service`, `user-service`, `history-service`, `search-service`, `user-presence-service` | Failover connection + the same `QueueSubscribe` calls on it. RPC subjects already carry `{siteID}`, so site-B's copy of a service cannot answer site-A's requests. `room-service` also §E. |
+| Pipeline | `message-gatekeeper`, `message-worker`, `broadcast-worker`, `notification-worker`, `search-sync-worker`, `push-notification-service`, `outbox-worker` | Failover connection + failover-lane consumers. `broadcast-worker` also §E. |
 | Client | `chat-frontend` | §F. |
 | Portal | `portal-service` | Expose the peer list on `GET /api/settings` (§F step 2) — required; not served today. |
 
@@ -585,7 +615,7 @@ FANOUT stream, and is corrected with it.)
 **Direct-publish federation — free.** `message-worker`
 (`thread_subscription_upserted`) and `user-service` (`user_status_updated`,
 settings) publish straight to `chat.inbox.{dest}.external.>`. That target is a
-**remote** stream, which is up, and a publish from the buddy connection is
+**remote** stream, which is up, and a publish from the failover connection is
 gateway-routed exactly as from home. No failover lane, no change.
 
 **OUTBOX-buffered federation — needs the lane.** `room-service`'s
@@ -597,19 +627,20 @@ membership events need nothing, since `ROOMS` is deferred and it is idle.
 The rule underneath: **federation that targets a remote stream is already
 failover-safe; federation that buffers in a local stream is not.**
 
-#### Inbound to the failed site — redirect to the buddy INBOX
+#### Inbound to the failed site — redirect to the failover INBOX
 
 Rather than letting peers park their forwards until the site returns, a peer that
 cannot reach a down site's INBOX republishes to `INBOX-FAILOVER-{site}` on that
-site's buddy. The site's own `inbox-worker`, already holding a buddy connection
+site's failover site. The site's own `inbox-worker`, already holding a failover connection
 (§D), consumes it and writes to the site's own MongoDB — which is up. Inbound
 federation keeps flowing instead of going one-directional for the outage.
 
-**Peers need no knowledge of the buddy topology.** A peer publishes
+**Peers need no knowledge of the failover topology.** A peer publishes
 `chat.failover.inbox.{site}.external.{eventType}` and the supercluster routes it
-by interest to whichever cluster hosts that stream. No peer ever learns which
-site is whose buddy, so a buddy reassignment stays pure ops config, invisible to
-every other site's code and config alike.
+by interest to whichever cluster hosts that stream. No peer ever learns where a
+site's standby streams live, so moving the failover site stays pure ops config,
+invisible to every other site's code alike. This held under a per-site buddy and
+it still holds now — the subject names the destination site, never its host.
 
 **Fall back only on `ErrNoResponders`, never on timeout.** This is the rule that
 makes the redirect correct rather than merely useful:
@@ -686,7 +717,7 @@ to carry the traffic.
 
 TDD, red first, per CLAUDE.md §4.
 
-`pkg/testutil` gains `NATSPair(t) (home, buddy string)` — two JetStream-enabled
+`pkg/testutil` gains `NATSPair(t) (home, failover site string)` — two JetStream-enabled
 servers following the established `Xxx` / `EnsureXxx` / `TerminateXxx` shape,
 with `TerminateNATSPair` wired into `TerminateAll`. Seven-plus packages need it,
 which is exactly the threshold CLAUDE.md sets for a shared testutil container.
@@ -698,12 +729,12 @@ which is exactly the threshold CLAUDE.md sets for a shared testutil container.
 | Failover subject builders | Exact strings; disjoint from live filters at every token position |
 | Filter overlap guard | Table over every live/failover stream pair — no pair overlaps |
 | Dedup key stability | `CanonicalDedupID` identical for the same event on either lane |
-| Lane-forced routing | Buddy connection yields `chat.room.>` for `crossSite=false` |
+| Lane-forced routing | Failover connection yields `chat.room.>` for `crossSite=false` |
 | Revert grace — inside | Home connection within `FAILOVER_REVERT_GRACE` yields both roots, local first |
 | Revert grace — outside | Home connection past the window yields the configured `ROOM_SUBJECT_MODE` routing |
 | Revert grace — clock | Window measured from each process's own home restoration; a second failover restarts it |
-| Buddy connect failure | Service starts, logs a warning, runs with home lane only |
-| Placement assertion | Production path fails startup when a standby stream's `Cluster.Name` is not the configured buddy |
+| Failover connect failure | Service starts, logs a warning, runs with home lane only |
+| Placement assertion | Production path fails startup when a standby stream's `Cluster.Name` is not the configured failover site |
 | Home connect failure | Service exits non-zero (unchanged) |
 | Outbox partition parity | `OUTBOX-FAILOVER` consumers cover exactly `ConcurrentEventTypes ∪ OrderedEventTypes` |
 
@@ -712,11 +743,11 @@ which is exactly the threshold CLAUDE.md sets for a shared testutil container.
 | Case | Assertion |
 |------|-----------|
 | Failover send | Home NATS stopped; publish to the failover lane; message reaches Cassandra and a subscriber sees the broadcast |
-| Correct store | Message persists to the **origin site's** keyspace, not the buddy's |
+| Correct store | Message persists to the **origin site's** keyspace, not the failover site's |
 | Global routing | Same-site room under `RouteLocal`; failover-lane publish observed on `chat.room.>` |
 | Recovery overlap | Backlog seeded pre-outage; both lanes drain; no duplicate rows, all messages present |
 | Outbound federation | `OUTBOX-FAILOVER` forwards reach a peer INBOX during the outage |
-| Direct-publish federation | `user-service` status publish from the buddy connection lands in a peer's INBOX with no failover lane |
+| Direct-publish federation | `user-service` status publish from the failover connection lands in a peer's INBOX with no failover lane |
 | Shared fallback helper | `message-worker` and `user-service` direct publishes redirect through the same `pkg/outbox` helper |
 | Inbound redirect | Primary publish returning `ErrNoResponders` republishes to `INBOX-FAILOVER` and reaches the down site's Mongo |
 | Timeout does **not** redirect | An ambiguous timeout Naks and parks; the event never lands in both streams |
@@ -727,8 +758,8 @@ Coverage: the 80% floor repo-wide, 90% target for `pkg/`.
 ## Rollout
 
 Ops provisions the five standby streams per site — **each with an explicit
-`Placement.Cluster` naming the buddy's cluster** (§C) — and sets `BUDDY_SITE_ID` /
-`BUDDY_NATS_URL` before any service rolls.
+`Placement.Cluster` naming the failover site's cluster** (§C) — and sets `FAILOVER_SITE_ID` /
+`FAILOVER_NATS_URL` before any service rolls.
 
 The failover subject scheme is shared code (`pkg/subject`) rather than
 configuration, so within a build every site agrees on it with nothing to
@@ -763,8 +794,8 @@ deferral with a known shape rather than an open question.
 **Why it fails today, precisely.** Room mutations are accept-then-async:
 `room-service` validates, provisions the room key and at-rest DEK, publishes a
 canonical event to `chat.room.canonical.{siteID}.{op}` and returns `accepted`;
-`room-worker` does the MongoDB write. `room-service` has a buddy lane, so it
-answers the RPC during an outage — but on the buddy no stream captures that
+`room-worker` does the MongoDB write. `room-service` has a standby lane, so it
+answers the RPC during an outage — but on the failover site no stream captures that
 subject, the JetStream publish returns no-responders, and the client gets an
 error. That is the good failure: loud, immediate, nothing half-written. Room
 *reads* are unaffected throughout, because they are MongoDB reads over
@@ -790,7 +821,7 @@ request/reply and those lanes do fail over.
    gate. `ROOMS` and `ROOMS-FAILOVER` are separate streams with independent
    dedup windows, so the rule from §H applies unchanged: redirect on
    no-responders only, never on a timeout.
-3. `room-worker`'s buddy lane — the wiring every other pipeline service gets
+3. `room-worker`'s standby lane — the wiring every other pipeline service gets
    (§G), replacing its "needs no change" row.
 4. Tests: a lane-binding test asserting its publishes leave on its own
    connection, and a failover integration test.

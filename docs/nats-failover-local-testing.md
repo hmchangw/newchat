@@ -1,6 +1,6 @@
 # Testing NATS site failover locally, end to end
 
-How to exercise the buddy-hosted standby lanes against two real NATS servers: a
+How to exercise the failover-hosted standby lanes against two real NATS servers: a
 site keeps working — send and receive — while its own NATS cluster is down.
 
 Companion to [`docs/nats-failover-scenarios.md`](./nats-failover-scenarios.md),
@@ -17,16 +17,16 @@ which is the authority on mechanism. This page is only the procedure.
 
 ## 0. What the default dev stack does *not* test
 
-Every service's compose file defaults the buddy to its own server:
+Every service's compose file defaults the failover site to its own server:
 
 ```yaml
-- BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
-- BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
+- FAILOVER_SITE_ID=${FAILOVER_SITE_ID:-site-local}
+- FAILOVER_NATS_URL=${FAILOVER_NATS_URL:-nats://nats:4222}
 ```
 
 That is deliberate — it exercises the full code path (stream create, consumer
 bind, dual-lane drain) on one server — but it cannot fail over, because the
-"buddy" dies with the home. **Everything interesting requires the buddy pointed at
+"failover site" dies with the home. **Everything interesting requires the failover site pointed at
 a second server**, which is what §2–§3 set up.
 
 Two consequences follow, and both are by design:
@@ -36,7 +36,7 @@ Two consequences follow, and both are by design:
   `EnsureFailoverStream`'s create branch and skips placement entirely.
   **Placement assertion is not testable locally**; it needs clustered servers.
 - The local link between the two sites is a **leafnode**, not a gateway
-  supercluster. Direct buddy dials (which is what the standby lanes use) behave
+  supercluster. Direct failover site dials (which is what the standby lanes use) behave
   the same; cross-cluster *subject* routing does not, and the local leaf blocks
   carry no subject filters, so everything propagates. Production's
   `chat.local.>` interest filter is the thing that is *not* reproduced here.
@@ -64,7 +64,7 @@ make fed-deps-up             # 2× NATS (leafnode-linked), 2× Valkey, shared da
 make fed-seed                # seed both sites' databases
 ```
 
-Leave `make fed-up` for §3 — the services need the buddy env first.
+Leave `make fed-up` for §3 — the services need the failover site env first.
 
 Sanity check before going on:
 
@@ -86,41 +86,50 @@ Topology, from `docker-local/README.md`:
 
 ---
 
-## 3. Cross-point the buddies
+## 3. Nominate the failover site
 
-**3a. Make each NATS reachable from the other site's network.** The two servers
-share `chat-federation`, but the services do not sit on it, so give each server a
-second alias on the *other* site's network:
+Production runs a dedicated cluster that every site fails over to. Two local
+sites cannot reproduce that exactly, so **site-remote plays the failover site**:
+site-local fails over to it, and site-remote — being the host — has no standby
+lane of its own. That asymmetry is the model, not a shortcut.
+
+**3a. Make the failover NATS reachable from the other site's network.** The two
+servers share `chat-federation`, but the services do not sit on it, so give
+site-remote's server an alias on site-local's network:
 
 ```sh
-docker network connect --alias nats-buddy chat-site-local  chat-fed-nats-site-remote
-docker network connect --alias nats-buddy chat-site-remote chat-fed-nats-site-local
+docker network connect --alias nats-failover chat-site-local chat-fed-nats-site-remote
 ```
 
-Now `nats-buddy:4222` from any site-local service reaches site-remote's server,
-and vice versa. (Re-run this after anything that recreates the NATS containers —
+Now `nats-failover:4222` from any site-local service reaches site-remote's
+server. (Re-run this after anything that recreates the NATS containers —
 `fed-deps-down`, `fed-regen`.)
 
-**3b. Point each site's services at it.** Append to the generated env files:
+**3b. Point site-local's services at it.** Append to the generated env file:
 
 ```sh
 cat >> docker-local/.env.site-local <<'EOF'
 
-# Failover: site-local's standby streams live on site-remote's cluster.
-BUDDY_SITE_ID=site-remote
-BUDDY_NATS_URL=nats://nats-buddy:4222
-BOOTSTRAP_STREAMS=true
-FAILOVER_REVERT_GRACE=2m
-EOF
-
-cat >> docker-local/.env.site-remote <<'EOF'
-
-BUDDY_SITE_ID=site-local
-BUDDY_NATS_URL=nats://nats-buddy:4222
+# Failover: site-local's standby streams live on the failover cluster.
+FAILOVER_SITE_ID=site-remote
+FAILOVER_NATS_URL=nats://nats-failover:4222
 BOOTSTRAP_STREAMS=true
 FAILOVER_REVERT_GRACE=2m
 EOF
 ```
+
+**Leave `.env.site-remote` without failover config.** It hosts the standby
+streams; it does not consume them. If you do set `FAILOVER_SITE_ID=site-remote`
+there — which is what a fleet-wide constant would give it — every site-remote
+service logs
+
+```
+ERROR failover site is this service's own site — standby lane disabled, running home-only
+```
+
+and runs home-only. That guard is the point: without it those services would
+bind a standby lane on the very cluster the lane exists to outlive, and the
+placement assertion would pass, because it compares against that same site ID.
 
 `FAILOVER_REVERT_GRACE` is 30m by default — fine in production, tedious in a test.
 2m keeps §7 observable. It is read by `room-service` and `broadcast-worker`.
@@ -140,7 +149,7 @@ make fed-logs      # streaming, both sites
 
 ## 4. Verify the steady state (before breaking anything)
 
-**Standby streams exist on the buddy, not at home.** Each site's five standby
+**Standby streams exist on the failover site, not at home.** Each site's five standby
 streams must appear on the *other* server:
 
 ```sh
@@ -155,12 +164,12 @@ curl -s 'localhost:8222/jsz?streams=1&accounts=true' | grep -o '"name":"[A-Z-]*-
 ```
 
 If a site's standby streams show up on its *own* server, 3a/3b did not take — the
-service is still dialling itself as its buddy, and nothing below will prove
+service is still dialling itself as its failover site, and nothing below will prove
 anything.
 
-**Both lanes bound.** In `make fed-logs`, per service, expect a `buddy nats
-connected` line and a failover-lane bind. A service that logs the buddy connect
-warning instead (`buddy nats connect failed; running without the failover lane`)
+**Both lanes bound.** In `make fed-logs`, per service, expect a `failover site nats
+connected` line and a failover-lane bind. A service that logs the failover site connect
+warning instead (`failover site nats connect failed; running without the failover lane`)
 is home-only by design — note which, because it will not participate.
 
 **Baseline behaviour still works.** Log in as `alice` at `localhost:3000` and
@@ -182,7 +191,7 @@ docker stop chat-fed-nats-site-local
 - `alice`'s tab (3000) drops its NATS connection, fetches the peer list from
   `/api/settings`, shuffles it, and dials `ws://localhost:9322` — site-remote.
   Confirm in devtools → Network → WS: the open socket is on **9322**.
-- Site-local's services stay up. Their home lanes idle; their buddy lanes keep
+- Site-local's services stay up. Their home lanes idle; their standby lanes keep
   working. `/readyz` stays 200 because `LanesCheck` passes when *either* lane is
   serving.
 
@@ -195,7 +204,7 @@ ivan, and echo back to alice, with site-local's NATS still stopped.
 |---|---|
 | alice publishes on the `failover` subject token | devtools WS frames: subject starts `chat.failover.` |
 | lands in `MESSAGES-FAILOVER-site-local` on site-remote | `curl -s 'localhost:8322/jsz?streams=1&accounts=true'` — messages counter climbs |
-| site-local's `message-gatekeeper` validates it over its buddy connection | `make fed-logs` — gatekeeper log lines from the **site-local** container |
+| site-local's `message-gatekeeper` validates it over its failover connection | `make fed-logs` — gatekeeper log lines from the **site-local** container |
 | canonical event → `MESSAGES-CANONICAL-FAILOVER-site-local` | same `/jsz` |
 | site-local's `message-worker` persists to **site-local's** Cassandra keyspace | see below |
 | `broadcast-worker` fans out on the **global** room root | both clients receive it |
@@ -225,7 +234,7 @@ or send into a shared room.
   **no responders** (not a timeout — the gate is deliberately no-responders only),
   and retries into `INBOX-FAILOVER-site-local`, which lives on site-remote's own
   server.
-- Site-local's `inbox-worker` consumes it over its buddy connection and applies it
+- Site-local's `inbox-worker` consumes it over its failover connection and applies it
   to **site-local's** MongoDB.
 
 ```sh
@@ -278,12 +287,12 @@ docker compose -p chat-fed-services restart broadcast-worker   # adjust to your 
 ```
 
 *Expected:* the service boots with home **down**. The home dial is lazy, so it
-comes up in `RECONNECTING`, binds its buddy lane as usual, and `/readyz` reports
+comes up in `RECONNECTING`, binds its standby lane as usual, and `/readyz` reports
 ready on the strength of that one lane. When site-local's NATS returns, the home
 lane binds itself on the first `CONNECTED` (`natsutil.BindWhenConnected`, retried
 with backoff), and the grace window opens on that connect.
 
-Without a buddy configured the dial stays fail-fast, so this only holds on a
+Without a failover site configured the dial stays fail-fast, so this only holds on a
 service that has one.
 
 ---
@@ -303,7 +312,7 @@ The `docker network connect` aliases from §3a disappear with the containers.
 | Symptom | Likely cause |
 |---|---|
 | Standby streams appear on the site's *own* server | §3a/§3b not applied, or env file regenerated by `fed-regen` |
-| `buddy nats connect failed` in logs | `nats-buddy` unresolvable — re-run the `docker network connect` pair |
+| `failover nats connect failed` in logs | `nats-failover` unresolvable — re-run the `docker network connect` pair |
 | `failover stream … placement: … no cluster info` | `BOOTSTRAP_STREAMS` got turned off; local single-server NATS has no cluster name |
 | Client never leaves home after the stop | peer list empty — check `curl -s localhost:7777/api/settings \| jq .sites` |
 | Client fails over but receives nothing | room routing stuck on the local root; check the subscribe subject in WS frames |

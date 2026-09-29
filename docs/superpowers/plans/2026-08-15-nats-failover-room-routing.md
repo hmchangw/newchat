@@ -10,7 +10,7 @@
 
 **Design spec:** `docs/superpowers/specs/2026-08-15-nats-site-failover-design.md` §E.
 
-**Depends on Plan 1** (`natsutil.ConnectBuddy`) and **Plan 2** (the buddy connection wired into `broadcast-worker`; `room-service`'s buddy connection from Plan 2 Task 10).
+**Depends on Plan 1** (`natsutil.ConnectFailoverSite`) and **Plan 2** (the failover connection wired into `broadcast-worker`; `room-service`'s failover connection from Plan 2 Task 10).
 
 ## Why this is separate from Plan 2
 
@@ -59,7 +59,7 @@ not changed — but it no longer implies reachability.
 
 | Work arrived on | Effective mode | Why |
 |---|---|---|
-| Buddy connection | `RouteGlobal` | Home is down, so every client is remote; `chat.local.>` has zero legitimate subscribers |
+| Failover connection | `RouteGlobal` | Home is down, so every client is remote; `chat.local.>` has zero legitimate subscribers |
 | Home connection, within grace of restoration | `RouteDual` | Servers revert in seconds, clients take up to five minutes; both roots must carry traffic until stragglers return |
 | Home connection, outside the window | configured `ROOM_SUBJECT_MODE` | Steady state, unchanged |
 
@@ -206,7 +206,7 @@ type Lane int
 
 const (
 	LaneHome     Lane = iota // the site's own cluster
-	LaneFailover             // the buddy cluster hosting the standby lanes
+	LaneFailover             // the failover cluster hosting the standby lanes
 )
 
 // DefaultFailoverRevertGrace is how long after the home connection is restored
@@ -369,7 +369,7 @@ func TestRestoreTracker_ConcurrentAccess(t *testing.T) {
 // The watcher goroutine must exit when its context is cancelled.
 func TestTrackRestores_StopsOnContextCancel(t *testing.T) {
 	url := startEmbeddedNATS(t) // existing helper, see reply_test.go
-	conn := natsutil.ConnectBuddy(context.Background(), url, "",
+	conn := natsutil.ConnectFailoverSite(context.Background(), url, "",
 		noopTracerProvider(), noopPropagator(), false)
 	require.NotNil(t, conn)
 	t.Cleanup(func() { conn.NatsConn().Close() })
@@ -641,7 +641,7 @@ git commit -m "feat(broadcast-worker): resolve room routing per lane with a reve
 
 `room-service` is easy to miss here: it is an RPC service, so it does not look
 like part of the failover pipeline. But it publishes room `.event` at
-`handler.go:1446`, and its trigger is a **request arriving on the buddy
+`handler.go:1446`, and its trigger is a **request arriving on the failover site
 connection** rather than a failover-lane JetStream message. Same rule, different
 signal.
 
@@ -650,9 +650,9 @@ signal.
 Add to `room-service/handler_test.go`:
 
 ```go
-// A request that arrived on the buddy connection must publish its room event to
+// A request that arrived on the failover connection must publish its room event to
 // the global root, for the same reason broadcast-worker does.
-func TestPublishRoomEvent_BuddyConnectionForcesGlobal(t *testing.T) {
+func TestPublishRoomEvent_FailoverConnectionForcesGlobal(t *testing.T) {
 	pub := &capturingPublisher{}
 	h := newTestHandler(t, pub,
 		subject.NewLaneRouter(subject.RouteLocal, subject.LaneFailover, nil, 30*time.Minute))
@@ -691,11 +691,11 @@ Expected: FAIL — constructor does not accept a `RouteResolver`.
 Mirror Task 3: swap the handler's `routeMode` field for `routes
 subject.RouteResolver`, pass `h.routes.Mode(now)` at `handler.go:1446`, add the
 `FAILOVER_REVERT_GRACE` config field, and construct two handlers — one whose
-subscriptions are registered on the home connection, one on the buddy connection
+subscriptions are registered on the home connection, one on the failover connection
 that Plan 2 Task 10 opened.
 
 Register each handler's `QueueSubscribe` calls on its own connection so a
-request answered from the buddy lane uses the failover resolver.
+request answered from the standby lane uses the failover resolver.
 
 - [x] **Step 4: Run tests and build**
 
@@ -724,22 +724,22 @@ git commit -m "feat(room-service): resolve room routing per connection with a re
 // same-site room's message when it came through the failover lane. This is the
 // case that silently fails without lane-aware routing.
 func TestFailoverLane_SameSiteRoomReachesRemoteSubscriber(t *testing.T) {
-	homeURL, buddyURL := testutil.NATSPair(t)
+	homeURL, failover siteURL := testutil.NATSPair(t)
 	ctx := context.Background()
 
-	// The "displaced client": connected to the buddy, subscribed to the global
+	// The "displaced client": connected to the failover site, subscribed to the global
 	// root, as a client in failover mode is (Plan 4).
-	client, err := nats.Connect(buddyURL)
+	client, err := nats.Connect(failover siteURL)
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() })
 	sub, err := client.SubscribeSync(subject.RoomMsgStream("r1", true))
 	require.NoError(t, err)
 	require.NoError(t, client.Flush())
 
-	// broadcast-worker running the failover lane, publishing on the buddy.
-	startBroadcastFailoverLane(t, ctx, buddyURL, "site-a")
+	// broadcast-worker running the failover lane, publishing on the failover site.
+	startBroadcastFailoverLane(t, ctx, failover siteURL, "site-a")
 
-	publishCanonical(t, ctx, buddyURL, subject.FailoverMsgCanonicalCreated("site-a"),
+	publishCanonical(t, ctx, failover siteURL, subject.FailoverMsgCanonicalCreated("site-a"),
 		sameSiteRoomMessage(t, "r1", "m1"))
 
 	msg, err := sub.NextMsg(10 * time.Second)
@@ -840,7 +840,7 @@ git commit -m "docs: record the revert grace window and its coupling to the clie
 - [ ] `make test-integration SERVICE=broadcast-worker` — **not run**: no Docker
       in this environment. The new cases are compile-verified only.
 - [x] Coverage for `pkg/subject` and `pkg/natsutil` at the 90% `pkg/` target.
-- [x] **Confirm steady-state routing is unchanged:** with no buddy configured and
+- [x] **Confirm steady-state routing is unchanged:** with no failover site configured and
       no outage, `broadcast-worker` and `room-service` must route exactly as they
       did before this plan. This is the regression that would silently give back
       the gateway-interest savings the local namespace exists for.

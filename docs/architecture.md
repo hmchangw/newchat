@@ -206,7 +206,7 @@ flowchart LR
     INBOX[["INBOX-{site}<br/>chat.inbox.{site}.*"]]
     INBOXFO[["INBOX-FAILOVER-{site}<br/>chat.failover.inbox.{site}.external.&gt;"]]
 
-    subgraph Standby["Standby lanes — hosted on the BUDDY cluster, idle until an outage"]
+    subgraph Standby["Standby lanes — hosted on the FAILOVER-SITE cluster, idle until an outage"]
         MSGFO[["MESSAGES-FAILOVER-{site}"]]
         CANONFO[["MESSAGES-CANONICAL-FAILOVER-{site}"]]
         PUSHFO[["PUSH-NOTIFICATION-FAILOVER-{site}"]]
@@ -230,13 +230,13 @@ flowchart LR
 
     RW -->|cross-site| OUTBOX
     OUTBOX -. "direct JS publish<br/>(remote site)" .-> INBOX
-    OUTBOX -. "on no-responders:<br/>redirect to the buddy" .-> INBOXFO
+    OUTBOX -. "on no-responders:<br/>redirect to the failover site" .-> INBOXFO
     INBOX --> IW[inbox-worker]
-    INBOXFO -. "buddy connection" .-> IW
+    INBOXFO -. "failover connection" .-> IW
 
     HS[history-service] -->|edited/deleted/reacted| CANON
 
-    %% Failover path: same services, standby streams on the buddy cluster.
+    %% Failover path: same services, standby streams on the failover cluster.
     Client -.->|"failover.msg.send<br/>(displaced client)"| MSGFO
     MSGFO -.-> GK
     GK -.->|failover canonical| CANONFO
@@ -250,13 +250,13 @@ flowchart LR
     OUTBOXFO -.-> OW[outbox-worker]
     OUTBOX --> OW
     HS -.->|edited/deleted/pinned/reacted| CANONFO
-    Client -.->|"request/reply<br/>(displaced client)"| BuddyRouters["buddy routers:<br/>room-service, history-service, user-service"]
+    Client -.->|"request/reply<br/>(displaced client)"| FailoverRouters["failover site routers:<br/>room-service, history-service, user-service"]
 ```
 
-The three request/reply services each bind a **second router** on the buddy
+The three request/reply services each bind a **second router** on the failover site
 connection (`pkg/failoverlane.BindRouters`), subscribed to the same site-scoped
 subjects as their home router. A displaced client's RPC can therefore still be
-answered by this site's instance against this site's databases — the buddy
+answered by this site's instance against this site's databases — the failover site
 site's own copy of those services is not subscribed to another site's subjects.
 Each lane gets its own service instance so its outbound RPCs, publishes and
 OUTBOX writes leave on the connection the request arrived on; the stores and
@@ -272,7 +272,7 @@ writes — deploy order matters: `roomlist-worker` must be live *before*
 `broadcast-worker` rolls to the release that removes them, or mention badges
 raised in the gap are lost.
 
-**Standby lanes.** Each site has five standby streams hosted on its *buddy*
+**Standby lanes.** Each site has five standby streams hosted on its *failover site*
 cluster, carrying no traffic until that site's own NATS is unavailable. The
 site's own services consume them over a second NATS connection and keep writing
 to the site's own databases — which is the property that makes failover safe
@@ -283,8 +283,8 @@ and the failover-lane workers' own thread-parent, badge and presence RPCs — ar
 answered by this site's instance against this site's stores. Every lane's
 publishes and outbound RPCs leave on the connection its work arrived on; nothing
 is shared with the home lane, whose connection is the one that is down. With a
-buddy configured the home dial is lazy (`natsutil.BuddyDialer.ConnectHome`): a
-pod that boots while home is down still comes up on the buddy lane, binds its
+failover site configured the home dial is lazy (`natsutil.FailoverDialer.ConnectHome`): a
+pod that boots while home is down still comes up on the standby lane, binds its
 home lane when the cluster returns (`failoverlane.BindLanes` wires both lanes of
 a worker from one handler builder over `natsutil.BindWhenConnected`; router
 subscriptions are buffered by nats.go), and reports ready only while at least

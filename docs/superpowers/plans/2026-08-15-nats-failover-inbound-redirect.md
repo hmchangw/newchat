@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When a site's NATS cluster is down, peers redirect their federation forwards to a buddy-hosted `INBOX-FAILOVER` stream, where the down site's own `inbox-worker` consumes them and writes to its own MongoDB.
+**Goal:** When a site's NATS cluster is down, peers redirect their federation forwards to a failover-hosted `INBOX-FAILOVER` stream, where the down site's own `inbox-worker` consumes them and writes to its own MongoDB.
 
-**Architecture:** A new subject root (`chat.failover.inbox.{site}.external.>`) backed by a standby stream on the site's buddy cluster. Peers fall back to it only on an unambiguous no-responders error, so an event lands in exactly one stream. `inbox-worker` opens a second NATS connection to its buddy and binds an identical consumer there, so both lanes drain concurrently with no mode flag.
+**Architecture:** A new subject root (`chat.failover.inbox.{site}.external.>`) backed by a standby stream on the site's failover cluster. Peers fall back to it only on an unambiguous no-responders error, so an event lands in exactly one stream. `inbox-worker` opens a second NATS connection to its failover site and binds an identical consumer there, so both lanes drain concurrently with no mode flag.
 
 **Tech Stack:** Go 1.25, `nats.go` + `jetstream`, MongoDB (`mongo-driver/v2`), testcontainers, testify, mockgen.
 
@@ -43,13 +43,13 @@
 | `pkg/stream/placement_test.go` | New — table test for `CheckPlacement` |
 | `pkg/outbox/failover.go` | New — `ForwardWithFailover`, the no-responders-gated fallback |
 | `pkg/outbox/failover_test.go` | New — fallback trigger matrix |
-| `pkg/natsutil/buddy.go` | New — `ConnectBuddy`, the non-fatal secondary connection shared by every service |
-| `pkg/natsutil/buddy_test.go` | New — unreachable/unconfigured/reachable cases |
-| `pkg/testutil/nats_buddy.go` | New — second JetStream server for buddy-connection tests |
-| `pkg/testutil/terminate.go` | Wire `TerminateNATSBuddy` into `TerminateAll` |
+| `pkg/natsutil/failoversite.go` | New — `ConnectFailoverSite`, the non-fatal secondary connection shared by every service |
+| `pkg/natsutil/failoversite_test.go` | New — unreachable/unconfigured/reachable cases |
+| `pkg/testutil/nats_failoversite.go` | New — second JetStream server for failover site-connection tests |
+| `pkg/testutil/terminate.go` | Wire `TerminateNATSFailover` into `TerminateAll` |
 | `outbox-worker/handler.go` | Route the forward through `ForwardWithFailover` |
-| `inbox-worker/main.go` | Buddy config, second connection, failover consumer, placement assertion |
-| `inbox-worker/bootstrap.go` | Bootstrap/verify `INBOX-FAILOVER` on the buddy connection |
+| `inbox-worker/main.go` | Failover config, second connection, failover consumer, placement assertion |
+| `inbox-worker/bootstrap.go` | Bootstrap/verify `INBOX-FAILOVER` on the failover connection |
 | `inbox-worker/integration_test.go` | End-to-end: both lanes drain to the same Mongo |
 | `docs/nats-subject-naming.md` | Document the `chat.failover.>` root |
 | `docs/architecture.md` | Correct the stale FANOUT stream and `broadcast-worker → outbox` edge |
@@ -136,11 +136,11 @@ Add to `pkg/subject/subject.go` directly after `InboxExternalAll`:
 // FailoverInboxExternal is the subject a peer publishes a cross-site federation
 // event on when the destination site's own INBOX is unreachable:
 // `chat.failover.inbox.{siteID}.external.{eventType}`. The standby stream that
-// captures it is hosted on the destination site's buddy cluster, so the
-// destination's own inbox-worker consumes it over its buddy connection and
+// captures it is hosted on the destination site's failover cluster, so the
+// destination's own inbox-worker consumes it over its failover connection and
 // applies the event to the destination's DB.
 //
-// The publisher needs no knowledge of which cluster is whose buddy — the
+// The publisher needs no knowledge of which cluster is whose failover site — the
 // subject names the destination site, and supercluster interest routing
 // delivers it wherever the stream lives.
 //
@@ -195,7 +195,7 @@ func TestInboxFailover(t *testing.T) {
 	assert.Equal(t, []string{"chat.failover.inbox.site-a.external.>"}, c.Subjects)
 }
 
-// The stream is named for the ORIGIN site, never the hosting buddy — names are
+// The stream is named for the ORIGIN site, never the hosting failover site — names are
 // unique supercluster-wide, and naming by host would collide if a cluster ever
 // buddied for more than one peer.
 func TestInboxFailover_NamedForOriginSite(t *testing.T) {
@@ -216,9 +216,9 @@ Add to `pkg/stream/stream.go` directly after `Inbox`:
 
 ```go
 // InboxFailover returns INBOX-FAILOVER-{siteID}: the standby inbound-federation
-// lane for a site, hosted on that site's BUDDY cluster so it survives the site's
+// lane for a site, hosted on that site's FAILOVER-SITE cluster so it survives the site's
 // own NATS outage. Peers redirect here when the site's primary INBOX is
-// unreachable; the site's own inbox-worker consumes it over its buddy connection.
+// unreachable; the site's own inbox-worker consumes it over its failover connection.
 //
 // Named for the origin site, not the host — stream names are unique across the
 // supercluster (one account, one JetStream domain).
@@ -226,7 +226,7 @@ Add to `pkg/stream/stream.go` directly after `Inbox`:
 // Carries only the external.> lane: the internal.> lane is a same-site search
 // feed published by services that are idle during the outage.
 //
-// Placement is ops-owned and MUST name the buddy's cluster; the owning service
+// Placement is ops-owned and MUST name the failover site's cluster; the owning service
 // asserts it at startup via CheckPlacement rather than setting it here.
 func InboxFailover(siteID string) Config {
 	return Config{
@@ -365,7 +365,7 @@ import (
 // unique supercluster-wide), so an existence check passes and the
 // misconfiguration only surfaces during the outage it was meant to survive.
 // Comparing the hosting cluster is the only check that catches it — and it also
-// catches a ring disagreement, where ops provisioned against a different buddy
+// catches a ring disagreement, where ops provisioned against a different failover site
 // than the service is configured with.
 //
 // Callers pass an already-fetched StreamInfo so this stays a pure function.
@@ -482,7 +482,7 @@ func TestForwardWithFailover(t *testing.T) {
 		{
 			name:        "fallback also fails",
 			primaryErr:  nats.ErrNoResponders,
-			failoverErr: errors.New("buddy down"),
+			failoverErr: errors.New("failover site down"),
 			wantSubjects: []string{
 				"chat.inbox.site-a.external.member_added",
 				"chat.failover.inbox.site-a.external.member_added",
@@ -546,7 +546,7 @@ import (
 type PublishFunc func(ctx context.Context, subj string, data []byte, msgID string) error
 
 // ForwardWithFailover publishes a federation event to the destination site's
-// INBOX, redirecting to its buddy-hosted failover lane when — and only when —
+// INBOX, redirecting to its failover-hosted failover lane when — and only when —
 // the destination is unambiguously unreachable.
 //
 // The fallback triggers on no-responders alone, never on a timeout. INBOX and
@@ -705,12 +705,12 @@ git commit -m "feat(outbox-worker): redirect forwards to the failover inbox on n
 ### Task 6: Two-server test harness
 
 **Files:**
-- Create: `pkg/testutil/nats_buddy.go`
+- Create: `pkg/testutil/nats_failoversite.go`
 - Modify: `pkg/testutil/terminate.go`
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `testutil.NATSPair(t *testing.T) (home, buddy string)`, `testutil.EnsureNATSBuddy() error`, `testutil.TerminateNATSBuddy()`.
+- Produces: `testutil.NATSPair(t *testing.T) (home, failover site string)`, `testutil.EnsureNATSFailover() error`, `testutil.TerminateNATSFailover()`.
 
 **Fidelity limit to record in the doc comment:** these are two *independent*
 JetStream servers, not a supercluster. The harness proves consumer binding and
@@ -720,7 +720,7 @@ supercluster in staging.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `pkg/testutil/nats_buddy_test.go`:
+Create `pkg/testutil/nats_failoversite_test.go`:
 
 ```go
 //go:build integration
@@ -738,14 +738,14 @@ import (
 )
 
 func TestNATSPair_ReturnsTwoIndependentServers(t *testing.T) {
-	home, buddy := testutil.NATSPair(t)
-	assert.NotEqual(t, home, buddy, "home and buddy must be distinct servers")
+	home, failover site := testutil.NATSPair(t)
+	assert.NotEqual(t, home, failover site, "home and failover site must be distinct servers")
 
 	hc, err := nats.Connect(home)
 	require.NoError(t, err)
 	t.Cleanup(func() { hc.Close() })
 
-	bc, err := nats.Connect(buddy)
+	bc, err := nats.Connect(failover site)
 	require.NoError(t, err)
 	t.Cleanup(func() { bc.Close() })
 
@@ -776,7 +776,7 @@ Expected: FAIL — `undefined: testutil.NATSPair`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Create `pkg/testutil/nats_buddy.go`:
+Create `pkg/testutil/nats_failoversite.go`:
 
 ```go
 //go:build integration
@@ -799,20 +799,20 @@ import (
 )
 
 var (
-	natsBuddyOnce      sync.Once
-	natsBuddyContainer testcontainers.Container
-	natsBuddyStopProc  func()
-	natsBuddyURL       string
-	natsBuddyInitErr   error
+	natsFailoverOnce      sync.Once
+	natsFailoverContainer testcontainers.Container
+	natsFailoverStopProc  func()
+	natsFailoverURL       string
+	natsFailoverInitErr   error
 )
 
-// ensureNATSBuddy starts a SECOND JetStream server, independent of the one
+// ensureNATSFailover starts a SECOND JetStream server, independent of the one
 // ensureNATS provides. Same subprocess-then-container strategy as the primary.
-func ensureNATSBuddy() (string, error) {
-	natsBuddyOnce.Do(func() {
+func ensureNATSFailover() (string, error) {
+	natsFailoverOnce.Do(func() {
 		if u, stop, err := startNATSBinary(); err == nil {
-			natsBuddyURL = u
-			natsBuddyStopProc = stop
+			natsFailoverURL = u
+			natsFailoverStopProc = stop
 			return
 		}
 		ctx := context.Background()
@@ -821,63 +821,63 @@ func ensureNATSBuddy() (string, error) {
 			testcontainers.WithWaitStrategy(wait.ForLog("Server is ready").WithStartupTimeout(60*time.Second)),
 		)
 		if err != nil {
-			natsBuddyInitErr = fmt.Errorf("start buddy nats: %w", err)
+			natsFailoverInitErr = fmt.Errorf("start failover site nats: %w", err)
 			return
 		}
 		url, err := c.ConnectionString(ctx)
 		if err != nil {
 			_ = c.Terminate(ctx)
-			natsBuddyInitErr = fmt.Errorf("get buddy nats url: %w", err)
+			natsFailoverInitErr = fmt.Errorf("get failover site nats url: %w", err)
 			return
 		}
-		natsBuddyContainer = c
-		natsBuddyURL = url
+		natsFailoverContainer = c
+		natsFailoverURL = url
 	})
-	return natsBuddyURL, natsBuddyInitErr
+	return natsFailoverURL, natsFailoverInitErr
 }
 
 // NATSPair returns the URLs of two process-shared JetStream servers, for tests
-// that exercise a service holding both a home and a buddy connection.
+// that exercise a service holding both a home and a failover connection.
 //
 // FIDELITY LIMIT: these are two INDEPENDENT servers, not a supercluster. A
 // publish on one is not routed to the other. The pair proves consumer binding
 // and per-lane handling across two connections; it CANNOT prove gateway
 // interest routing, stream placement, or that a down cluster yields
 // no-responders. Those require a real supercluster in staging.
-func NATSPair(t *testing.T) (home, buddy string) {
+func NATSPair(t *testing.T) (home, failover site string) {
 	t.Helper()
 	h := NATS(t)
-	b, err := ensureNATSBuddy()
+	b, err := ensureNATSFailover()
 	if err != nil {
 		t.Fatalf("testutil.NATSPair: %v", err)
 	}
 	return h, b
 }
 
-// EnsureNATSBuddy starts the shared buddy server if not already started.
+// EnsureNATSFailover starts the shared failover site server if not already started.
 // No-t variant intended for TestMain pre-warming.
-func EnsureNATSBuddy() error { _, err := ensureNATSBuddy(); return err }
+func EnsureNATSFailover() error { _, err := ensureNATSFailover(); return err }
 
-// TerminateNATSBuddy stops the shared buddy server. Best-effort, idempotent.
-func TerminateNATSBuddy() {
-	if natsBuddyStopProc != nil {
-		natsBuddyStopProc()
-		natsBuddyStopProc = nil
+// TerminateNATSFailover stops the shared failover site server. Best-effort, idempotent.
+func TerminateNATSFailover() {
+	if natsFailoverStopProc != nil {
+		natsFailoverStopProc()
+		natsFailoverStopProc = nil
 		return
 	}
-	if natsBuddyContainer == nil {
+	if natsFailoverContainer == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := natsBuddyContainer.Terminate(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "terminate buddy nats: %v\n", err)
+	if err := natsFailoverContainer.Terminate(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "terminate failover site nats: %v\n", err)
 	}
-	natsBuddyContainer = nil
+	natsFailoverContainer = nil
 }
 ```
 
-In `pkg/testutil/terminate.go`, add `TerminateNATSBuddy()` to `TerminateAll()`
+In `pkg/testutil/terminate.go`, add `TerminateNATSFailover()` to `TerminateAll()`
 immediately after the existing `TerminateNATS()` call.
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -889,30 +889,30 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add pkg/testutil/nats_buddy.go pkg/testutil/nats_buddy_test.go pkg/testutil/terminate.go
-git commit -m "test(testutil): add NATSPair two-server harness for buddy-connection tests"
+git add pkg/testutil/nats_failoversite.go pkg/testutil/nats_failoversite_test.go pkg/testutil/terminate.go
+git commit -m "test(testutil): add NATSPair two-server harness for failover site-connection tests"
 ```
 
 ---
 
-### Task 6b: Shared buddy-connection helper
+### Task 6b: Shared failover site-connection helper
 
-Twelve services across this plan and the next open a buddy connection with
+Twelve services across this plan and the next open a failover connection with
 identical semantics — unlike the home connection it must never be fatal. Putting
 that rule in one place keeps a future service from copying a fail-fast variant by
 mistake.
 
 **Files:**
-- Create: `pkg/natsutil/buddy.go`
-- Test: `pkg/natsutil/buddy_test.go`
+- Create: `pkg/natsutil/failoversite.go`
+- Test: `pkg/natsutil/failoversite_test.go`
 
 **Interfaces:**
 - Consumes: `natsutil.Connect`.
-- Produces: `natsutil.ConnectBuddy(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool) *o11ynats.Conn` — returns `nil` (never an error) when the buddy is unreachable or unconfigured.
+- Produces: `natsutil.ConnectFailoverSite(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool) *o11ynats.Conn` — returns `nil` (never an error) when the failover site is unreachable or unconfigured.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `pkg/natsutil/buddy_test.go`:
+Create `pkg/natsutil/failoversite_test.go`:
 
 ```go
 package natsutil_test
@@ -929,21 +929,21 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
-func TestConnectBuddy_UnreachableReturnsNil(t *testing.T) {
-	conn := natsutil.ConnectBuddy(context.Background(), "nats://127.0.0.1:1", "",
+func TestConnectFailoverSite_UnreachableReturnsNil(t *testing.T) {
+	conn := natsutil.ConnectFailoverSite(context.Background(), "nats://127.0.0.1:1", "",
 		noop.NewTracerProvider(), propagation.TraceContext{}, false)
-	assert.Nil(t, conn, "an unreachable buddy must degrade to nil, never block startup")
+	assert.Nil(t, conn, "an unreachable failover site must degrade to nil, never block startup")
 }
 
-func TestConnectBuddy_EmptyURLReturnsNil(t *testing.T) {
-	conn := natsutil.ConnectBuddy(context.Background(), "", "",
+func TestConnectFailoverSite_EmptyURLReturnsNil(t *testing.T) {
+	conn := natsutil.ConnectFailoverSite(context.Background(), "", "",
 		noop.NewTracerProvider(), propagation.TraceContext{}, false)
-	assert.Nil(t, conn, "an unconfigured buddy is not an error")
+	assert.Nil(t, conn, "an unconfigured failover site is not an error")
 }
 
-func TestConnectBuddy_ReachableReturnsConn(t *testing.T) {
+func TestConnectFailoverSite_ReachableReturnsConn(t *testing.T) {
 	url := startEmbeddedNATS(t) // existing helper used by reply_test.go
-	conn := natsutil.ConnectBuddy(context.Background(), url, "",
+	conn := natsutil.ConnectFailoverSite(context.Background(), url, "",
 		noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NotNil(t, conn)
 	t.Cleanup(func() { conn.NatsConn().Close() })
@@ -958,11 +958,11 @@ actually named rather than assuming `startEmbeddedNATS`.
 
 Run: `make test SERVICE=natsutil`
 
-Expected: FAIL — `undefined: natsutil.ConnectBuddy`.
+Expected: FAIL — `undefined: natsutil.ConnectFailoverSite`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Create `pkg/natsutil/buddy.go`:
+Create `pkg/natsutil/failoversite.go`:
 
 ```go
 package natsutil
@@ -976,18 +976,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// ConnectBuddy opens the secondary connection to a site's buddy cluster, where
+// ConnectFailoverSite opens the secondary connection to a site's failover cluster, where
 // its standby failover streams live.
 //
 // Unlike the home connection — which is fail-fast, because a service with no
-// bus cannot work — this NEVER fails startup. A buddy that is already down when
+// bus cannot work — this NEVER fails startup. A failover site that is already down when
 // we start is a double fault, and running home-lane-only is strictly better
 // than refusing to boot. A nil return means "no failover lane"; callers skip
 // binding it and carry on.
 //
-// An empty url means the buddy is unconfigured, which is a normal
+// An empty url means the failover site is unconfigured, which is a normal
 // single-site deployment, not an error.
-func ConnectBuddy(ctx context.Context, url, credsFile string, tp trace.TracerProvider,
+func ConnectFailoverSite(ctx context.Context, url, credsFile string, tp trace.TracerProvider,
 	prop propagation.TextMapPropagator, tracingEnabled bool,
 ) *o11ynats.Conn {
 	if url == "" {
@@ -995,11 +995,11 @@ func ConnectBuddy(ctx context.Context, url, credsFile string, tp trace.TracerPro
 	}
 	conn, err := Connect(ctx, url, credsFile, tp, prop, tracingEnabled)
 	if err != nil {
-		slog.WarnContext(ctx, "buddy nats connect failed; running without the failover lane",
+		slog.WarnContext(ctx, "failover site nats connect failed; running without the failover lane",
 			"url", url, "error", err)
 		return nil
 	}
-	slog.InfoContext(ctx, "buddy nats connected", "url", url)
+	slog.InfoContext(ctx, "failover site nats connected", "url", url)
 	return conn
 }
 ```
@@ -1013,13 +1013,13 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add pkg/natsutil/buddy.go pkg/natsutil/buddy_test.go
-git commit -m "feat(natsutil): add ConnectBuddy for non-fatal secondary connections"
+git add pkg/natsutil/failoversite.go pkg/natsutil/failoversite_test.go
+git commit -m "feat(natsutil): add ConnectFailoverSite for non-fatal secondary connections"
 ```
 
 ---
 
-### Task 7: inbox-worker buddy connection and failover consumer
+### Task 7: inbox-worker failover connection and failover consumer
 
 **Files:**
 - Modify: `inbox-worker/main.go` (config struct ~line 31; wiring ~lines 659-690)
@@ -1027,11 +1027,11 @@ git commit -m "feat(natsutil): add ConnectBuddy for non-fatal secondary connecti
 - Test: `inbox-worker/main_test.go`
 
 **Interfaces:**
-- Consumes: `stream.InboxFailover` (Task 2), `stream.CheckPlacement` (Task 3), `subject.FailoverInboxExternalAll` (Task 1), `natsutil.ConnectBuddy` (Task 6b).
-- Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig`; config fields `BuddySiteID`, `BuddyNatsURL`.
+- Consumes: `stream.InboxFailover` (Task 2), `stream.CheckPlacement` (Task 3), `subject.FailoverInboxExternalAll` (Task 1), `natsutil.ConnectFailoverSite` (Task 6b).
+- Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig`; config fields `FailoverSiteID`, `FailoverNatsURL`.
 
-**Connect semantics (spec §D):** home stays fail-fast; a buddy connect failure
-logs a warning and the service runs home-lane-only. A buddy that is down at our
+**Connect semantics (spec §D):** home stays fail-fast; a failover site connect failure
+logs a warning and the service runs home-lane-only. A failover site that is down at our
 startup is a double fault.
 
 - [ ] **Step 1: Write the failing test**
@@ -1069,7 +1069,7 @@ Add to `inbox-worker/main.go` next to `buildConsumerConfig`:
 
 ```go
 // buildFailoverConsumerConfig returns the durable consumer config for the
-// buddy-hosted INBOX-FAILOVER lane. Its durable name is distinct from the
+// failover-hosted INBOX-FAILOVER lane. Its durable name is distinct from the
 // primary lane's so the two keep independent cursors, and its FilterSubjects
 // scope it to the failover root.
 func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
@@ -1083,27 +1083,27 @@ func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetst
 Add to the `config` struct:
 
 ```go
-	// BuddySiteID is the site whose NATS cluster hosts this site's standby
+	// FailoverSiteID is the site whose NATS cluster hosts this site's standby
 	// failover streams. Doubles as the expected StreamInfo.Cluster.Name for the
 	// placement assertion — NATS cluster names match site IDs in this
 	// deployment. Empty disables the failover lane entirely.
-	BuddySiteID  string `env:"BUDDY_SITE_ID"  envDefault:""`
-	BuddyNatsURL string `env:"BUDDY_NATS_URL" envDefault:""`
+	FailoverSiteID  string `env:"FAILOVER_SITE_ID"  envDefault:""`
+	FailoverNatsURL string `env:"FAILOVER_NATS_URL" envDefault:""`
 ```
 
 After the existing home-connection wiring in `main`, add:
 
 ```go
-	// Buddy lane. ConnectBuddy never fails startup — a nil conn means no
+	// Failover lane. ConnectFailoverSite never fails startup — a nil conn means no
 	// failover lane and the service runs home-only.
-	if bnc := natsutil.ConnectBuddy(ctx, cfg.BuddyNatsURL, cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.BuddySiteID != "" {
+	if bnc := natsutil.ConnectFailoverSite(ctx, cfg.FailoverNatsURL, cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.FailoverSiteID != "" {
 		bjs, err := bnc.JetStream()
 		if err != nil {
-			slog.Warn("buddy jetstream init failed; running without the failover lane",
-				"buddy_site_id", cfg.BuddySiteID, "error", err)
+			slog.Warn("failover site jetstream init failed; running without the failover lane",
+				"failover_site_id", cfg.FailoverSiteID, "error", err)
 		} else if err := startFailoverLane(ctx, bjs, cfg, handler); err != nil {
-			slog.Warn("failover lane unavailable", "buddy_site_id", cfg.BuddySiteID, "error", err)
+			slog.Warn("failover lane unavailable", "failover_site_id", cfg.FailoverSiteID, "error", err)
 		}
 	}
 ```
@@ -1112,9 +1112,9 @@ Add `startFailoverLane`, which bootstraps or verifies the stream, asserts its
 placement, and creates the consumer:
 
 ```go
-// startFailoverLane binds the buddy-hosted INBOX-FAILOVER consumer. In
+// startFailoverLane binds the failover-hosted INBOX-FAILOVER consumer. In
 // production it verifies the stream exists AND is hosted by the configured
-// buddy cluster — a standby stream placed on the cluster it exists to outlive
+// failover cluster — a standby stream placed on the cluster it exists to outlive
 // resolves fine through the supercluster-wide JetStream API, so only the
 // cluster name catches it.
 func startFailoverLane(ctx context.Context, js jetstream.JetStream, cfg config, handler *Handler) error {
@@ -1136,7 +1136,7 @@ func startFailoverLane(ctx context.Context, js jetstream.JetStream, cfg config, 
 		if err != nil {
 			return fmt.Errorf("inspect INBOX-FAILOVER stream: %w", err)
 		}
-		if err := stream.CheckPlacement(info, cfg.BuddySiteID); err != nil {
+		if err := stream.CheckPlacement(info, cfg.FailoverSiteID); err != nil {
 			return fmt.Errorf("INBOX-FAILOVER placement: %w", err)
 		}
 	}
@@ -1147,14 +1147,14 @@ func startFailoverLane(ctx context.Context, js jetstream.JetStream, cfg config, 
 		return fmt.Errorf("create INBOX-FAILOVER consumer: %w", err)
 	}
 
-	slog.Info("failover lane bound", "stream", failoverCfg.Name, "buddy_site_id", cfg.BuddySiteID)
+	slog.Info("failover lane bound", "stream", failoverCfg.Name, "failover_site_id", cfg.FailoverSiteID)
 	return startInboxConsumer(ctx, cons, handler)
 }
 ```
 
 Extract the existing two-lane pull loop that currently runs against `cons` in
 `main` into `startInboxConsumer(ctx context.Context, cons jetstream.Consumer, handler *Handler) error`,
-and call it for both the home and failover consumers. Register the buddy
+and call it for both the home and failover consumers. Register the failover site
 connection's drain in the same `shutdown.Wait` hook list as the home one, using
 `natsutil.Drain(ctx, bnc)`.
 
@@ -1174,7 +1174,7 @@ Expected: builds clean.
 
 ```bash
 git add inbox-worker/main.go inbox-worker/bootstrap.go inbox-worker/main_test.go
-git commit -m "feat(inbox-worker): consume the buddy-hosted failover inbox lane"
+git commit -m "feat(inbox-worker): consume the failover-hosted failover inbox lane"
 ```
 
 ---
@@ -1188,7 +1188,7 @@ git commit -m "feat(inbox-worker): consume the buddy-hosted failover inbox lane"
 - Consumes: the config fields from Task 7.
 - Produces: nothing consumed by later tasks.
 
-Local dev runs a single NATS, so pointing `BUDDY_NATS_URL` at the same server
+Local dev runs a single NATS, so pointing `FAILOVER_NATS_URL` at the same server
 exercises the whole code path — stream creation, consumer binding, both lanes
 draining — without a second container. Placement is not asserted because
 `BOOTSTRAP_STREAMS=true` takes the create branch.
@@ -1199,12 +1199,12 @@ In the `inbox-worker` service's `environment:` block, alongside the existing
 `NATS_URL` and `BOOTSTRAP_STREAMS=true`:
 
 ```yaml
-      # Dev points the buddy at the same NATS: one server, but the full failover
+      # Dev points the failover site at the same NATS: one server, but the full failover
       # code path (stream create, consumer bind, dual-lane drain) still runs.
       # Placement is not asserted here — BOOTSTRAP_STREAMS=true takes the create
       # branch, and a single-server NATS reports no cluster at all.
-      - BUDDY_SITE_ID=site-local
-      - BUDDY_NATS_URL=nats://nats:4222
+      - FAILOVER_SITE_ID=site-local
+      - FAILOVER_NATS_URL=nats://nats:4222
 ```
 
 Match the existing `NATS_URL` host and port in that file rather than copying
@@ -1249,11 +1249,11 @@ defensively.
 Add to `inbox-worker/integration_test.go`:
 
 ```go
-// A federation event redirected to the buddy-hosted failover lane must land in
+// A federation event redirected to the failover-hosted failover lane must land in
 // the SAME database as one delivered through the primary lane — the whole point
 // is that the down site's own worker does the work against its own store.
 func TestFailoverLane_AppliesToSameStore(t *testing.T) {
-	homeURL, buddyURL := testutil.NATSPair(t)
+	homeURL, failover siteURL := testutil.NATSPair(t)
 	db := testutil.MongoDB(t, "inboxfailover")
 	ctx := context.Background()
 
@@ -1262,7 +1262,7 @@ func TestFailoverLane_AppliesToSameStore(t *testing.T) {
 	handler := NewHandler(store)
 
 	homeJS := connectJS(t, homeURL)
-	buddyJS := connectJS(t, buddyURL)
+	failover siteJS := connectJS(t, failover siteURL)
 
 	primary := stream.Inbox("site-a")
 	_, err := homeJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
@@ -1271,17 +1271,17 @@ func TestFailoverLane_AppliesToSameStore(t *testing.T) {
 	require.NoError(t, err)
 
 	failover := stream.InboxFailover("site-a")
-	_, err = buddyJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	_, err = failover siteJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name: failover.Name, Subjects: failover.Subjects,
 	})
 	require.NoError(t, err)
 
 	startLane(t, ctx, homeJS, primary.Name, buildConsumerConfig(stream.ConsumerSettings{}, "site-a"), handler)
-	startLane(t, ctx, buddyJS, failover.Name, buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a"), handler)
+	startLane(t, ctx, failover siteJS, failover.Name, buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a"), handler)
 
 	// Same event shape on each lane, distinct rooms so the assertions are independent.
 	publishStatusEvent(t, ctx, homeJS, subject.InboxExternal("site-a", "user_status_updated"), "alice", "home-status")
-	publishStatusEvent(t, ctx, buddyJS, subject.FailoverInboxExternal("site-a", "user_status_updated"), "bob", "failover-status")
+	publishStatusEvent(t, ctx, failover siteJS, subject.FailoverInboxExternal("site-a", "user_status_updated"), "bob", "failover-status")
 
 	require.Eventually(t, func() bool {
 		return userStatus(t, ctx, db, "alice") == "home-status" &&
@@ -1338,7 +1338,7 @@ whole redirect is inert if the error does not match.
 
 ```bash
 git add inbox-worker/integration_test.go
-git commit -m "test(inbox-worker): cover the buddy failover lane end to end"
+git commit -m "test(inbox-worker): cover the failover site failover lane end to end"
 ```
 
 ---
@@ -1359,7 +1359,7 @@ subjects describing:
 
 - `chat.failover.inbox.{siteID}.external.{eventType}` — a peer's redirected
   federation forward when `{siteID}`'s own INBOX is unreachable. Captured by
-  `INBOX-FAILOVER-{siteID}`, hosted on `{siteID}`'s buddy cluster.
+  `INBOX-FAILOVER-{siteID}`, hosted on `{siteID}`'s failover cluster.
 - Why the root is `chat.failover.>` and not a token appended to `chat.inbox.>`:
   two streams in one account may not claim overlapping subject filters, and the
   constraint is enforced supercluster-wide.
@@ -1416,7 +1416,7 @@ feature:
    rejection. If it succeeds, the `chat.failover.>` root is unnecessary and the
    design simplifies considerably — report it rather than proceeding.
 2. **Placement.** `nats stream info INBOX-FAILOVER-{site}` on each site;
-   confirm the hosting cluster is that site's buddy.
+   confirm the hosting cluster is that site's failover site.
 3. **No-responders on a down cluster.** Stop a site's NATS and confirm a peer's
    forward returns no-responders rather than timing out. The redirect degrades
    silently to today's parking behavior if it times out instead.

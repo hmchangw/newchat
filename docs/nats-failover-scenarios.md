@@ -23,7 +23,7 @@ strategies on purpose, and the reason is that they carry opposite kinds of load.
 | **Site** | A self-contained deployment: its own NATS cluster, MongoDB, Cassandra, and services. Roughly "one office/region's backend." |
 | **Home site** | The site a user belongs to. Their rooms, subscriptions, and message history live in that site's databases. |
 | **Supercluster** | All the sites' NATS clusters joined together, so a message published at one site can reach another. |
-| **Buddy** | Each site's designated partner site, which hosts its standby streams. Assigned in a ring: A→B, B→C, C→A. |
+| **Failover** | Each site's designated partner site, which hosts its standby streams. Assigned in a ring: A→B, B→C, C→A. |
 | **Stream** | A durable queue in NATS. Everything about it — the data, the disks — lives on one specific cluster. |
 | **Subject** | The address a message is published to. Publishers use subjects; they never name streams. |
 
@@ -91,11 +91,26 @@ spreading exists to prevent.
 
 ---
 
-## 5. Where the services go: all to the buddy
+## 5. Where the services go: all to the failover site
 
-Meanwhile, the site's backend services connect to **one** designated partner —
-the buddy — where a set of standby streams has been sitting empty, pre-created,
-waiting for exactly this.
+Meanwhile, the site's backend services connect to **one** cluster — the failover
+site — where a set of standby streams has been sitting empty, pre-created,
+waiting for exactly this. It is the *same* cluster for every site: one address,
+configured once, fleet-wide.
+
+**Why one shared cluster rather than pairing each site with a neighbour?**
+Because a service at one site generally cannot reach another site's NATS at all.
+Sites are linked for federation, but a *pod* has no route to another site's
+client port, and opening one for every pair of sites is a firewall matrix nobody
+wants to maintain. So a single cluster is given that exception and every site's
+pods may dial it. The design then follows: if there is exactly one cluster a
+displaced service can reach, that is where its standby streams have to live.
+
+The cost is concentration, and it is worth naming up front. That one cluster
+holds every site's standby streams, has to absorb whichever site fails, and is a
+single point of failure for failover itself — if it is down, no site has a
+standby lane. A per-site partner would have spread that risk, but it needs the
+pod-to-pod reachability we do not have.
 
 Crucially, those services **still read and write their own site's databases**.
 That's the property that makes this safe: a US user's message, sent during a US
@@ -104,9 +119,9 @@ Cassandra. Nothing lands in the wrong place, and nothing has to be reconciled
 afterwards.
 
 **Why not spread the services out too?** Because the work doesn't follow the
-connection — it follows the streams. The standby streams are all on the buddy,
-so the buddy does that work no matter where the services happen to be connected.
-Spreading them wouldn't lighten the buddy's load by a single byte; it would just
+connection — it follows the streams. The standby streams are all on the failover site,
+so the failover site does that work no matter where the services happen to be connected.
+Spreading them wouldn't lighten the failover site's load by a single byte; it would just
 add network hops to reach the same streams. On top of that, a site has maybe
 tens of service connections versus thousands of user connections, so there's no
 capacity pressure to relieve in the first place.
@@ -120,23 +135,23 @@ Because "load" means two different things.
 | | Users | Services |
 |---|---|---|
 | What their connection costs | Thousands of live connections, subscription state, a copy of every message they should see | A few dozen connections, no fan-out |
-| Where their work happens | Wherever they connect | On the buddy, where the streams are |
+| Where their work happens | Wherever they connect | On the failover site, where the streams are |
 | Therefore | **Spread** — moving them moves real load | **Pin** — moving them moves nothing |
 
 A user's connection *is* the load, so spreading users spreads load. A service's
 connection is just a pipe to the streams, so spreading services spreads nothing
 and costs latency.
 
-### Request/reply services listen on the buddy too
+### Request/reply services listen on the failover site too
 
 Streams are only half the story. A displaced user does not just publish messages
 — it also asks questions: load this room's history, list my subscriptions, who
 is in this room. Those are request/reply RPCs on site-scoped subjects, and the
-user is now sending them to the buddy cluster.
+user is now sending them to the failover cluster.
 
 So `room-service`, `history-service` and `user-service` each bind a **second
-router** on the buddy connection, subscribed to the same subjects as their home
-router. Because the subjects carry the site ID, the buddy site's own copy of
+router** on the failover connection, subscribed to the same subjects as their home
+router. Because the subjects carry the site ID, the failover site's own copy of
 those services is not subscribed to them: a US user's `history.load` on the EU
 cluster can still only be answered by the US instance, reading the US Cassandra.
 Without that second router the request would find no responder at all.
@@ -180,9 +195,9 @@ hack — if the home cluster is down, there are no users left at home for a
 local-only address to reach. Nothing is lost by going global.
 
 **And this is what makes spreading possible at all.** Without it, the only
-cluster a displaced user could usefully connect to would be the buddy — the one
+cluster a displaced user could usefully connect to would be the failover site — the one
 place the local address still reaches them. Every other site would be silent, so
-everyone would have to pile onto the buddy, and the hotspot would be back. The
+everyone would have to pile onto the failover site, and the hotspot would be back. The
 global-routing rule and the user-spreading rule are one mechanism, not two.
 
 ---
@@ -220,14 +235,14 @@ was introduced to capture.
 | Federation events *out* to other sites | ✅ Works |
 | Federation events *in* from other sites | ✅ Works — redirected to a standby inbox |
 | Editing, deleting, pinning, reacting | ✅ Works |
-| Reading history and chat lists from the buddy | ✅ Works |
-| Pods restarting mid-outage (rollouts, evictions, crashes) | ✅ Boot from the buddy; join home when it returns |
+| Reading history and chat lists from the failover site | ✅ Works |
+| Pods restarting mid-outage (rollouts, evictions, crashes) | ✅ Boot from the failover site; join home when it returns |
 | Creating rooms, inviting members, renaming | ❌ Fails until recovery |
 | Search index updates for federation events | ❌ Stalls until recovery |
 | The HTTP API's outbound RPCs (`user-service`) | ❌ Fail until recovery |
 
 Room creation, invites and renames were deliberately left out of the first
-version. `room-service` answers those RPCs on the buddy, but they publish to the
+version. `room-service` answers those RPCs on the failover site, but they publish to the
 `ROOMS` stream, which has no standby — so the publish is refused and the client
 gets an error rather than a silent stall. Adding a `ROOMS` standby and a
 `room-worker` failover lane is a smaller, separate piece of work.
@@ -244,20 +259,20 @@ hang, and the affected endpoints degrade rather than the whole API.
 
 Nothing has to be switched back by hand.
 
-Services hold **two** connections the whole time — one home, one to the buddy —
+Services hold **two** connections the whole time — one home, one to the failover site —
 so when home recovers, its lane simply starts delivering again. Any backlog that
 piled up drains on its own alongside the failover traffic.
 
 Users drift home gradually, each on their own retry timer, so they trickle back
 rather than stampeding.
 
-Pods can come and go during the outage too. A service with a buddy configured
+Pods can come and go during the outage too. A service with a failover site configured
 does not insist on reaching home before it starts: if home is down, it boots,
-serves the buddy lane, and keeps dialing home in the background; the home lane
+serves the standby lane, and keeps dialing home in the background; the home lane
 binds itself the moment the cluster is back. So a rollout, an eviction or a
 crash mid-outage costs nothing but the pod. Readiness reflects this honestly —
 a pod is ready when at least one of its lanes is serving, and not before.
-Without a buddy configured, none of this applies: a single-site service with no
+Without a failover site configured, none of this applies: a single-site service with no
 bus has nothing to do, and failing fast is the right signal.
 
 One deliberate accommodation: for a while after home recovers, room events are
@@ -277,7 +292,7 @@ receiving nothing for a few minutes, with no error logged anywhere.
 The window survives restarts. A publisher that booted during the outage sees
 home *arrive* rather than come back, and treats that arrival as the recovery it
 is. A publisher that restarts after home has already recovered sees no reconnect
-at all — so with a buddy configured it assumes it just missed one and opens the
+at all — so with a failover site configured it assumes it just missed one and opens the
 window anyway. The cost is one grace period of dual publishing per restart,
 which is cheap; the alternative was a fresh pod narrowing delivery while users
 were still on partner sites.
@@ -295,11 +310,11 @@ recovery or adding permanent complexity to the message hot path.
 | Question | Answer |
 |---|---|
 | Where do displaced users connect? | A randomly chosen surviving site; they stay put until it too fails |
-| Where do displaced services connect? | The buddy, always |
-| Does a user's app know about buddies? | No — it never sees the concept |
-| Does another site need to know who my buddy is? | No — it publishes to an address, and the network finds the stream |
-| What does each site need configured? | Its own buddy. Two values (`BUDDY_SITE_ID`, `BUDDY_NATS_URL`). Never the full map |
-| Can a displaced user still ask this site questions? | Yes — `room-service`, `history-service` and `user-service` each listen on the buddy as well |
+| Where do displaced services connect? | The failover site, always |
+| Does a user's app know about the failover site? | No — it never sees the concept |
+| Does another site need to know who my failover site is? | No — it publishes to an address, and the network finds the stream |
+| What does each site need configured? | Its own failover site. Two values (`FAILOVER_SITE_ID`, `FAILOVER_NATS_URL`). Never the full map |
+| Can a displaced user still ask this site questions? | Yes — `room-service`, `history-service` and `user-service` each listen on the failover site as well |
 | Can two sites use the same stream name? | No — names are unique across the whole supercluster |
 | Where does data written during an outage go? | The outage site's own databases, as always |
 | Can a stream be moved to another cluster mid-incident? | No. That's why the standby streams are created ahead of time |

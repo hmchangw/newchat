@@ -239,21 +239,21 @@ Stream wildcards: `chat.inbox.{siteID}.external.>` and `chat.inbox.{siteID}.inte
 When a site's own NATS cluster is down, a peer's forward to
 `chat.inbox.{siteID}.external.…` gets no responders. Rather than parking the
 event for the whole outage, the peer republishes it here — to a standby stream
-hosted on **that site's buddy cluster**, where the down site's own
-`inbox-worker` consumes it over its buddy connection and applies it to the down
+hosted on **that site's failover cluster**, where the down site's own
+`inbox-worker` consumes it over its failover connection and applies it to the down
 site's own MongoDB, which is still up.
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
-| `chat.failover.inbox.{siteID}.external.{eventType}` | outbox-worker (at the **origin** site, after an unambiguous no-responders) | inbox-worker (of `{siteID}`, over its buddy connection) | Redirected cross-site federation events |
+| `chat.failover.inbox.{siteID}.external.{eventType}` | outbox-worker (at the **origin** site, after an unambiguous no-responders) | inbox-worker (of `{siteID}`, over its failover connection) | Redirected cross-site federation events |
 
 Stream wildcard: `chat.failover.inbox.{siteID}.external.>`
 
 Three properties of this subject are load-bearing:
 
-- **It names the destination site, not the buddy.** The publisher never learns
-  which cluster is whose buddy — supercluster interest routing delivers the
-  publish wherever the stream happens to live. Reassigning a buddy is ops config
+- **It names the destination site, not the failover site.** The publisher never learns
+  which cluster is whose failover site — supercluster interest routing delivers the
+  publish wherever the stream happens to live. Reassigning a failover site is ops config
   invisible to every other site.
 - **It is disjoint from `chat.inbox.>`.** Two streams in one account may not
   claim overlapping subject filters, and that is enforced supercluster-wide, so
@@ -274,12 +274,12 @@ same-site services that are idle while their own site's NATS is down.
 ### Failover message path
 
 While a site's NATS is down, its displaced clients and its own services drive a
-parallel set of standby streams on the buddy cluster. Four subjects, mirroring
+parallel set of standby streams on the failover cluster. Four subjects, mirroring
 the live message path one-for-one.
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
-| `chat.user.{account}.room.{roomId}.{siteID}.failover.msg.send` | displaced client | message-gatekeeper (over its buddy connection) | Message send while the home site's NATS is down |
+| `chat.user.{account}.room.{roomId}.{siteID}.failover.msg.send` | displaced client | message-gatekeeper (over its failover connection) | Message send while the home site's NATS is down |
 | `chat.failover.msg.canonical.{siteID}.{event}` | message-gatekeeper | message-worker, broadcast-worker, notification-worker, search-sync-worker | Validated messages on the failover lane |
 | `chat.failover.push.{siteID}.send` | notification-worker | push-notification-service | Push requests derived from failover-lane messages |
 | `chat.failover.outbox.{siteID}.{destSiteID}.{eventType}` | room-service | outbox-worker | Outbound federation while the home site's NATS is down |

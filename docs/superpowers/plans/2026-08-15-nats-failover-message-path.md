@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When a site's NATS cluster is down, its users can still send and receive messages — validated, persisted, broadcast, notified, and indexed by that site's own services, against that site's own databases, through standby streams on its buddy cluster.
+**Goal:** When a site's NATS cluster is down, its users can still send and receive messages — validated, persisted, broadcast, notified, and indexed by that site's own services, against that site's own databases, through standby streams on its failover cluster.
 
-**Architecture:** Four more standby streams beside Plan 1's `INBOX-FAILOVER`, all on the buddy: ingress, canonical, push, and outbox. Every pipeline service opens the same non-fatal buddy connection Plan 1 introduced and binds a second consumer there. The two lanes drain concurrently with no mode flag, so recovery needs no intervention.
+**Architecture:** Four more standby streams beside Plan 1's `INBOX-FAILOVER`, all on the failover site: ingress, canonical, push, and outbox. Every pipeline service opens the same non-fatal failover connection Plan 1 introduced and binds a second consumer there. The two lanes drain concurrently with no mode flag, so recovery needs no intervention.
 
 **Tech Stack:** Go 1.25, `nats.go` + `jetstream`, Cassandra (`gocql`), MongoDB (`mongo-driver/v2`), Valkey, Elasticsearch, testcontainers, testify.
 
 **Design spec:** `docs/superpowers/specs/2026-08-15-nats-site-failover-design.md` (§B subjects, §C streams + placement, §D dual connections, §H federation).
 
-**Depends on Plan 1** (`2026-08-15-nats-failover-inbound-redirect.md`) being merged. It provides `natsutil.ConnectBuddy`, `stream.CheckPlacement`, `testutil.NATSPair`, and the `chat.failover.>` subject root.
+**Depends on Plan 1** (`2026-08-15-nats-failover-inbound-redirect.md`) being merged. It provides `natsutil.ConnectFailoverSite`, `stream.CheckPlacement`, `testutil.NATSPair`, and the `chat.failover.>` subject root.
 
 ## Global Constraints
 
@@ -63,7 +63,7 @@
 | `push-notification-service/main.go` | Consume push failover |
 | `room-service/*` | Publish OUTBOX events to the failover lane |
 | `outbox-worker/main.go` | Consume `OUTBOX-FAILOVER` with the same two-consumer partition |
-| `*/deploy/docker-compose.yml` | `BUDDY_SITE_ID` / `BUDDY_NATS_URL` per service |
+| `*/deploy/docker-compose.yml` | `FAILOVER_SITE_ID` / `FAILOVER_NATS_URL` per service |
 | `docs/nats-subject-naming.md` | Document the four new failover subjects |
 
 ---
@@ -157,7 +157,7 @@ Add to `pkg/subject/subject.go`, beside the existing failover inbox builders:
 // FailoverMsgSend is the subject a displaced client publishes a message on while
 // its home site's NATS is down: the live MsgSend subject with a `failover` token
 // inserted before `msg`. Captured by MESSAGES-FAILOVER-{siteID} on the site's
-// buddy cluster.
+// failover cluster.
 //
 // Deliberately still inside chat.user.{account}.> so the JWT auth-service mints
 // already permits it — no permission change. The live filter is
@@ -311,9 +311,9 @@ Add to `pkg/stream/stream.go`:
 
 ```go
 // MessagesFailover returns MESSAGES-FAILOVER-{siteID}: the standby ingress lane,
-// hosted on the site's buddy cluster. Displaced clients publish here while the
-// site's own NATS is down; message-gatekeeper consumes it over its buddy
-// connection. Placement is ops-owned and must name the buddy's cluster.
+// hosted on the site's failover cluster. Displaced clients publish here while the
+// site's own NATS is down; message-gatekeeper consumes it over its failover site
+// connection. Placement is ops-owned and must name the failover site's cluster.
 func MessagesFailover(siteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("MESSAGES-FAILOVER-%s", siteID),
@@ -543,10 +543,10 @@ type FailoverStreamManager interface {
 	StreamInfo(ctx context.Context, name string) (*jetstream.StreamInfo, error)
 }
 
-// EnsureFailoverStream readies a standby stream on a buddy connection.
+// EnsureFailoverStream readies a standby stream on a failover connection.
 //
 // In dev (bootstrapEnabled) it creates the stream and does NOT assert placement:
-// a single-server NATS reports no cluster at all, and there is no buddy to be
+// a single-server NATS reports no cluster at all, and there is no failover site to be
 // wrong about.
 //
 // In production it verifies the stream exists AND is hosted by expectedCluster.
@@ -606,8 +606,8 @@ git commit -m "feat(stream): add EnsureFailoverStream bootstrap-or-verify helper
 - Test: `message-gatekeeper/main_test.go`
 
 **Interfaces:**
-- Consumes: `natsutil.ConnectBuddy` (Plan 1 Task 6b), `stream.EnsureFailoverStream` (Task 3), `stream.MessagesFailover` + `stream.MessagesCanonicalFailover` (Task 2).
-- Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig`; config fields `BuddySiteID`, `BuddyNatsURL`.
+- Consumes: `natsutil.ConnectFailoverSite` (Plan 1 Task 6b), `stream.EnsureFailoverStream` (Task 3), `stream.MessagesFailover` + `stream.MessagesCanonicalFailover` (Task 2).
+- Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig`; config fields `FailoverSiteID`, `FailoverNatsURL`.
 
 `message-gatekeeper` is the hinge: it consumes the failover ingress stream and
 must publish its output to the failover **canonical** subject, not the live one —
@@ -646,17 +646,17 @@ Expected: FAIL — `undefined: buildFailoverConsumerConfig`, `undefined: canonic
 Add the two config fields to the `config` struct:
 
 ```go
-	// Buddy cluster hosting this site's standby failover streams. BUDDY_SITE_ID
+	// Failover cluster hosting this site's standby failover streams. FAILOVER_SITE_ID
 	// doubles as the expected StreamInfo.Cluster.Name — NATS cluster names match
 	// site IDs. Empty disables the failover lane.
-	BuddySiteID  string `env:"BUDDY_SITE_ID"  envDefault:""`
-	BuddyNatsURL string `env:"BUDDY_NATS_URL" envDefault:""`
+	FailoverSiteID  string `env:"FAILOVER_SITE_ID"  envDefault:""`
+	FailoverNatsURL string `env:"FAILOVER_NATS_URL" envDefault:""`
 ```
 
 Add beside the existing `buildConsumerConfig`:
 
 ```go
-// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// buildFailoverConsumerConfig is the durable consumer on the failover-hosted
 // MESSAGES-FAILOVER lane. Distinct durable name from the home lane so the two
 // keep independent cursors.
 func buildFailoverConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
@@ -676,20 +676,20 @@ func canonicalSubjectForLane(w stream.Wiring, failover bool) string {
 }
 ```
 
-In `main`, after the existing home-lane consumer setup, add the buddy lane. The
+In `main`, after the existing home-lane consumer setup, add the standby lane. The
 handler is the same; only the consumer source and the output subject differ:
 
 ```go
-	if bnc := natsutil.ConnectBuddy(ctx, cfg.BuddyNatsURL, cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.BuddySiteID != "" {
+	if bnc := natsutil.ConnectFailoverSite(ctx, cfg.FailoverNatsURL, cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.FailoverSiteID != "" {
 		if err := startFailoverIngress(ctx, bnc, cfg, wiring, handler); err != nil {
-			slog.Warn("failover ingress unavailable", "buddy_site_id", cfg.BuddySiteID, "error", err)
+			slog.Warn("failover ingress unavailable", "failover_site_id", cfg.FailoverSiteID, "error", err)
 		}
 	}
 ```
 
 ```go
-// startFailoverIngress binds the buddy-hosted MESSAGES-FAILOVER consumer and
+// startFailoverIngress binds the failover-hosted MESSAGES-FAILOVER consumer and
 // points its output at the failover canonical stream.
 func startFailoverIngress(ctx context.Context, bnc *o11ynats.Conn, cfg config,
 	wiring stream.Wiring, handler *Handler,
@@ -699,13 +699,13 @@ func startFailoverIngress(ctx context.Context, bnc *o11ynats.Conn, cfg config,
 	}
 	bjs, err := bnc.JetStream()
 	if err != nil {
-		return fmt.Errorf("buddy jetstream init: %w", err)
+		return fmt.Errorf("failover site jetstream init: %w", err)
 	}
 	for _, c := range []stream.Config{
 		stream.MessagesFailover(cfg.SiteID),
 		wiring.CanonicalFailoverStream,
 	} {
-		if err := stream.EnsureFailoverStream(ctx, bjs, c, cfg.Bootstrap.Enabled, cfg.BuddySiteID); err != nil {
+		if err := stream.EnsureFailoverStream(ctx, bjs, c, cfg.Bootstrap.Enabled, cfg.FailoverSiteID); err != nil {
 			return err
 		}
 	}
@@ -714,7 +714,7 @@ func startFailoverIngress(ctx context.Context, bnc *o11ynats.Conn, cfg config,
 	if err != nil {
 		return fmt.Errorf("create failover ingress consumer: %w", err)
 	}
-	slog.Info("failover ingress bound", "buddy_site_id", cfg.BuddySiteID)
+	slog.Info("failover ingress bound", "failover_site_id", cfg.FailoverSiteID)
 	return startIngestLoop(ctx, bjs, cons, handler, canonicalSubjectForLane(wiring, true))
 }
 ```
@@ -747,7 +747,7 @@ git commit -m "feat(message-gatekeeper): consume the failover ingress lane"
 - Test: `message-worker/main_test.go`
 
 **Interfaces:**
-- Consumes: `natsutil.ConnectBuddy`, `stream.EnsureFailoverStream`, `stream.MessagesCanonicalFailover`.
+- Consumes: `natsutil.ConnectFailoverSite`, `stream.EnsureFailoverStream`, `stream.MessagesCanonicalFailover`.
 - Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstream.ConsumerConfig`.
 
 `message-worker` writes to Cassandra, which is up — the whole point. Its handler
@@ -781,10 +781,10 @@ Expected: FAIL — `undefined: buildFailoverConsumerConfig`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add the same two `BUDDY_*` config fields as Task 4. Add:
+Add the same two `FAILOVER_*` config fields as Task 4. Add:
 
 ```go
-// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// buildFailoverConsumerConfig is the durable consumer on the failover-hosted
 // MESSAGES-CANONICAL-FAILOVER lane. Distinct durable from the home lane so the
 // two keep independent cursors; the handler and the Cassandra writes are
 // identical, because a failover-lane message is still this site's message.
@@ -799,14 +799,14 @@ func buildFailoverConsumerConfig(s stream.ConsumerSettings, mode, siteID string)
 In `main`, after the home consumer setup:
 
 ```go
-	if bnc := natsutil.ConnectBuddy(ctx, cfg.BuddyNatsURL, cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.BuddySiteID != "" {
+	if bnc := natsutil.ConnectFailoverSite(ctx, cfg.FailoverNatsURL, cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.FailoverSiteID != "" {
 		bjs, err := bnc.JetStream()
 		if err != nil {
-			slog.Warn("buddy jetstream init failed", "error", err)
+			slog.Warn("failover site jetstream init failed", "error", err)
 		} else {
 			failoverCfg := stream.MessagesCanonicalFailover(cfg.SiteID)
-			if err := stream.EnsureFailoverStream(ctx, bjs, failoverCfg, cfg.Bootstrap.Enabled, cfg.BuddySiteID); err != nil {
+			if err := stream.EnsureFailoverStream(ctx, bjs, failoverCfg, cfg.Bootstrap.Enabled, cfg.FailoverSiteID); err != nil {
 				slog.Warn("failover lane unavailable", "error", err)
 			} else if fcons, err := bjs.CreateOrUpdateConsumer(ctx, failoverCfg.Name,
 				buildFailoverConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID)); err != nil {
@@ -844,7 +844,7 @@ git commit -m "feat(message-worker): consume the failover canonical lane"
 - Test: `broadcast-worker/main_test.go`
 
 **Interfaces:**
-- Consumes: `natsutil.ConnectBuddy`, `stream.EnsureFailoverStream`, `Wiring.CanonicalFailoverStream` / `HasFailover` (Task 2).
+- Consumes: `natsutil.ConnectFailoverSite`, `stream.EnsureFailoverStream`, `Wiring.CanonicalFailoverStream` / `HasFailover` (Task 2).
 - Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig`.
 
 **Note:** `broadcast-worker` publishes room events over core NATS. Which *root*
@@ -879,10 +879,10 @@ Expected: FAIL — `undefined: buildFailoverConsumerConfig`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add the two `BUDDY_*` config fields. Add:
+Add the two `FAILOVER_*` config fields. Add:
 
 ```go
-// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// buildFailoverConsumerConfig is the durable consumer on the failover-hosted
 // MESSAGES-CANONICAL-FAILOVER lane. Distinct durable from the home lane so the
 // two keep independent cursors.
 func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
@@ -893,18 +893,18 @@ func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetst
 }
 ```
 
-In `main`, after the home consumer, add the buddy lane guarded by
+In `main`, after the home consumer, add the standby lane guarded by
 `wiring.HasFailover()` so bot mode skips it:
 
 ```go
 	if wiring.HasFailover() {
-		if bnc := natsutil.ConnectBuddy(ctx, cfg.BuddyNatsURL, cfg.NatsCredsFile,
-			sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.BuddySiteID != "" {
+		if bnc := natsutil.ConnectFailoverSite(ctx, cfg.FailoverNatsURL, cfg.NatsCredsFile,
+			sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace); bnc != nil && cfg.FailoverSiteID != "" {
 			bjs, err := bnc.JetStream()
 			if err != nil {
-				slog.Warn("buddy jetstream init failed", "error", err)
+				slog.Warn("failover site jetstream init failed", "error", err)
 			} else if err := stream.EnsureFailoverStream(ctx, bjs, wiring.CanonicalFailoverStream,
-				cfg.Bootstrap.Enabled, cfg.BuddySiteID); err != nil {
+				cfg.Bootstrap.Enabled, cfg.FailoverSiteID); err != nil {
 				slog.Warn("failover lane unavailable", "error", err)
 			} else if fcons, err := bjs.CreateOrUpdateConsumer(ctx, wiring.CanonicalFailoverStream.Name,
 				buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID)); err != nil {
@@ -942,7 +942,7 @@ git commit -m "feat(broadcast-worker): consume the failover canonical lane"
 - Test: `notification-worker/main_test.go`
 
 **Interfaces:**
-- Consumes: `natsutil.ConnectBuddy`, `stream.EnsureFailoverStream`, `Wiring` failover fields.
+- Consumes: `natsutil.ConnectFailoverSite`, `stream.EnsureFailoverStream`, `Wiring` failover fields.
 - Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig`, `pushSubjectForLane(w stream.Wiring, failover bool) string`.
 
 Like `message-gatekeeper`, this service is a hinge: it both consumes a failover
@@ -980,10 +980,10 @@ Expected: FAIL — `undefined: buildFailoverConsumerConfig`, `undefined: pushSub
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add the two `BUDDY_*` config fields. Add:
+Add the two `FAILOVER_*` config fields. Add:
 
 ```go
-// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// buildFailoverConsumerConfig is the durable consumer on the failover-hosted
 // MESSAGES-CANONICAL-FAILOVER lane.
 func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
@@ -1003,7 +1003,7 @@ func pushSubjectForLane(w stream.Wiring, failover bool) string {
 }
 ```
 
-Wire the buddy lane exactly as in Task 6, guarded by `wiring.HasFailover()`, but
+Wire the standby lane exactly as in Task 6, guarded by `wiring.HasFailover()`, but
 ensure both the canonical failover stream **and** the push failover stream are
 readied:
 
@@ -1012,7 +1012,7 @@ readied:
 				wiring.CanonicalFailoverStream,
 				wiring.PushFailoverStream,
 			} {
-				if err := stream.EnsureFailoverStream(ctx, bjs, c, cfg.Bootstrap.Enabled, cfg.BuddySiteID); err != nil {
+				if err := stream.EnsureFailoverStream(ctx, bjs, c, cfg.Bootstrap.Enabled, cfg.FailoverSiteID); err != nil {
 					slog.Warn("failover lane unavailable", "stream", c.Name, "error", err)
 					return
 				}
@@ -1023,7 +1023,7 @@ Thread the lane's push subject through to the handler's publish call so a
 failover-lane message publishes to `pushSubjectForLane(wiring, true)`.
 
 **Leave the `ROOMS` invalidation consumer on the home connection only** — `ROOMS`
-has no failover lane (spec, out of scope), so binding it on the buddy would fail
+has no failover lane (spec, out of scope), so binding it on the failover site would fail
 the stream check every time.
 
 - [ ] **Step 4: Run tests and build**
@@ -1048,7 +1048,7 @@ git commit -m "feat(notification-worker): consume the failover canonical lane an
 - Test: `search-sync-worker/main_test.go`
 
 **Interfaces:**
-- Consumes: `natsutil.ConnectBuddy`, `stream.EnsureFailoverStream`, `stream.MessagesCanonicalFailover`.
+- Consumes: `natsutil.ConnectFailoverSite`, `stream.EnsureFailoverStream`, `stream.MessagesCanonicalFailover`.
 - Produces: `buildFailoverMessagesConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig`.
 
 Elasticsearch is up, so indexing continues normally. Only the message source is
@@ -1075,12 +1075,12 @@ Expected: FAIL — `undefined: buildFailoverMessagesConsumerConfig`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add the two `BUDDY_*` config fields. Add beside the existing messages consumer
+Add the two `FAILOVER_*` config fields. Add beside the existing messages consumer
 builder in `messages.go`:
 
 ```go
 // buildFailoverMessagesConsumerConfig is the durable consumer on the
-// buddy-hosted MESSAGES-CANONICAL-FAILOVER lane. Indexing is unchanged —
+// failover-hosted MESSAGES-CANONICAL-FAILOVER lane. Indexing is unchanged —
 // Elasticsearch is up — only the source is new.
 func buildFailoverMessagesConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
@@ -1090,7 +1090,7 @@ func buildFailoverMessagesConsumerConfig(s stream.ConsumerSettings, siteID strin
 }
 ```
 
-Wire the buddy lane in `main` following Task 6's shape, binding only the
+Wire the standby lane in `main` following Task 6's shape, binding only the
 canonical failover stream. Leave the INBOX and HR consumers on the home
 connection.
 
@@ -1116,7 +1116,7 @@ git commit -m "feat(search-sync-worker): index messages from the failover canoni
 - Test: `push-notification-service/main_test.go`
 
 **Interfaces:**
-- Consumes: `natsutil.ConnectBuddy`, `stream.EnsureFailoverStream`, `Wiring.PushFailoverStream`.
+- Consumes: `natsutil.ConnectFailoverSite`, `stream.EnsureFailoverStream`, `Wiring.PushFailoverStream`.
 - Produces: `buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig`.
 
 APNs and FCM are external and unaffected, so pushes keep going out.
@@ -1141,10 +1141,10 @@ Expected: FAIL — `undefined: buildFailoverConsumerConfig`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add the two `BUDDY_*` config fields. Add:
+Add the two `FAILOVER_*` config fields. Add:
 
 ```go
-// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// buildFailoverConsumerConfig is the durable consumer on the failover-hosted
 // PUSH-NOTIFICATION-FAILOVER lane. Delivery to APNs/FCM is unchanged — those
 // are external and unaffected by a site's NATS outage.
 func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
@@ -1155,7 +1155,7 @@ func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetst
 }
 ```
 
-Wire the buddy lane in `main` following Task 6's shape, guarded by
+Wire the standby lane in `main` following Task 6's shape, guarded by
 `wiring.HasFailover()`, binding `wiring.PushFailoverStream`.
 
 - [ ] **Step 4: Run tests and build**
@@ -1177,12 +1177,12 @@ git commit -m "feat(push-notification-service): consume the failover push lane"
 
 **Files:**
 - Modify: `pkg/outbox/outbox.go` (`Publish`)
-- Modify: `room-service/main.go` (buddy connection + publish target)
+- Modify: `room-service/main.go` (failover connection + publish target)
 - Modify: `outbox-worker/main.go` (config ~line 30-43; consumers ~line 117-145)
 - Test: `pkg/outbox/outbox_test.go`, `outbox-worker/consumer_config_test.go`
 
 **Interfaces:**
-- Consumes: `subject.FailoverOutbox` / `FailoverOutboxWildcard` (Task 1), `stream.OutboxFailover` (Task 2), `stream.EnsureFailoverStream` (Task 3), `natsutil.ConnectBuddy`.
+- Consumes: `subject.FailoverOutbox` / `FailoverOutboxWildcard` (Task 1), `stream.OutboxFailover` (Task 2), `stream.EnsureFailoverStream` (Task 3), `natsutil.ConnectFailoverSite`.
 - Produces: `outbox.PublishTo(ctx, publish, originSiteID, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupID string, ts int64, failover bool) error`; `buildFailoverConcurrentConsumerConfig(s, siteID, dest string)`, `buildFailoverOrderedConsumerConfig(s, siteID, dest string)`.
 
 This keeps a site federating **outward** during its own outage. The failover
@@ -1266,7 +1266,7 @@ caller changes:
 
 ```go
 // PublishTo is Publish with an explicit lane. failover=true targets the
-// buddy-hosted OUTBOX-FAILOVER stream, which is what a site uses to keep
+// failover-hosted OUTBOX-FAILOVER stream, which is what a site uses to keep
 // federating outward while its own NATS is down.
 func PublishTo(ctx context.Context, publish func(ctx context.Context, subj string, data []byte, msgID string) error,
 	originSiteID, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupID string, ts int64,
@@ -1287,19 +1287,19 @@ func Publish(ctx context.Context, publish func(ctx context.Context, subj string,
 }
 ```
 
-In `outbox-worker/main.go`, add the two `BUDDY_*` config fields and add failover
+In `outbox-worker/main.go`, add the two `FAILOVER_*` config fields and add failover
 twins of the two consumer builders, mirroring
 `buildConcurrentConsumerConfig` / `buildOrderedConsumerConfig` but built from
 `subject.FailoverOutbox(...)` and with `-failover` appended to each durable name.
 Keep `MaxDeliver = -1` and `MaxAckPending = 1` exactly as the live ones set them.
 
-Then, on the buddy connection, ready `stream.OutboxFailover(cfg.SiteID)` and
+Then, on the failover connection, ready `stream.OutboxFailover(cfg.SiteID)` and
 create the same per-destination consumer pair for every remote peer in
 `cfg.AllSiteIDs`, running them through the same `process` disposition.
 
-In `room-service`, open a buddy connection with `natsutil.ConnectBuddy`, and when
+In `room-service`, open a failover connection with `natsutil.ConnectFailoverSite`, and when
 the home publish fails, publish through `outbox.PublishTo(..., failover: true)`
-on the buddy connection. Gate on the same `ErrNoResponders` rule Plan 1
+on the failover connection. Gate on the same `ErrNoResponders` rule Plan 1
 established in `pkg/outbox/failover.go` — reuse `isNoResponders` by exporting it
 as `outbox.IsNoResponders(err) bool` if it is not already exported.
 
@@ -1323,7 +1323,7 @@ git commit -m "feat(outbox): add the failover outbox lane for outbound federatio
 **Files:**
 - Modify: `deploy/docker-compose.yml` for each of the seven services touched in Tasks 4-10, plus `room-service`.
 
-Dev runs one NATS, so pointing `BUDDY_NATS_URL` at the same server exercises the
+Dev runs one NATS, so pointing `FAILOVER_NATS_URL` at the same server exercises the
 whole path — stream creation, consumer binding, both lanes draining — with no
 second container. Placement is not asserted because `BOOTSTRAP_STREAMS=true`
 takes the create branch.
@@ -1334,8 +1334,8 @@ In each service's `environment:` block, matching that file's existing
 `NATS_URL` host and port:
 
 ```yaml
-      - BUDDY_SITE_ID=site-local
-      - BUDDY_NATS_URL=nats://nats:4222
+      - FAILOVER_SITE_ID=site-local
+      - FAILOVER_NATS_URL=nats://nats:4222
 ```
 
 Services: `message-gatekeeper`, `message-worker`, `broadcast-worker`,
@@ -1365,7 +1365,7 @@ git commit -m "chore: wire the failover lanes into local compose"
 - Consumes: everything above, plus `testutil.NATSPair` (Plan 1 Task 6).
 
 The property that matters: a message sent on the failover lane is persisted to
-the **origin site's** Cassandra, not the buddy's.
+the **origin site's** Cassandra, not the failover site's.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1379,26 +1379,26 @@ package main
 // services doing the site's own work against the site's own store is the entire
 // correctness argument for this design.
 func TestFailoverIngress_PersistsToOriginSiteStore(t *testing.T) {
-	homeURL, buddyURL := testutil.NATSPair(t)
+	homeURL, failover siteURL := testutil.NATSPair(t)
 	keyspace, sess, _ := testutil.CassandraKeyspace(t, "gkfailover")
 	ctx := context.Background()
 
-	buddyJS := connectJS(t, buddyURL)
+	failover siteJS := connectJS(t, failover siteURL)
 	for _, c := range []stream.Config{
 		stream.MessagesFailover("site-a"),
 		stream.MessagesCanonicalFailover("site-a"),
 	} {
-		_, err := buddyJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		_, err := failover siteJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name: c.Name, Subjects: c.Subjects,
 		})
 		require.NoError(t, err)
 	}
 
-	startGatekeeperFailoverLane(t, ctx, buddyJS, "site-a")
-	startMessageWorkerFailoverLane(t, ctx, buddyJS, "site-a", keyspace, sess)
+	startGatekeeperFailoverLane(t, ctx, failover siteJS, "site-a")
+	startMessageWorkerFailoverLane(t, ctx, failover siteJS, "site-a", keyspace, sess)
 
 	msg := validSendPayload(t, "alice", "r1", "m-failover-1")
-	_, err := buddyJS.Publish(ctx, subject.FailoverMsgSend("alice", "r1", "site-a"), msg)
+	_, err := failover siteJS.Publish(ctx, subject.FailoverMsgSend("alice", "r1", "site-a"), msg)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -1462,7 +1462,7 @@ subjects: the client-facing `chat.user.{acct}.room.{roomID}.{siteID}.failover.ms
 - [ ] **Step 2: Add the standby streams to the topology diagram**
 
 In `docs/architecture.md` §4, add the four standby streams alongside
-`INBOX-FAILOVER` from Plan 1, noting they are hosted on the buddy cluster and
+`INBOX-FAILOVER` from Plan 1, noting they are hosted on the failover cluster and
 carry traffic only during an outage.
 
 - [ ] **Step 3: Commit**
@@ -1481,17 +1481,17 @@ git commit -m "docs: document the message-path failover subjects and standby str
 - [ ] `make sast` — no medium+ findings.
 - [ ] `make test-integration SERVICE=message-gatekeeper`.
 - [ ] Coverage floor for `pkg/stream`, `pkg/subject`, `pkg/outbox`: `go test -coverprofile=coverage.out ./pkg/stream/... && go tool cover -func=coverage.out`.
-- [ ] **Confirm every touched service still starts with no `BUDDY_*` set** — an unconfigured buddy must be a silent no-op, not a startup failure.
+- [ ] **Confirm every touched service still starts with no `FAILOVER_*` set** — an unconfigured failover site must be a silent no-op, not a startup failure.
 
 ## Staging Verification
 
 Same three items as Plan 1, now covering five streams: subject-overlap
-enforcement across clusters, placement of each standby stream on the buddy, and
+enforcement across clusters, placement of each standby stream on the failover site, and
 no-responders behaviour when a cluster is down.
 
 Additionally: **capacity.** Each cluster must have headroom for its own load plus
 one peer's full message pipeline. Measure a peer's canonical throughput and
-confirm its buddy can absorb it on top of its own.
+confirm its failover site can absorb it on top of its own.
 
 ## Known incomplete after this plan
 
