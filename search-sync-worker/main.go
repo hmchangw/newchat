@@ -93,9 +93,9 @@ type config struct {
 	// Needs (PipelineDepth+1) * BulkBatchSize <= CONSUMER_MAX_ACK_PENDING — see checkBatchAckCoupling.
 	PipelineDepth int `env:"PIPELINE_DEPTH" envDefault:"2"`
 
-	Consumer  stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	Buddy     natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
+	Consumer  stream.ConsumerSettings     `envPrefix:"CONSUMER_"`
+	Bootstrap bootstrapConfig             `envPrefix:"BOOTSTRAP_"`
+	Failover  natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
@@ -216,13 +216,13 @@ func main() {
 	// The failover lane rides the default mode only, so these stay nil on a
 	// teams pod and the append below is a no-op there.
 	var (
-		buddyConn       *o11ynats.Conn
-		buddyJS         o11ynats.JetStream
+		standbyConn     *o11ynats.Conn
+		standbyJS       o11ynats.JetStream
 		failoverMsgColl *messageCollection
 	)
 	// Default mode only: a teams pod is a migration path with no standby stream,
-	// so it has no buddy lane and keeps the fail-fast home dial.
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile, sdk)
+	// so it has no failover lane and keeps the fail-fast home dial.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover.OnlyIf(cfg.Mode != "teams"), cfg.SiteID, cfg.NatsCredsFile, sdk)
 	if cfg.Mode == "teams" {
 		// Bound to MESSAGES-TEAMS: message-worker's teams mode persists migrated Teams
 		// history with no .created event on the canonical stream, so this indexes off
@@ -243,7 +243,7 @@ func main() {
 		botMsgResolver.metrics = esMetrics.forCollection(botMsgColl.ConsumerName())
 		botMsgColl.parentResolver = botMsgResolver
 
-		// Fourth consumer over messageCollection, bound to the buddy-hosted
+		// Fourth consumer over messageCollection, bound to the failover-hosted
 		// MESSAGES-CANONICAL-FAILOVER. Messages this site validates while its own
 		// NATS is down still need indexing, and Elasticsearch is unaffected by that
 		// outage, so only the source stream differs. Default mode only: a teams pod
@@ -251,15 +251,15 @@ func main() {
 		failoverMsgColl = newFailoverMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, cfg.DevMode)
 		failoverMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
-		// A failed dial leaves buddyJS nil, so the failover collection is skipped
+		// A failed dial leaves standbyJS nil, so the failover collection is skipped
 		// and the home lanes keep indexing.
-		buddyConn = dialer.Bind(ctx,
+		standbyConn = dialer.Bind(ctx,
 			func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
 				if err := stream.EnsureFailoverStream(ctx, bjs,
-					stream.MessagesCanonicalFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+					stream.MessagesCanonicalFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Failover.SiteID); err != nil {
 					return err
 				}
-				buddyJS = bjs
+				standbyJS = bjs
 				return nil
 			})
 
@@ -272,10 +272,10 @@ func main() {
 		}
 	}
 	// collections stays the home list. The failover collection binds on the
-	// buddy, but its index templates, mappings and scripts are the same
+	// failover, but its index templates, mappings and scripts are the same
 	// Elasticsearch objects and must exist before it starts.
 	indexed := collections
-	if buddyJS != nil {
+	if standbyJS != nil {
 		indexed = append(append([]Collection{}, collections...), failoverMsgColl)
 	}
 
@@ -309,7 +309,7 @@ func main() {
 		}
 	}
 
-	// Lazy home dial; see natsutil.BuddyDialer.ConnectHome.
+	// Lazy home dial; see natsutil.FailoverDialer.ConnectHome.
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -371,23 +371,23 @@ func main() {
 		}, stopCh, doneCh)
 	}
 
-	// The failover collection binds now, on the buddy: it is the one lane that
+	// The failover collection binds now, on the failover: it is the one lane that
 	// must index while home is down. Its consumer failing leaves the home
 	// collections indexing rather than taking the process down for an optional
 	// standby lane.
 	failoverBound := false
-	if buddyJS != nil {
+	if standbyJS != nil {
 		consumerCfg := buildConsumerConfig(cfg.Consumer, failoverMsgColl, cfg.SiteID)
-		cons, err := buddyJS.CreateOrUpdateConsumer(ctx, failoverStreamName, consumerCfg)
+		cons, err := standbyJS.CreateOrUpdateConsumer(ctx, failoverStreamName, consumerCfg)
 		if err != nil {
 			slog.Warn("create failover consumer failed; indexing without the failover collection",
 				"stream", failoverStreamName, "consumer", failoverMsgColl.ConsumerName(), "error", err)
 		} else {
 			wire(ctx, failoverMsgColl, failoverStreamName, consumerCfg, o11yConsumerAdapter{cons})
 			failoverBound = true
-			slog.Info("failover consumer bound to the buddy cluster",
+			slog.Info("failover consumer bound to the failover cluster",
 				"stream", failoverStreamName, "consumer", failoverMsgColl.ConsumerName(),
-				"buddy_site_id", cfg.Buddy.SiteID)
+				"failover_site_id", cfg.Failover.SiteID)
 		}
 	}
 
@@ -491,7 +491,7 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
-		natsutil.DrainBuddy(buddyConn),
+		natsutil.DrainFailoverSite(standbyConn),
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		// obsShutdown LAST so drain-window flush spans/logs are exported.

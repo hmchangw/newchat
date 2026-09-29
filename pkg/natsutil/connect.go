@@ -70,7 +70,7 @@ func ConnectWithMetrics(ctx context.Context, url, credsFile string, tp trace.Tra
 // initial dial failing returns a connection in the RECONNECTING state that keeps
 // dialing in the background, instead of an error. Configuration faults (a
 // missing creds file, a bad URL) still fail fast — retrying those would hide
-// them forever. See BuddyDialer.ConnectHome for when this is the right call.
+// them forever. See FailoverDialer.ConnectHome for when this is the right call.
 func connectLazy(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, meterProvider metric.MeterProvider) (*o11ynats.Conn, error) {
 	var metrics *connMetrics
 	if meterProvider != nil {

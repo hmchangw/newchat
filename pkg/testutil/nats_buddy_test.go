@@ -14,14 +14,14 @@ import (
 )
 
 func TestNATSPair_ReturnsTwoIndependentServers(t *testing.T) {
-	home, buddy := testutil.NATSPair(t)
-	assert.NotEqual(t, home, buddy, "home and buddy must be distinct servers")
+	home, failover := testutil.NATSPair(t)
+	assert.NotEqual(t, home, failover, "home and failover must be distinct servers")
 
 	hc, err := nats.Connect(home)
 	require.NoError(t, err)
 	t.Cleanup(hc.Close)
 
-	bc, err := nats.Connect(buddy)
+	bc, err := nats.Connect(failover)
 	require.NoError(t, err)
 	t.Cleanup(bc.Close)
 

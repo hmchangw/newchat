@@ -69,16 +69,16 @@ type Config struct {
 	Pool         mongoutil.PoolConfig
 	NATS         NATSConfig `envPrefix:"NATS_"`
 	Thread       threadcount.Policy
-	// Buddy is the cluster hosting this site's standby failover lanes. A second
+	// Failover is the cluster hosting this site's standby failover lanes. A second
 	// router binds there so a client displaced by this site's NATS outage still
 	// reaches this site's history, against this site's databases.
-	Buddy                   natsutil.BuddyConfig `envPrefix:"BUDDY_"`
-	MessageBucketHours      int                  `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
-	MessageReadMaxBuckets   int                  `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
-	MessageHistoryFloorDays int                  `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
-	LargeRoomThreshold      int                  `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
-	MaxPinnedPerRoom        int                  `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
-	PinEnabled              bool                 `env:"PIN_ENABLED"                 envDefault:"true"`
+	Failover                natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	MessageBucketHours      int                         `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
+	MessageReadMaxBuckets   int                         `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
+	MessageHistoryFloorDays int                         `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
+	LargeRoomThreshold      int                         `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
+	MaxPinnedPerRoom        int                         `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
+	PinEnabled              bool                        `env:"PIN_ENABLED"                 envDefault:"true"`
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`

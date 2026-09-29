@@ -115,13 +115,13 @@ type Config struct {
 	ES     ESConfig `envPrefix:"SEARCH_"`
 	Valkey valkeyutil.Config
 	NATS   NATSConfig `envPrefix:"NATS_"`
-	// Buddy is the peer cluster hosting this site's standby lanes; the service
+	// Failover is the peer cluster hosting this site's standby lanes; the service
 	// also answers displaced clients' RPCs there while its own NATS is down.
-	Buddy    natsutil.BuddyConfig `envPrefix:"BUDDY_"`
-	Search   SearchConfig         `envPrefix:"SEARCH_"`
-	Mongo    MongoConfig          `envPrefix:"MONGO_"`
-	UsersAPI UsersAPIConfig       `envPrefix:"USERS_API_"`
-	DebugLog logctx.Config        `envPrefix:"DEBUG_LOG_"`
+	Failover natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	Search   SearchConfig                `envPrefix:"SEARCH_"`
+	Mongo    MongoConfig                 `envPrefix:"MONGO_"`
+	UsersAPI UsersAPIConfig              `envPrefix:"USERS_API_"`
+	DebugLog logctx.Config               `envPrefix:"DEBUG_LOG_"`
 	// UNPREFIXED on purpose — must match search-sync-worker / es-index-migrator
 	// exactly. On SearchConfig they would pick up envPrefix:"SEARCH_" and drift
 	// from the writer silently (wildcard read + allow_no_indices ⇒ empty hits).
@@ -228,9 +228,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NATS.CredsFile, sdk)
+	dialer := natsutil.NewFailoverDialer(cfg.Failover, cfg.SiteID, cfg.NATS.CredsFile, sdk)
 	// Lazy home dial so a pod restarting mid-outage can still boot and answer displaced clients
-	// on the buddy; see natsutil.BuddyDialer.ConnectHome.
+	// on the failover; see natsutil.FailoverDialer.ConnectHome.
 	nc, err := dialer.ConnectHome(ctx, cfg.NATS.URL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)

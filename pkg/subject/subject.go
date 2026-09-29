@@ -364,11 +364,11 @@ func RoomActivity(destSiteID string) string {
 // FailoverInboxExternal is the subject a peer publishes a cross-site federation
 // event on when the destination site's own INBOX is unreachable:
 // `chat.failover.inbox.{siteID}.external.{eventType}`. The standby stream that
-// captures it is hosted on the destination site's buddy cluster, so the
-// destination's own inbox-worker consumes it over its buddy connection and
+// captures it is hosted on the destination site's failover cluster, so the
+// destination's own inbox-worker consumes it over its failover connection and
 // applies the event to the destination's DB.
 //
-// The publisher needs no knowledge of which cluster is whose buddy — the subject
+// The publisher needs no knowledge of which cluster is whose failover — the subject
 // names the destination site, and supercluster interest routing delivers it
 // wherever the stream lives.
 //
@@ -389,7 +389,7 @@ func FailoverInboxExternalAll(siteID string) string {
 // FailoverMsgSend is the subject a displaced client publishes a message on while
 // its home site's NATS is down: the live MsgSend subject with a `failover` token
 // inserted before `msg`. Captured by MESSAGES-FAILOVER-{siteID} on the site's
-// buddy cluster.
+// failover cluster.
 //
 // Deliberately still inside chat.user.{account}.> so the JWT auth-service mints
 // already permits it — no permission change. The MESSAGES-{siteID} stream

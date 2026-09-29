@@ -58,7 +58,7 @@ func TestForwardWithFailover(t *testing.T) {
 		{
 			name:        "fallback also fails",
 			primaryErr:  nats.ErrNoResponders,
-			failoverErr: errors.New("buddy down"),
+			failoverErr: errors.New("failover down"),
 			wantSubjects: []string{
 				"chat.inbox.site-a.external.member_added",
 				"chat.failover.inbox.site-a.external.member_added",
@@ -143,7 +143,7 @@ func TestPublish_TargetsTheLiveLane(t *testing.T) {
 
 // PublishWithFailover is the OUTBOX-side twin of ForwardWithFailover: the same
 // no-responders-only gate, so a producer that lost its home OUTBOX re-buffers on
-// the buddy without any caller re-deriving the rule.
+// the failover without any caller re-deriving the rule.
 func TestPublishWithFailover(t *testing.T) {
 	type call struct{ lane, subj string }
 	tests := []struct {
@@ -156,7 +156,7 @@ func TestPublishWithFailover(t *testing.T) {
 		wantErrMatch string
 	}{
 		{name: "home succeeds", failover: true, wantCalls: []string{"home"}, wantNoError: true},
-		{name: "no responders redirects to the buddy", homeErr: nats.ErrNoResponders, failover: true,
+		{name: "no responders redirects to the failover", homeErr: nats.ErrNoResponders, failover: true,
 			wantCalls: []string{"home", "failover"}, wantNoError: true},
 		{name: "jetstream no-stream-response redirects too", homeErr: jetstream.ErrNoStreamResponse, failover: true,
 			wantCalls: []string{"home", "failover"}, wantNoError: true},

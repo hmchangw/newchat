@@ -93,11 +93,11 @@ type config struct {
 	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane.
 	ThreadViewSubjectEnabled bool `env:"THREAD_VIEW_SUBJECT_ENABLED" envDefault:"true"`
 	Revert                   subject.RevertConfig
-	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Buddy                    natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
-	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	Encryption               encryptionConfig        `envPrefix:"ENCRYPTION_"`
-	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	Consumer                 stream.ConsumerSettings     `envPrefix:"CONSUMER_"`
+	Failover                 natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	Bootstrap                bootstrapConfig             `envPrefix:"BOOTSTRAP_"`
+	Encryption               encryptionConfig            `envPrefix:"ENCRYPTION_"`
+	DebugLog                 logctx.Config               `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 
@@ -319,11 +319,11 @@ func main() {
 	}
 
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
-	// HasFailover gates the bot pipeline out of the buddy lane; it also keeps
-	// the home dial fail-fast there, since without a buddy a pod that cannot
-	// reach home has nothing to do. With a buddy the dial is lazy, so a pod
-	// that restarts while home is down still boots and serves the buddy lane.
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile, sdk)
+	// HasFailover gates the bot pipeline out of the failover lane; it also keeps
+	// the home dial fail-fast there, since without a failover a pod that cannot
+	// reach home has nothing to do. With a failover the dial is lazy, so a pod
+	// that restarts while home is down still boots and serves the failover lane.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover.OnlyIf(wiring.HasFailover()), cfg.SiteID, cfg.NatsCredsFile, sdk)
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -392,7 +392,7 @@ func main() {
 		sealer: sealer, previews: previews,
 		domainMetrics: domainMetrics, publishMetrics: publishMetrics,
 		activityPeers: activityPeers, routeMode: roomRouteMode, cfg: &cfg,
-		lastReconnectAt: natsutil.TrackReconnects(ctx, nc, cfg.Buddy.Enabled()).LastReconnectAt,
+		lastReconnectAt: natsutil.TrackReconnects(ctx, nc, cfg.Failover.Enabled()).LastReconnectAt,
 	}
 	handler := shared.newLaneHandler(nc, js, subject.LaneHome)
 
@@ -411,10 +411,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// One handler per lane, one pool for both: a buddy lane with its own
+	// One handler per lane, one pool for both: a failover lane with its own
 	// semaphore would take this service to 2xMAX_WORKERS in-flight handlers
 	// against the same MongoDB and Valkey.
-	var buddyBroadcastSub *nats.Subscription
+	var standbyBroadcastSub *nats.Subscription
 	lanes, err := failoverlane.BindLanes(ctx, nc, js, dialer, &failoverlane.LanesSpec{
 		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Metrics: sharedMetrics,
 		Bootstrap: cfg.Bootstrap.Enabled,
@@ -425,7 +425,7 @@ func main() {
 				return bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled)
 			},
 		},
-		Buddy: &failoverlane.BuddyLane{
+		Failover: &failoverlane.StandbyLane{
 			Stream: wiring.CanonicalFailoverStream,
 			Consumer: buildConsumerConfig(cfg.Consumer,
 				cfg.Mode.FailoverConsumerName("broadcast-worker"), wiring.CanonicalFailoverWildcard),
@@ -436,10 +436,10 @@ func main() {
 		}
 		failoverHandler := shared.newLaneHandler(conn, laneJS, lane)
 		// message-worker's failover lane publishes the thread-tcount badge on
-		// the buddy; without a subscriber there it is lost for the whole outage.
+		// the failover; without a subscriber there it is lost for the whole outage.
 		var err error
-		if buddyBroadcastSub, err = subscribeServerBroadcast(conn, failoverHandler); err != nil {
-			return nil, fmt.Errorf("subscribe server-broadcast on buddy: %w", err)
+		if standbyBroadcastSub, err = subscribeServerBroadcast(conn, failoverHandler); err != nil {
+			return nil, fmt.Errorf("subscribe server-broadcast on failover: %w", err)
 		}
 		return guardedHandler(broadcastProcessor(failoverHandler)), nil
 	})
@@ -466,10 +466,10 @@ func main() {
 	// after these service-owned hooks.
 	hooks := []func(context.Context) error{
 		func(_ context.Context) error {
-			if buddyBroadcastSub != nil {
-				// Best-effort: the buddy may be the connection that is gone.
-				if err := buddyBroadcastSub.Unsubscribe(); err != nil {
-					slog.Warn("unsubscribe buddy server-broadcast failed", "error", err)
+			if standbyBroadcastSub != nil {
+				// Best-effort: the failover may be the connection that is gone.
+				if err := standbyBroadcastSub.Unsubscribe(); err != nil {
+					slog.Warn("unsubscribe failover server-broadcast failed", "error", err)
 				}
 			}
 			return broadcastSub.Unsubscribe()

@@ -8265,7 +8265,7 @@ func TestHandler_RoomNotFound_MapsTo404(t *testing.T) {
 	}
 }
 
-// A request that arrived on the buddy connection must publish its room event to
+// A request that arrived on the failover connection must publish its room event to
 // the global root, for the same reason broadcast-worker does: the client that
 // sent it is on a peer cluster, and chat.local.> never crosses a gateway.
 func TestHandler_publishRoomEvent_FailoverConnectionForcesGlobal(t *testing.T) {
@@ -8303,7 +8303,7 @@ func TestHandler_publishRoomEvent_HomeConnectionKeepsConfiguredRouting(t *testin
 }
 
 // Inside the revert grace window the home connection must emit to BOTH roots, or
-// clients still on the buddy go silent during recovery.
+// clients still on the failover go silent during recovery.
 func TestHandler_publishRoomEvent_HomeConnectionDualPublishesInGraceWindow(t *testing.T) {
 	var got []string
 	restored := time.Now().UTC().Add(-1 * time.Minute)

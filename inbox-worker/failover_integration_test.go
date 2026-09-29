@@ -62,13 +62,13 @@ func memberAddedEnvelope(t *testing.T, roomID, account string) []byte {
 	return evtData
 }
 
-// A federation event redirected to the buddy-hosted failover lane must land in
+// A federation event redirected to the failover-hosted failover lane must land in
 // the SAME database as one delivered through the primary lane. The whole
 // correctness argument for the design is that the down site's own worker does
 // the work against the down site's own store — so this asserts both lanes
 // converge on one Mongo, not merely that each lane drains.
 func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
-	homeURL, buddyURL := testutil.NATSPair(t)
+	homeURL, failoverURL := testutil.NATSPair(t)
 	db := setupMongo(t)
 	ctx := context.Background()
 
@@ -77,7 +77,7 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 	mustInsertUser(t, db, &model.User{ID: "failover-user", Account: "failover-user", SiteID: "site-b"})
 
 	_, homeJS := connectFailoverJS(t, homeURL)
-	_, buddyJS := connectFailoverJS(t, buddyURL)
+	_, standbyJS := connectFailoverJS(t, failoverURL)
 
 	primary := stream.Inbox("site-a")
 	_, err := homeJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
@@ -86,7 +86,7 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg := config{SiteID: "site-a", MaxWorkers: 4,
-		Buddy: natsutil.BuddyConfig{SiteID: "site-b", NatsURL: buddyURL}}
+		Failover: natsutil.FailoverSiteConfig{SiteID: "site-b", NatsURL: failoverURL}}
 	cfg.Bootstrap.Enabled = true
 
 	homeCons, err := homeJS.CreateOrUpdateConsumer(ctx, primary.Name,
@@ -106,18 +106,18 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 	// startFailoverLane creates the standby stream itself under Bootstrap.Enabled,
 	// which is the dev path — production verifies and asserts placement instead.
 	binder := &failoverlane.Binder{
-		SiteID: cfg.SiteID, Dialer: &natsutil.BuddyDialer{Config: cfg.Buddy},
+		SiteID: cfg.SiteID, Dialer: &natsutil.FailoverDialer{Config: cfg.Failover},
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
-	buddyLane, err := startFailoverLane(ctx, buddyJS, &cfg, handler, binder, sem, &wg, loopguard.New("buddy", nil))
+	standbyLane, err := startFailoverLane(ctx, standbyJS, &cfg, handler, binder, sem, &wg, loopguard.New("failover", nil))
 	require.NoError(t, err)
-	t.Cleanup(buddyLane.Stop)
+	t.Cleanup(standbyLane.Stop)
 
 	_, err = homeJS.Publish(ctx, subject.InboxExternal("site-a", model.InboxMemberAdded),
 		memberAddedEnvelope(t, "room-home", "home-user"))
 	require.NoError(t, err)
 
-	_, err = buddyJS.Publish(ctx, subject.FailoverInboxExternal("site-a", model.InboxMemberAdded),
+	_, err = standbyJS.Publish(ctx, subject.FailoverInboxExternal("site-a", model.InboxMemberAdded),
 		memberAddedEnvelope(t, "room-failover", "failover-user"))
 	require.NoError(t, err)
 
@@ -130,7 +130,7 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return subscriptionExists("room-home") && subscriptionExists("room-failover")
 	}, 20*time.Second, 200*time.Millisecond,
-		"both the home lane and the buddy failover lane must drain into the same store")
+		"both the home lane and the failover failover lane must drain into the same store")
 }
 
 // Pins which error a JetStream publish returns when no stream captures the

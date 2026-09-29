@@ -88,7 +88,7 @@ func Publish(ctx context.Context, publish func(ctx context.Context, subj string,
 }
 
 // PublishTo is Publish with an explicit lane. The failover lane targets the
-// buddy-hosted OUTBOX-FAILOVER stream, which is how a site keeps federating
+// failover-hosted OUTBOX-FAILOVER stream, which is how a site keeps federating
 // outward while its own NATS is down: the live OUTBOX buffer lives on the
 // cluster that is gone, so an event published there would go nowhere.
 //

@@ -56,7 +56,7 @@ func TestLane_MsgCanonical_LandsOnItsOwnStreamFilter(t *testing.T) {
 }
 
 // The OUTBOX buffer follows the same rule as the canonical stream: a
-// failover-lane federation event has to land on the buddy-hosted standby, since
+// failover-lane federation event has to land on the failover-hosted standby, since
 // the live OUTBOX sits on the cluster that is down.
 func TestLane_Outbox(t *testing.T) {
 	assert.Equal(t, "chat.outbox.site-a.site-b.member_added", LaneHome.Outbox("site-a", "site-b", "member_added"))

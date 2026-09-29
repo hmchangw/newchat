@@ -80,11 +80,11 @@ func WaitPool(ctx context.Context, wg *sync.WaitGroup) error {
 }
 
 // Lane is a running pull consumer that a service can stop without a nil check.
-// A nil *Lane is one that never bound — an unreachable buddy, say — so a
+// A nil *Lane is one that never bound — an unreachable failover, say — so a
 // service holds the same value either way and shutdown reads the same.
 //
 // The handlers are tracked by the caller's WaitGroup, not here, because a home
-// lane and a buddy lane share one pool: waiting is WaitPool's job, once, on
+// lane and a failover lane share one pool: waiting is WaitPool's job, once, on
 // that shared group.
 type Lane struct{ iter MsgIterator }
 

@@ -34,11 +34,11 @@ func (p Pipeline) ConsumerName(base string) string {
 	return base
 }
 
-// FailoverConsumerName is the buddy-lane durable for a pipeline: the home-lane
+// FailoverConsumerName is the failover-lane durable for a pipeline: the home-lane
 // name plus a suffix. Distinct from the home lane's so the two keep independent
 // cursors — on a single-server dev NATS both lanes live on one server, and a
 // shared durable would have them clobber each other. Shared rather than
-// re-derived per service so two lanes on one buddy cluster cannot drift apart.
+// re-derived per service so two lanes on one failover cluster cannot drift apart.
 func (p Pipeline) FailoverConsumerName(base string) string {
 	return p.ConsumerName(base) + "-failover"
 }

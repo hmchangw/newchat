@@ -42,31 +42,31 @@ func laneTestConfig() *config {
 
 // A handler's publisher and replier are fixed at construction, so each lane
 // needs its own. The failover lane exists precisely because the home cluster is
-// unreachable: a handler that consumed on the buddy but published on home would
+// unreachable: a handler that consumed on the failover but published on home would
 // validate the message and then drop it into a dead connection, and the client's
 // reply would go the same way — silently, with the send appearing to hang.
 func TestNewLaneHandler_SpeaksOnItsOwnConnection(t *testing.T) {
 	home := &recordingConn{}
-	buddy := &recordingConn{}
+	failover := &recordingConn{}
 	cfg := laneTestConfig()
 
 	homeHandler := newLaneHandler(home.deps(), nil, nil, cfg)
-	buddyHandler := newLaneHandler(buddy.deps(), nil, nil, cfg)
+	standbyHandler := newLaneHandler(failover.deps(), nil, nil, cfg)
 
 	ctx := context.Background()
 	_, err := homeHandler.publish(ctx, &nats.Msg{Subject: "canonical.home"})
 	require.NoError(t, err)
 	require.NoError(t, homeHandler.reply(ctx, &nats.Msg{Subject: "reply.home"}))
 
-	_, err = buddyHandler.publish(ctx, &nats.Msg{Subject: "canonical.buddy"})
+	_, err = standbyHandler.publish(ctx, &nats.Msg{Subject: "canonical.failover"})
 	require.NoError(t, err)
-	require.NoError(t, buddyHandler.reply(ctx, &nats.Msg{Subject: "reply.buddy"}))
+	require.NoError(t, standbyHandler.reply(ctx, &nats.Msg{Subject: "reply.failover"}))
 
 	// Each connection saw exactly its own lane's traffic and nothing else: the
 	// failing shape this guards against is both lanes sharing one handler, which
 	// puts all four subjects on the home connection.
 	assert.Equal(t, []string{"canonical.home"}, home.published)
 	assert.Equal(t, []string{"reply.home"}, home.replied)
-	assert.Equal(t, []string{"canonical.buddy"}, buddy.published)
-	assert.Equal(t, []string{"reply.buddy"}, buddy.replied)
+	assert.Equal(t, []string{"canonical.failover"}, failover.published)
+	assert.Equal(t, []string{"reply.failover"}, failover.replied)
 }

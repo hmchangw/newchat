@@ -793,7 +793,7 @@ func TestMessageCollection_BuildAction_RejectsWrongShapePerMode(t *testing.T) {
 	}
 }
 
-// A fourth consumer over messageCollection, bound to the buddy-hosted
+// A fourth consumer over messageCollection, bound to the failover-hosted
 // MESSAGES-CANONICAL-FAILOVER. Indexing is unchanged — Elasticsearch is up
 // during a NATS outage — only the source stream is new.
 func TestFailoverMessageCollection(t *testing.T) {

@@ -18,9 +18,9 @@ import (
 )
 
 // natsInstance is one process-shared JetStream server. Two exist: the primary
-// and the buddy that NATSPair hands out, so a service holding a home and a
-// buddy connection can be exercised end to end. They share this type so the
-// image, flags, wait strategy and teardown cannot drift apart — a buddy that
+// and the failover that NATSPair hands out, so a service holding a home and a
+// failover connection can be exercised end to end. They share this type so the
+// image, flags, wait strategy and teardown cannot drift apart — a failover that
 // quietly kept the old startup behaviour would fail in ways that look like the
 // failover code's fault.
 type natsInstance struct {

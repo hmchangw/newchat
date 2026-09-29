@@ -33,28 +33,28 @@ func reservePort(t *testing.T) (url string, start func() *restartableNATS) {
 	}
 }
 
-func buddyEnabled() *natsutil.BuddyDialer {
-	return dialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"})
+func standbyEnabled() *natsutil.FailoverDialer {
+	return dialer(natsutil.FailoverSiteConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"})
 }
 
-// A service with no buddy has nothing to do without its home cluster, so the
+// A service with no failover has nothing to do without its home cluster, so the
 // fail-fast dial stays: crash-looping is the right signal in a single-site
 // deployment.
-func TestBuddyDialer_ConnectHome_NoBuddyFailsFast(t *testing.T) {
+func TestFailoverDialer_ConnectHome_NoFailoverFailsFast(t *testing.T) {
 	url, _ := reservePort(t)
 
-	_, err := dialer(natsutil.BuddyConfig{}).ConnectHome(context.Background(), url, nil)
+	_, err := dialer(natsutil.FailoverSiteConfig{}).ConnectHome(context.Background(), url, nil)
 
 	require.Error(t, err)
 }
 
-// With a buddy configured, a pod that boots while its home cluster is down must
-// still come up: it is precisely then that the buddy lane needs it. The home
+// With a failover configured, a pod that boots while its home cluster is down must
+// still come up: it is precisely then that the failover lane needs it. The home
 // connection is returned in the reconnecting state and dials in the background.
-func TestBuddyDialer_ConnectHome_WithBuddyDialsInTheBackground(t *testing.T) {
+func TestFailoverDialer_ConnectHome_WithFailoverDialsInTheBackground(t *testing.T) {
 	url, start := reservePort(t)
 
-	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	conn, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 	assert.Equal(t, nats.RECONNECTING, conn.NatsConn().Status(), "not connected yet, not failed either")
@@ -65,10 +65,10 @@ func TestBuddyDialer_ConnectHome_WithBuddyDialsInTheBackground(t *testing.T) {
 }
 
 // The ordinary case must not change: a reachable home connects synchronously.
-func TestBuddyDialer_ConnectHome_WithBuddyAndReachableHomeConnectsNow(t *testing.T) {
+func TestFailoverDialer_ConnectHome_WithFailoverAndReachableHomeConnectsNow(t *testing.T) {
 	url := startTestNATSURL(t)
 
-	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	conn, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 
@@ -77,8 +77,8 @@ func TestBuddyDialer_ConnectHome_WithBuddyAndReachableHomeConnectsNow(t *testing
 
 // A missing creds file is a configuration error, not an outage; retrying it in
 // the background would hide it forever.
-func TestBuddyDialer_ConnectHome_BadCredsFileFailsFastEvenWithBuddy(t *testing.T) {
-	d := buddyEnabled()
+func TestFailoverDialer_ConnectHome_BadCredsFileFailsFastEvenWithFailover(t *testing.T) {
+	d := standbyEnabled()
 	d.CredsFile = "/nonexistent/creds"
 
 	_, err := d.ConnectHome(context.Background(), startTestNATSURL(t), nil)
@@ -89,8 +89,8 @@ func TestBuddyDialer_ConnectHome_BadCredsFileFailsFastEvenWithBuddy(t *testing.T
 // A bind on an already-connected home runs right away, and its error is the
 // caller's to treat as fatal: home is up, so a failed bind is a real fault.
 func TestBindWhenConnected_ConnectedRunsNowAndReturnsTheError(t *testing.T) {
-	conn := natsutil.ConnectBuddy(context.Background(), startTestNATSURL(t), "",
-		buddyEnabled().TracerProvider, buddyEnabled().Propagator, false)
+	conn := natsutil.ConnectFailoverSite(context.Background(), startTestNATSURL(t), "",
+		standbyEnabled().TracerProvider, standbyEnabled().Propagator, false)
 	require.NotNil(t, conn)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 
@@ -115,7 +115,7 @@ func TestBindWhenConnected_ConnectedRunsNowAndReturnsTheError(t *testing.T) {
 // bind runs and the lane comes up — no restart, no operator.
 func TestBindWhenConnected_DeferredUntilTheClusterReturns(t *testing.T) {
 	url, start := reservePort(t)
-	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	conn, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 
@@ -143,7 +143,7 @@ func TestBindWhenConnected_DeferredUntilTheClusterReturns(t *testing.T) {
 // outage all over again.
 func TestBindWhenConnected_RetriesAFailedDeferredBind(t *testing.T) {
 	url, start := reservePort(t)
-	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	conn, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 
@@ -165,7 +165,7 @@ func TestBindWhenConnected_RetriesAFailedDeferredBind(t *testing.T) {
 // Stop must be stopped on the spot, or a lane outlives the process's teardown.
 func TestBindWhenConnected_StopBeforeReadyStopsALateBind(t *testing.T) {
 	url, start := reservePort(t)
-	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	conn, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 
@@ -185,7 +185,7 @@ func TestBindWhenConnected_StopBeforeReadyStopsALateBind(t *testing.T) {
 // Cancelling the context releases the watcher without binding anything.
 func TestBindWhenConnected_ContextCancelReleasesTheWatcher(t *testing.T) {
 	url, _ := reservePort(t)
-	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	conn, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 
@@ -205,12 +205,12 @@ func TestBindWhenConnected_ContextCancelReleasesTheWatcher(t *testing.T) {
 // the broker's limit is refused outright. The server default is the safe floor.
 func TestMaxPayload(t *testing.T) {
 	url, _ := reservePort(t)
-	lazy, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	lazy, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { lazy.NatsConn().Close() })
 
-	live := natsutil.ConnectBuddy(context.Background(), startTestNATSURL(t), "",
-		buddyEnabled().TracerProvider, buddyEnabled().Propagator, false)
+	live := natsutil.ConnectFailoverSite(context.Background(), startTestNATSURL(t), "",
+		standbyEnabled().TracerProvider, standbyEnabled().Propagator, false)
 	require.NotNil(t, live)
 	t.Cleanup(func() { live.NatsConn().Close() })
 
@@ -231,7 +231,7 @@ func TestLanesCheck(t *testing.T) {
 	assert.Error(t, natsutil.LanesCheck(no).Probe(ctx), "no lane bound")
 	assert.Error(t, natsutil.LanesCheck(no, no).Probe(ctx))
 	assert.NoError(t, natsutil.LanesCheck(yes, no).Probe(ctx), "home serving")
-	assert.NoError(t, natsutil.LanesCheck(no, yes).Probe(ctx), "buddy serving while home is down")
+	assert.NoError(t, natsutil.LanesCheck(no, yes).Probe(ctx), "failover serving while home is down")
 	assert.Equal(t, "lanes", natsutil.LanesCheck(yes).Name)
 }
 

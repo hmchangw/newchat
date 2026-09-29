@@ -130,9 +130,9 @@ func main() {
 
 	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NATS.CredsFile, sdk)
+	dialer := natsutil.NewFailoverDialer(cfg.Failover, cfg.SiteID, cfg.NATS.CredsFile, sdk)
 	// Lazy home dial so a pod restarting mid-outage can still boot and answer displaced clients
-	// on the buddy; see natsutil.BuddyDialer.ConnectHome.
+	// on the failover; see natsutil.FailoverDialer.ConnectHome.
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NATS.URL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -433,7 +433,7 @@ func main() {
 
 	slog.Info("history-service running", "site", cfg.SiteID)
 
-	// The lane routers stop and the buddy drains first, so neither lane accepts
+	// The lane routers stop and the failover drains first, so neither lane accepts
 	// new work while the other is still finishing.
 	hooks := routers.ShutdownHooks()
 	hooks = append(hooks,

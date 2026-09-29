@@ -50,7 +50,7 @@ func seedSameSiteRoom(t *testing.T, ctx context.Context, roomID string) (Store, 
 		testRoomKey(t)
 }
 
-func connectBuddyNATS(t *testing.T, url string) *o11ynats.Conn {
+func connectFailoverNATS(t *testing.T, url string) *o11ynats.Conn {
 	t.Helper()
 	conn, err := natsutil.Connect(context.Background(), url, "",
 		noop.NewTracerProvider(), propagation.TraceContext{}, false)
@@ -73,21 +73,21 @@ func channelMessageEvent(t *testing.T, roomID, msgID string) []byte {
 	return data
 }
 
-// The end-to-end property this whole plan exists for: a subscriber on the BUDDY
+// The end-to-end property this whole plan exists for: a subscriber on the FAILOVER-SITE
 // cluster receives a SAME-SITE room's message when it came through the failover
 // lane. Without lane-aware routing the publish goes to chat.local.room.>, which
 // is filtered at the leaf node and never crosses a gateway — the client hears
 // nothing, and nothing anywhere logs an error.
 func TestFailoverLane_SameSiteRoomReachesRemoteSubscriber(t *testing.T) {
-	_, buddyURL := testutil.NATSPair(t)
+	_, failoverURL := testutil.NATSPair(t)
 	ctx := context.Background()
 
 	store, us, key := seedSameSiteRoom(t, ctx, "r1")
-	buddy := connectBuddyNATS(t, buddyURL)
+	failover := connectFailoverNATS(t, failoverURL)
 
-	// The displaced client: connected to the buddy, subscribed to the global
+	// The displaced client: connected to the failover, subscribed to the global
 	// root, as a client in failover mode is.
-	client, err := nats.Connect(buddyURL)
+	client, err := nats.Connect(failoverURL)
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
 
@@ -97,9 +97,9 @@ func TestFailoverLane_SameSiteRoomReachesRemoteSubscriber(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.Flush())
 
-	// The failover-lane handler: publishes on the buddy, resolver pinned to the
+	// The failover-lane handler: publishes on the failover, resolver pinned to the
 	// failover lane. Configured mode is local, which is the case that breaks.
-	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(buddy, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
+	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(failover, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
 		defaultParentFetcher, true,
 		subject.NewLaneRouter(subject.RouteLocal, subject.LaneFailover, nil,
 			subject.DefaultFailoverRevertGrace))
@@ -123,13 +123,13 @@ func TestFailoverLane_SameSiteRoomReachesRemoteSubscriber(t *testing.T) {
 // the home lane in local mode goes to the local root, which the remote
 // subscriber never sees. This is the silent failure the plan closes.
 func TestHomeLane_SameSiteRoomStaysOnTheLocalRoot(t *testing.T) {
-	_, buddyURL := testutil.NATSPair(t)
+	_, failoverURL := testutil.NATSPair(t)
 	ctx := context.Background()
 
 	store, us, key := seedSameSiteRoom(t, ctx, "r2")
-	buddy := connectBuddyNATS(t, buddyURL)
+	failover := connectFailoverNATS(t, failoverURL)
 
-	client, err := nats.Connect(buddyURL)
+	client, err := nats.Connect(failoverURL)
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
 
@@ -139,7 +139,7 @@ func TestHomeLane_SameSiteRoomStaysOnTheLocalRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.Flush())
 
-	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(buddy, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
+	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(failover, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
 		defaultParentFetcher, true,
 		subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome, nil,
 			subject.DefaultFailoverRevertGrace))
@@ -157,13 +157,13 @@ func TestHomeLane_SameSiteRoomStaysOnTheLocalRoot(t *testing.T) {
 // a client that has not yet reverted keeps receiving while one that has also
 // does.
 func TestHomeLane_DualPublishesDuringTheRevertGraceWindow(t *testing.T) {
-	_, buddyURL := testutil.NATSPair(t)
+	_, failoverURL := testutil.NATSPair(t)
 	ctx := context.Background()
 
 	store, us, key := seedSameSiteRoom(t, ctx, "r3")
-	buddy := connectBuddyNATS(t, buddyURL)
+	failover := connectFailoverNATS(t, failoverURL)
 
-	client, err := nats.Connect(buddyURL)
+	client, err := nats.Connect(failoverURL)
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
 
@@ -174,7 +174,7 @@ func TestHomeLane_DualPublishesDuringTheRevertGraceWindow(t *testing.T) {
 	require.NoError(t, client.Flush())
 
 	restored := time.Now().UTC().Add(-time.Minute)
-	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(buddy, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
+	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(failover, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
 		defaultParentFetcher, true,
 		subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome,
 			func() time.Time { return restored }, subject.DefaultFailoverRevertGrace))

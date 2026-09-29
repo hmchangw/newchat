@@ -76,7 +76,7 @@ func TestTrackRestores_NilConnYieldsAnInertTracker(t *testing.T) {
 // service that opens a tracked connection leaks one goroutine per restart.
 func TestTrackRestores_StopsOnContextCancel(t *testing.T) {
 	url := startTestNATSURL(t)
-	conn := natsutil.ConnectBuddy(context.Background(), url, "",
+	conn := natsutil.ConnectFailoverSite(context.Background(), url, "",
 		noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NotNil(t, conn)
 	t.Cleanup(func() { conn.NatsConn().Close() })
@@ -96,7 +96,7 @@ func TestTrackRestores_StopsOnContextCancel(t *testing.T) {
 // dual-publish window during recovery.
 func TestTrackRestores_StampsAReconnect(t *testing.T) {
 	ns, url := startRestartableNATS(t)
-	conn := natsutil.ConnectBuddy(context.Background(), url, "",
+	conn := natsutil.ConnectFailoverSite(context.Background(), url, "",
 		noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NotNil(t, conn)
 	t.Cleanup(func() { conn.NatsConn().Close() })
@@ -153,7 +153,7 @@ func (n *restartableNATS) restart(t *testing.T) {
 
 // A publisher that restarts after home has already recovered sees no reconnect,
 // so it would skip the grace window while clients are still on peers for up to
-// five minutes. With a buddy configured a restart is indistinguishable from a
+// five minutes. With a failover configured a restart is indistinguishable from a
 // recovery, so the window opens at startup.
 func TestTrackRestores_AssumeOutageOpensTheWindowAtStartup(t *testing.T) {
 	tr := natsutil.TrackReconnects(context.Background(), nil, true)
@@ -166,7 +166,7 @@ func TestTrackRestores_AssumeOutageOpensTheWindowAtStartup(t *testing.T) {
 // must open the window too.
 func TestTrackRestores_FirstConnectOnALazyDialOpensTheWindow(t *testing.T) {
 	url, start := reservePort(t)
-	conn, err := buddyEnabled().ConnectHome(context.Background(), url, nil)
+	conn, err := standbyEnabled().ConnectHome(context.Background(), url, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.NatsConn().Close() })
 

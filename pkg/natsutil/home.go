@@ -69,7 +69,7 @@ func PageBudget(trimming bool, maxResponseBytes int64, conn *o11ynats.Conn) page
 //
 // A JetStream consumer cannot be created on a connection that is still dialing:
 // the API request sits in the reconnect buffer until its timeout and then
-// fails. So a service whose home dial was lazy (see BuddyDialer.ConnectHome)
+// fails. So a service whose home dial was lazy (see FailoverDialer.ConnectHome)
 // hands its home-lane bind here and carries on; the bind runs the moment the
 // connection reaches CONNECTED, retrying with backoff until it succeeds. Until
 // then the lane is not Ready, which the service's readiness reports through

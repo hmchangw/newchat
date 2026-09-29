@@ -1,4 +1,4 @@
-// Package failoverlane binds a service's standby lane on its buddy cluster.
+// Package failoverlane binds a service's standby lane on its failover cluster.
 //
 // It sits above pkg/natsutil and pkg/stream rather than inside either: the
 // binder needs both, and pkg/stream already depends on pkg/natsutil through
@@ -19,10 +19,10 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// BuddyLane is what differs between one service's standby lane and another's:
+// StandbyLane is what differs between one service's standby lane and another's:
 // the stream it consumes, the consumer it binds, and any further streams that
-// must exist on the buddy first.
-type BuddyLane struct {
+// must exist on the failover first.
+type StandbyLane struct {
 	// Stream is the standby stream this lane consumes.
 	Stream stream.Config
 	// PublishesTo lists standby streams this lane publishes to. They must exist
@@ -39,17 +39,17 @@ type BuddyLane struct {
 	BorrowStream bool
 }
 
-// streamsToEnsure lists every stream this lane needs on the buddy, the consumed
+// streamsToEnsure lists every stream this lane needs on the failover, the consumed
 // one first — it is what the bind depends on, so its failure is the one worth
 // reporting.
-func (s *BuddyLane) streamsToEnsure() []stream.Config {
+func (s *StandbyLane) streamsToEnsure() []stream.Config {
 	if s.BorrowStream {
 		return nil
 	}
 	return append([]stream.Config{s.Stream}, s.PublishesTo...)
 }
 
-// Binder readies and binds a standby lane on a buddy cluster.
+// Binder readies and binds a standby lane on a failover cluster.
 //
 // It holds the setup every standby lane needs, so a service states only what is
 // different about its own lane. Before this, each service carried its own copy
@@ -60,12 +60,12 @@ type Binder struct {
 	// SiteID labels the lane's metrics. The service itself is identified by the
 	// meter the Metrics were built from.
 	SiteID string
-	// Dialer reaches the buddy cluster the standby streams must be hosted by.
+	// Dialer reaches the failover cluster the standby streams must be hosted by.
 	// Placement is asserted against its site in production — names are unique
 	// supercluster-wide, so a standby stream sitting on the very cluster it
 	// exists to outlive would pass an existence check and fail only during the
 	// outage it was built for.
-	Dialer *natsutil.BuddyDialer
+	Dialer *natsutil.FailoverDialer
 	// Bootstrap creates the streams instead of verifying them. Dev only.
 	Bootstrap bool
 	// MaxWorkers sizes the pull batch.
@@ -85,23 +85,23 @@ type Binder struct {
 	OnLoopStop func(error)
 }
 
-// buddySiteID is the cluster placement is asserted against; empty when no
-// buddy is configured, which EnsureFailoverStream treats as nothing to verify.
-func (b *Binder) buddySiteID() string {
+// failoverSiteID is the cluster placement is asserted against; empty when no
+// failover is configured, which EnsureFailoverStream treats as nothing to verify.
+func (b *Binder) failoverSiteID() string {
 	if b.Dialer == nil {
 		return ""
 	}
 	return b.Dialer.Config.SiteID
 }
 
-// BindConsumer readies spec's streams on the buddy and returns the bound
+// BindConsumer readies spec's streams on the failover and returns the bound
 // consumer, for a lane whose draining pattern is its own — inbox-worker
 // serializes membership events on one worker while fanning the rest out, which
 // no shared pool can express.
-func (b *Binder) BindConsumer(ctx context.Context, bjs o11ynats.JetStream, spec *BuddyLane) (o11ynats.Consumer, error) {
+func (b *Binder) BindConsumer(ctx context.Context, bjs o11ynats.JetStream, spec *StandbyLane) (o11ynats.Consumer, error) {
 	fjs := bjs
 	for _, c := range spec.streamsToEnsure() {
-		if err := stream.EnsureFailoverStream(ctx, fjs, c, b.Bootstrap, b.buddySiteID()); err != nil {
+		if err := stream.EnsureFailoverStream(ctx, fjs, c, b.Bootstrap, b.failoverSiteID()); err != nil {
 			return nil, err
 		}
 	}
@@ -112,10 +112,10 @@ func (b *Binder) BindConsumer(ctx context.Context, bjs o11ynats.JetStream, spec 
 	return cons, nil
 }
 
-// Bind readies spec's streams on the buddy, binds its consumer, and drains it
+// Bind readies spec's streams on the failover, binds its consumer, and drains it
 // into the binder's pool through handle. The returned Lane is what shutdown
 // stops and waits on; it is nil-safe, so a service needs no guard of its own.
-func (b *Binder) Bind(ctx context.Context, bjs o11ynats.JetStream, spec *BuddyLane,
+func (b *Binder) Bind(ctx context.Context, bjs o11ynats.JetStream, spec *StandbyLane,
 	handle func(context.Context, jetstream.Msg),
 ) (*natsutil.Lane, error) {
 	cons, err := b.BindConsumer(ctx, bjs, spec)
@@ -187,15 +187,15 @@ func (b *Binder) startLoop(ctx context.Context, cons o11ynats.Consumer, streamNa
 // so only the tracking loop ever makes one.
 type BuildHandler func(ctx context.Context, conn *o11ynats.Conn, js o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error)
 
-// BindLane dials the buddy and binds spec there with a handler built by build
+// BindLane dials the failover and binds spec there with a handler built by build
 // for the failover lane. It is the worker-side twin of BindRouters, holding the
 // choreography every worker used to copy: dial, build the lane's handler on the
-// buddy connection, Bind, capture the Lane for shutdown.
+// failover connection, Bind, capture the Lane for shutdown.
 //
-// It never fails startup (see BuddyDialer.Bind). The returned Lane is nil-safe
+// It never fails startup (see FailoverDialer.Bind). The returned Lane is nil-safe
 // and the Conn is nil exactly when no connection was established, so a service
 // lists both in its shutdown hooks unconditionally.
-func (b *Binder) BindLane(ctx context.Context, spec *BuddyLane, build BuildHandler) (*natsutil.Lane, *o11ynats.Conn) {
+func (b *Binder) BindLane(ctx context.Context, spec *StandbyLane, build BuildHandler) (*natsutil.Lane, *o11ynats.Conn) {
 	if b.Dialer == nil {
 		return nil, nil
 	}

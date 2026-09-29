@@ -68,11 +68,11 @@ type config struct {
 	MemberListTimeout  time.Duration `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
-	RoomKeyRetiredTTL        time.Duration        `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
-	HealthAddr               string               `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled             bool                 `env:"PPROF_ENABLED" envDefault:"false"`
-	Bootstrap                bootstrapConfig      `envPrefix:"BOOTSTRAP_"`
-	Buddy                    natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	RoomKeyRetiredTTL        time.Duration               `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
+	HealthAddr               string                      `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled             bool                        `env:"PPROF_ENABLED" envDefault:"false"`
+	Bootstrap                bootstrapConfig             `envPrefix:"BOOTSTRAP_"`
+	Failover                 natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
 	Revert                   subject.RevertConfig
 	RestrictedRoomMinMembers int `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
@@ -227,9 +227,9 @@ func main() {
 
 	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NatsCredsFile, sdk)
+	dialer := natsutil.NewFailoverDialer(cfg.Failover, cfg.SiteID, cfg.NatsCredsFile, sdk)
 	// Lazy home dial so a pod restarting mid-outage can still boot and answer displaced clients
-	// on the buddy; see natsutil.BuddyDialer.ConnectHome.
+	// on the failover; see natsutil.FailoverDialer.ConnectHome.
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -363,18 +363,18 @@ func main() {
 	}
 
 	// jsPublisher / corePublisher bind the two publish paths to ONE connection,
-	// so the buddy-side handler publishes on the buddy: a request that reached
-	// this service over the buddy did so because the home cluster is down, and
+	// so the failover-side handler publishes on the failover: a request that reached
+	// this service over the failover did so because the home cluster is down, and
 	// its reply events have to go back out the way they came. Both lanes report
 	// to the same publish metrics — a failover publish is still a publish.
 	// buildHandler assembles a handler bound to one connection and one route
-	// resolver. Two are built — home and buddy — sharing every store and client,
+	// resolver. Two are built — home and failover — sharing every store and client,
 	// because the only thing that differs between the lanes is where events go.
 	buildHandler := func(pjs o11ynats.JetStream, pnc *o11ynats.Conn, routes subject.RouteResolver) *Handler {
 		// The request/reply clients bind to the same connection as the
 		// publishers: a member list or history read issued while serving a
-		// buddy-lane request must not go out over the connection whose cluster
-		// is the reason the request came in on the buddy.
+		// failover-lane request must not go out over the connection whose cluster
+		// is the reason the request came in on the failover.
 		h := NewHandler(store, keyStore,
 			NewNATSMemberListClient(pnc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics)),
 			newHistoryMessageReader(pnc, cfg.SiteID, withHistoryMetrics(publishMetrics)),
@@ -405,7 +405,7 @@ func main() {
 	// speaks NATS may be shared between them. The restore tracker drives the
 	// home lane's dual-publish window after recovery; the router ignores it on
 	// the failover lane, which always routes global.
-	homeRestores := natsutil.TrackReconnects(ctx, nc, cfg.Buddy.Enabled())
+	homeRestores := natsutil.TrackReconnects(ctx, nc, cfg.Failover.Enabled())
 	var laneHandlers []*Handler
 	var failoverPublish outboxPublishFunc
 	routers, err := failoverlane.BindRouters(ctx, nc, js, dialer,
@@ -417,7 +417,7 @@ func main() {
 				// The standby OUTBOX has to exist before the first federated
 				// event is buffered onto it.
 				if err := stream.EnsureFailoverStream(ctx, laneJS,
-					stream.OutboxFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+					stream.OutboxFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Failover.SiteID); err != nil {
 					return nil, err
 				}
 				failoverPublish = natsutil.JetStreamPublishFunc(laneJS, publishMetrics)
@@ -435,7 +435,7 @@ func main() {
 	// Both lanes publish federated events through the standby OUTBOX: the
 	// failover lane by definition, the home lane as its fallback when a publish
 	// finds its own OUTBOX with no responders. Wired after both lanes are built,
-	// so neither depends on which order BindRouters built them in. No buddy
+	// so neither depends on which order BindRouters built them in. No failover
 	// leaves it nil and the home lane simply has no fallback.
 	for _, h := range laneHandlers {
 		if failoverPublish != nil {
@@ -454,7 +454,7 @@ func main() {
 
 	slog.Info("room-service running", "site", cfg.SiteID)
 
-	// The lane routers stop and the buddy drains first, so neither lane accepts
+	// The lane routers stop and the failover drains first, so neither lane accepts
 	// new work while the other is still finishing.
 	hooks := routers.ShutdownHooks()
 	hooks = append(hooks,

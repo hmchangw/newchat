@@ -37,12 +37,12 @@ type config struct {
 	// per-destination FIFO membership consumer is created per remote peer — a
 	// peer missing from this list has NO membership lane and its membership
 	// events sit in the OUTBOX stream unconsumed.
-	AllSiteIDs   []string                `env:"ALL_SITE_IDS" envDefault:"" envSeparator:","`
-	Consumer     stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Buddy        natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
-	Bootstrap    bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr   string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	AllSiteIDs   []string                    `env:"ALL_SITE_IDS" envDefault:"" envSeparator:","`
+	Consumer     stream.ConsumerSettings     `envPrefix:"CONSUMER_"`
+	Failover     natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	Bootstrap    bootstrapConfig             `envPrefix:"BOOTSTRAP_"`
+	HealthAddr   string                      `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled bool                        `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
 func main() {
@@ -79,11 +79,11 @@ func main() {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
-	// With no peers there is nothing to forward, so the buddy lane is gated out
-	// entirely — and the home dial stays fail-fast, since without a buddy a pod
+	// With no peers there is nothing to forward, so the failover lane is gated out
+	// entirely — and the home dial stays fail-fast, since without a failover a pod
 	// that cannot reach home has nothing to do.
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(len(peers) > 0), cfg.NatsCredsFile, sdk)
-	// Lazy home dial; see natsutil.BuddyDialer.ConnectHome.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover.OnlyIf(len(peers) > 0), cfg.SiteID, cfg.NatsCredsFile, sdk)
+	// Lazy home dial; see natsutil.FailoverDialer.ConnectHome.
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -105,11 +105,11 @@ func main() {
 	// Both lanes' guards are built eagerly, before either bind. The home bind is
 	// deferred to whenever the cluster returns, so a readiness row that only
 	// appeared then would leave the window it covers unwatched; and a guard whose
-	// loop never starts reads ready, so an undialled buddy stays home-only rather
+	// loop never starts reads ready, so an undialled failover stays home-only rather
 	// than permanently unready.
 	sig := shutdown.Signals()
 	homeGuards := newPeerGuards("home", peers)
-	buddyGuards := newPeerGuards("failover", peers)
+	standbyGuards := newPeerGuards("failover", peers)
 
 	// Home lanes, bound once the home connection is up — immediately in the
 	// ordinary case, later if the pod booted during an outage. Dev-only stream
@@ -126,30 +126,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Buddy lane: keeps this site federating outward while its own NATS is down.
+	// Failover lane: keeps this site federating outward while its own NATS is down.
 	// A failed dial adds no failover lane and the home lanes carry on.
-	var stopBuddy func()
-	buddyConn := dialer.Bind(ctx, func(ctx context.Context, _ *o11ynats.Conn, bjs o11ynats.JetStream) error {
+	var stopStandby func()
+	standbyConn := dialer.Bind(ctx, func(ctx context.Context, _ *o11ynats.Conn, bjs o11ynats.JetStream) error {
 		failoverCfg := stream.OutboxFailover(cfg.SiteID)
 		if err := stream.EnsureFailoverStream(ctx, bjs, failoverCfg,
-			cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+			cfg.Bootstrap.Enabled, cfg.Failover.SiteID); err != nil {
 			return err
 		}
-		// Its own process, forwarding through the buddy connection.
-		stop, err := bindPeerLanes(ctx, bjs, failoverCfg.Name, subject.LaneFailover, peers, &cfg, sem, &wg, newLaneProcess(bjs), buddyGuards)
+		// Its own process, forwarding through the failover connection.
+		stop, err := bindPeerLanes(ctx, bjs, failoverCfg.Name, subject.LaneFailover, peers, &cfg, sem, &wg, newLaneProcess(bjs), standbyGuards)
 		if err != nil {
 			return err
 		}
-		stopBuddy = stop
+		stopStandby = stop
 		return nil
 	})
 
 	checks := []health.Check{
 		natsutil.HealthCheck(nc),
-		natsutil.LanesCheck(homeLanes.Ready, func() bool { return stopBuddy != nil }),
+		natsutil.LanesCheck(homeLanes.Ready, func() bool { return stopStandby != nil }),
 	}
 	checks = append(checks, homeGuards.checks()...)
-	checks = append(checks, buddyGuards.checks()...)
+	checks = append(checks, standbyGuards.checks()...)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled, checks...)
 	if err != nil {
@@ -164,10 +164,10 @@ func main() {
 			// Mark the stop intended BEFORE Stop() ends the lanes, or the guards
 			// read a clean shutdown as a death and re-signal the process.
 			homeGuards.beginShutdown()
-			buddyGuards.beginShutdown()
+			standbyGuards.beginShutdown()
 			homeLanes.Stop()
-			if stopBuddy != nil {
-				stopBuddy()
+			if stopStandby != nil {
+				stopStandby()
 			}
 			return nil
 		},
@@ -175,7 +175,7 @@ func main() {
 			return natsutil.WaitPool(ctx, &wg)
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
-		natsutil.DrainBuddy(buddyConn),
+		natsutil.DrainFailoverSite(standbyConn),
 		func(ctx context.Context) error { return healthStop(ctx) },
 		// obsShutdown LAST so all prior teardown telemetry is exported.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
@@ -286,7 +286,7 @@ func newLaneProcess(js natsutil.JetStreamMsgPublisher) func(context.Context, jet
 // whichever event types missed their consumer.
 // peerGuards holds this lane's loop guards, one per destination per consumer
 // kind. They are built before the bind that starts the loops, because both
-// binds are deferred — the home one until its cluster is reachable, the buddy
+// binds are deferred — the home one until its cluster is reachable, the failover
 // one until its dial succeeds — and a readiness row that appeared only on a
 // successful bind would not cover the window before it.
 type peerGuards struct {

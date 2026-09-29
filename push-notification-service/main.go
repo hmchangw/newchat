@@ -21,15 +21,15 @@ import (
 )
 
 type config struct {
-	NatsURL       string                  `env:"NATS_URL,required"`
-	NatsCredsFile string                  `env:"NATS_CREDS_FILE"`
-	SiteID        string                  `env:"SITE_ID,required"`
-	MaxWorkers    int                     `env:"MAX_WORKERS" envDefault:"100"`
-	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Buddy         natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
-	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	Mode          stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	NatsURL       string                      `env:"NATS_URL,required"`
+	NatsCredsFile string                      `env:"NATS_CREDS_FILE"`
+	SiteID        string                      `env:"SITE_ID,required"`
+	MaxWorkers    int                         `env:"MAX_WORKERS" envDefault:"100"`
+	Consumer      stream.ConsumerSettings     `envPrefix:"CONSUMER_"`
+	Failover      natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	HealthAddr    string                      `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled  bool                        `env:"PPROF_ENABLED" envDefault:"false"`
+	Mode          stream.Pipeline             `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 
 }
 
@@ -53,11 +53,11 @@ func run() error {
 	}
 
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
-	// HasFailover gates the bot pipeline out of the buddy lane; it also keeps
-	// the home dial fail-fast there, since without a buddy a pod that cannot
-	// reach home has nothing to do. With a buddy the dial is lazy, so a pod
-	// that restarts while home is down still boots and serves the buddy lane.
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile, sdk)
+	// HasFailover gates the bot pipeline out of the failover lane; it also keeps
+	// the home dial fail-fast there, since without a failover a pod that cannot
+	// reach home has nothing to do. With a failover the dial is lazy, so a pod
+	// that restarts while home is down still boots and serves the failover lane.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover.OnlyIf(wiring.HasFailover()), cfg.SiteID, cfg.NatsCredsFile, sdk)
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
@@ -74,7 +74,7 @@ func run() error {
 			Consumer: buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("push-notification-service"),
 				wiring.PushInputWildcard),
 		},
-		Buddy: &failoverlane.BuddyLane{
+		Failover: &failoverlane.StandbyLane{
 			Stream: wiring.PushFailoverStream,
 			// notification-worker owns the push stream and asserts its
 			// placement; binding here is this service's existence check.
@@ -115,7 +115,7 @@ func run() error {
 
 // buildConsumerConfig adds the durable name and filter; everything else comes
 // from ConsumerSettings. The durable is a parameter rather than derived from the
-// pipeline so the home and buddy lanes share one builder and differ only in the
+// pipeline so the home and failover lanes share one builder and differ only in the
 // durable and filter — a shared durable would have them clobber each other's
 // cursor on a single-server dev NATS.
 func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {

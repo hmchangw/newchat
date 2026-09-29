@@ -97,8 +97,8 @@ func TestGatekeeper_HomeLanePublishesToLiveCanonical(t *testing.T) {
 // counterpart. This is the constraint the whole chat.failover.> root exists to
 // satisfy, exercised against a real server rather than by string comparison.
 func TestFailoverStreams_CoexistWithLiveStreams(t *testing.T) {
-	_, buddyURL := testutil.NATSPair(t)
-	js := connectFailoverJS(t, buddyURL)
+	_, failoverURL := testutil.NATSPair(t)
+	js := connectFailoverJS(t, failoverURL)
 	ctx := context.Background()
 
 	// Live and failover streams for the same site, on one server: the create

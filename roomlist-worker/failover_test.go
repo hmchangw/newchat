@@ -15,7 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// The failover lane consumes the buddy-hosted MESSAGES-CANONICAL-FAILOVER stream
+// The failover lane consumes the failover-hosted MESSAGES-CANONICAL-FAILOVER stream
 // on its own durable, so its cursor is independent of the home lane's, and keeps
 // the home lane's unlimited redelivery: a MongoDB outage during a NATS outage
 // must still park messages rather than drop room state.

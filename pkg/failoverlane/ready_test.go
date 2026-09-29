@@ -45,14 +45,14 @@ func buildNothing(_ context.Context, _ *o11ynats.Conn, _ o11ynats.JetStream, _ s
 }
 
 // Readiness for a request/reply service with a lazily dialed home is "some
-// connection is serving": the home one, or the buddy while home is down. The
+// connection is serving": the home one, or the failover while home is down. The
 // plain NATS check cannot say this — it reads a dialing home as healthy.
 func TestRouters_Check(t *testing.T) {
 	ctx := context.Background()
 	tp, prop := noop.NewTracerProvider(), propagation.TraceContext{}
 
-	t.Run("home down, no buddy: not ready", func(t *testing.T) {
-		d := &natsutil.BuddyDialer{Config: natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"},
+	t.Run("home down, no failover: not ready", func(t *testing.T) {
+		d := &natsutil.FailoverDialer{Config: natsutil.FailoverSiteConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"},
 			TracerProvider: tp, Propagator: prop}
 		home, err := d.ConnectHome(ctx, unlistenedURL(t), nil)
 		require.NoError(t, err)
@@ -65,8 +65,8 @@ func TestRouters_Check(t *testing.T) {
 		assert.Equal(t, "lanes", routers.Check().Name)
 	})
 
-	t.Run("home down, buddy up: ready on the buddy", func(t *testing.T) {
-		d := &natsutil.BuddyDialer{Config: natsutil.BuddyConfig{SiteID: "site-b", NatsURL: embeddedNATS(t)},
+	t.Run("home down, failover up: ready on the failover", func(t *testing.T) {
+		d := &natsutil.FailoverDialer{Config: natsutil.FailoverSiteConfig{SiteID: "site-b", NatsURL: embeddedNATS(t)},
 			TracerProvider: tp, Propagator: prop}
 		home, err := d.ConnectHome(ctx, unlistenedURL(t), nil)
 		require.NoError(t, err)
@@ -74,13 +74,13 @@ func TestRouters_Check(t *testing.T) {
 
 		routers, err := BindRouters(ctx, home, nil, d, buildNothing)
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = natsutil.DrainBuddy(routers.buddyConn)(ctx) })
+		t.Cleanup(func() { _ = natsutil.DrainFailoverSite(routers.standbyConn)(ctx) })
 
 		assert.NoError(t, routers.Check().Probe(ctx))
 	})
 
-	t.Run("home up, no buddy: ready", func(t *testing.T) {
-		d := &natsutil.BuddyDialer{TracerProvider: tp, Propagator: prop}
+	t.Run("home up, no failover: ready", func(t *testing.T) {
+		d := &natsutil.FailoverDialer{TracerProvider: tp, Propagator: prop}
 		home, err := d.ConnectHome(ctx, embeddedNATS(t), nil)
 		require.NoError(t, err)
 		t.Cleanup(func() { home.NatsConn().Close() })

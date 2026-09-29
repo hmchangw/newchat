@@ -65,8 +65,8 @@ type Handler struct {
 	maxBatchSize      int
 	memberListTimeout time.Duration
 	publishToStream   func(ctx context.Context, subj string, data []byte, msgID string) error
-	// publishToFailoverStream publishes onto the buddy-hosted OUTBOX-FAILOVER
-	// stream. Nil unless a buddy connection was established; set via
+	// publishToFailoverStream publishes onto the failover-hosted OUTBOX-FAILOVER
+	// stream. Nil unless a failover connection was established; set via
 	// SetFailoverPublisher rather than the constructor, whose signature is
 	// already long enough that a 15th positional param would be a liability.
 	publishToFailoverStream  atomic.Pointer[outboxPublishFunc]
@@ -99,7 +99,7 @@ type Handler struct {
 	mentionableMaxLimit     int
 	// routes gates the namespace(s) same-site room .event uses; cross-site is
 	// always global. Not a fixed RoomRouteMode: a request that arrived on the
-	// buddy connection must route global, because the client that sent it is on
+	// failover connection must route global, because the client that sent it is on
 	// a peer cluster where chat.local.> is filtered from gateway interest.
 	routes subject.RouteResolver
 	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
@@ -895,7 +895,7 @@ func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action
 // (the durability boundary — only a local publish failure reaches the client);
 // outbox-worker forwards it to destSiteID's INBOX. No-op when destSiteID is
 // empty or local (outbox.PublishWithFailover owns that guard, the envelope
-// build, and the redirect onto the buddy OUTBOX when the local one is gone). The
+// build, and the redirect onto the failover OUTBOX when the local one is gone). The
 // dedupID derived from dedupSeed is the OUTBOX publish's Nats-Msg-Id too, so a
 // client retry can't double-enqueue the same (destination, event) into the
 // outbox.
@@ -912,8 +912,8 @@ func (h *Handler) federateOne(ctx context.Context, roomID, destSiteID string, ev
 // outboxPublishFunc is the shape of a publish onto an OUTBOX lane.
 type outboxPublishFunc = func(ctx context.Context, subj string, data []byte, msgID string) error
 
-// SetFailoverPublisher installs the buddy-lane publisher. Called from main once
-// the buddy connection is established — after the home router is already
+// SetFailoverPublisher installs the failover-lane publisher. Called from main once
+// the failover connection is established — after the home router is already
 // answering requests, hence the atomic: a home request can be inside
 // federateOne at that moment. Leaving it unset keeps federateOne on the live
 // lane only, which is the correct behaviour for a single-site deployment.

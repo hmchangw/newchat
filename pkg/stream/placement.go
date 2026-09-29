@@ -13,7 +13,7 @@ import (
 // unique supercluster-wide), so an existence check passes and the
 // misconfiguration only surfaces during the outage it was meant to survive.
 // Comparing the hosting cluster is the only check that catches it — and it also
-// catches a ring disagreement, where ops provisioned against a different buddy
+// catches a ring disagreement, where ops provisioned against a different failover
 // than the service is configured with.
 //
 // Callers pass an already-fetched StreamInfo so this stays a pure function.

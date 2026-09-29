@@ -49,7 +49,7 @@ type messageCollection struct {
 	// subject, and skips the template/mapping pushes the primary (user) collection
 	// already owns for the same indexPrefix.
 	teamsOnly bool
-	// failoverOnly binds MESSAGES-CANONICAL-FAILOVER on the buddy cluster instead
+	// failoverOnly binds MESSAGES-CANONICAL-FAILOVER on the failover cluster instead
 	// of the home canonical stream, filtering the failover subject root. Indexing
 	// is otherwise identical — Elasticsearch is up during a NATS outage — and the
 	// template/mapping pushes are skipped because the primary (user) collection
@@ -103,7 +103,7 @@ func newTeamsMessageCollection(indexPrefix, siteID string, devMode bool) *messag
 }
 
 // newFailoverMessageCollection is a fourth consumer over messageCollection, bound
-// to the buddy-hosted MESSAGES-CANONICAL-FAILOVER. Messages a site validates
+// to the failover-hosted MESSAGES-CANONICAL-FAILOVER. Messages a site validates
 // while its own NATS is down still need indexing, and Elasticsearch is unaffected
 // by that outage, so the only thing that changes is where the events come from.
 func newFailoverMessageCollection(indexPrefix, siteID string, devMode bool) *messageCollection {

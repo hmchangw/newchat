@@ -68,9 +68,9 @@ type config struct {
 	Breaker            mongoutil.BreakerConfig
 	DEKBreaker         atrest.BreakerConfig
 	Thread             threadcount.Policy
-	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Buddy              natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
-	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	Consumer           stream.ConsumerSettings     `envPrefix:"CONSUMER_"`
+	Failover           natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	Bootstrap          bootstrapConfig             `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
 	Vault              atrest.VaultConfig
 	DebugLog           logctx.Config `envPrefix:"DEBUG_LOG_"`
@@ -178,10 +178,10 @@ func main() {
 	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
 	// Default mode only: teams is a one-time migration path with no standby
-	// stream, so it has no buddy lane and keeps the fail-fast home dial. With a
-	// buddy the dial is lazy, so a pod that restarts while home is down still
-	// boots and serves the buddy lane.
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile, sdk)
+	// stream, so it has no failover lane and keeps the fail-fast home dial. With a
+	// failover the dial is lazy, so a pod that restarts while home is down still
+	// boots and serves the failover lane.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover.OnlyIf(cfg.Mode != "teams"), cfg.SiteID, cfg.NatsCredsFile, sdk)
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -382,7 +382,7 @@ func main() {
 	sig := shutdown.Signals()
 
 	// One handler per lane; the migration path is home-only, so the failover
-	// lane's processor carries no teams handler. The buddy lane never fails
+	// lane's processor carries no teams handler. The failover lane never fails
 	// startup — on any failure the service runs home-only.
 	lanes, err := failoverlane.BindLanes(ctx, nc, js, dialer, &failoverlane.LanesSpec{
 		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Metrics: sharedMetrics,
@@ -393,7 +393,7 @@ func main() {
 				return bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled)
 			},
 		},
-		Buddy: &failoverlane.BuddyLane{
+		Failover: &failoverlane.StandbyLane{
 			Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
 			Consumer: failoverConsumerCfg,
 		},
@@ -447,7 +447,7 @@ func main() {
 //
 // Applied per lane rather than inside the shared pool because it is this
 // service's semantics, not every consumer's — and applied to both lanes,
-// because a redelivery on the buddy double-counts exactly as it would on home.
+// because a redelivery on the failover double-counts exactly as it would on home.
 func stampRedelivery(process func(context.Context, jetstream.Msg)) func(context.Context, jetstream.Msg) {
 	return func(ctx context.Context, msg jetstream.Msg) {
 		process(natsutil.StampRedelivery(ctx, msg), msg)
@@ -545,7 +545,7 @@ func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Obser
 	return valkeyutil.ConnectOptional(ctx, cfg, "DEK and user L2", valkeyutil.Instrumented(sdk))
 }
 
-// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// buildFailoverConsumerConfig is the durable consumer on the failover-hosted
 // MESSAGES-CANONICAL-FAILOVER lane. Distinct durable from the home lane so the
 // two keep independent cursors; the handler and the Cassandra writes are
 // identical, because a failover-lane message is still this site's message and

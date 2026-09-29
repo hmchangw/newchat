@@ -53,12 +53,12 @@ func (t *ReconnectTracker) LastReconnectAt() time.Time {
 
 // TrackReconnects watches conn and stamps a tracker every time it reaches
 // CONNECTED after not being connected: a reconnect after a drop, and — on a
-// lazily dialed home (BuddyDialer.ConnectHome) — the first connect of a pod
+// lazily dialed home (FailoverDialer.ConnectHome) — the first connect of a pod
 // that booted during the outage, which IS the recovery from where it stands.
 //
 // assumeOutage stamps the tracker at startup as well. A publisher that restarts
 // after home has already recovered sees no reconnect, but clients can still be
-// on peers for up to their probe backoff; with a buddy configured a restart is
+// on peers for up to their probe backoff; with a failover configured a restart is
 // indistinguishable from a recovery, so it opens the window rather than
 // narrowing delivery. The cost is one grace period of dual publishing per
 // restart, which is cheap; the alternative was silent same-site events.

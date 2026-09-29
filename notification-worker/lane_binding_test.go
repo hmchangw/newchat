@@ -38,13 +38,13 @@ func TestNatsLane_Bind_ReplacesEveryConnectionBoundDep(t *testing.T) {
 	home := laneFor("home")
 	base := home.bind(&HandlerDeps{LargeRoomThreshold: 500, RecipientBatchSize: 7})
 
-	buddy := laneFor("buddy")
-	got := buddy.bind(&base)
+	failover := laneFor("failover")
+	got := failover.bind(&base)
 
-	assert.Same(t, buddy.Parent, got.Parent, "thread-parent lookup must use the lane's own connection")
-	assert.Same(t, buddy.Presence, got.Presence, "presence RPC must use the lane's own connection")
-	assert.Same(t, buddy.Badge, got.BadgeClient, "badge-count RPC must use the lane's own connection")
-	assert.Same(t, buddy.Emitter, got.Emitter, "push emit must use the lane's own connection")
+	assert.Same(t, failover.Parent, got.Parent, "thread-parent lookup must use the lane's own connection")
+	assert.Same(t, failover.Presence, got.Presence, "presence RPC must use the lane's own connection")
+	assert.Same(t, failover.Badge, got.BadgeClient, "badge-count RPC must use the lane's own connection")
+	assert.Same(t, failover.Emitter, got.Emitter, "push emit must use the lane's own connection")
 
 	// The site-local dependencies and plain config are shared, not rebuilt:
 	// Mongo and Valkey are still up when NATS is not.

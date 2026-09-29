@@ -63,13 +63,13 @@ type config struct {
 	UserCacheSize            int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL             time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
 	UserL2                   userstore.TTLConfig
-	HealthAddr               string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
-	PProfEnabled             bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr              string                  `env:"METRICS_ADDR"               envDefault:":9090"`
-	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Buddy                    natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
-	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	HealthAddr               string                      `env:"HEALTH_ADDR"                envDefault:":8081"`
+	PProfEnabled             bool                        `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr              string                      `env:"METRICS_ADDR"               envDefault:":9090"`
+	Consumer                 stream.ConsumerSettings     `envPrefix:"CONSUMER_"`
+	Failover                 natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	Bootstrap                bootstrapConfig             `envPrefix:"BOOTSTRAP_"`
+	DebugLog                 logctx.Config               `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
@@ -114,8 +114,8 @@ func main() {
 	domainMetrics := newGatekeeperMetrics(sdk.MeterProvider().Meter("message-gatekeeper"))
 
 	// Lazy home dial so a pod restarting mid-outage can still boot and validate displaced clients' sends
-	// on the buddy; see natsutil.BuddyDialer.ConnectHome.
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NatsCredsFile, sdk)
+	// on the failover; see natsutil.FailoverDialer.ConnectHome.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover, cfg.SiteID, cfg.NatsCredsFile, sdk)
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -195,7 +195,7 @@ func main() {
 		return newLaneHandler(newLaneDeps(conn, laneJS, cfg.ChatBaseURL, publishMetrics), store, users, &cfg,
 			append(slices.Clone(handlerOpts), withLane(lane))...)
 	}
-	// One handler per lane, one pool for both, so a bound buddy lane does not
+	// One handler per lane, one pool for both, so a bound failover lane does not
 	// double this service's in-flight validations against MongoDB.
 	lanes, err := failoverlane.BindLanes(ctx, nc, js, dialer, &failoverlane.LanesSpec{
 		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Metrics: sharedMetrics,
@@ -206,7 +206,7 @@ func main() {
 				return bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled)
 			},
 		},
-		Buddy: &failoverlane.BuddyLane{
+		Failover: &failoverlane.StandbyLane{
 			Stream: stream.MessagesFailover(cfg.SiteID),
 			// The canonical standby is published to, not consumed: a validated
 			// failover send must have somewhere to go.
@@ -304,7 +304,7 @@ func gatekeeperHandler(handler *Handler) func(context.Context, jetstream.Msg) {
 //
 // MESSAGES has exactly one consumer, so an un-acked panic is redelivered into a
 // crash loop that stops the site accepting any message at all. Applied to BOTH
-// lanes at the one place they are built: the buddy lane needs it at least as
+// lanes at the one place they are built: the failover lane needs it at least as
 // much, since it runs only while this site's own NATS is down and is then the
 // site's only ingress.
 func guardedLaneHandler(handle func(context.Context, jetstream.Msg)) func(context.Context, jetstream.Msg) {
@@ -323,7 +323,7 @@ func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
 	return cc
 }
 
-// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// buildFailoverConsumerConfig is the durable consumer on the failover-hosted
 // MESSAGES-FAILOVER lane, which carries sends from clients displaced by this
 // site's own NATS outage. Distinct durable from the home lane so the two keep
 // independent cursors.

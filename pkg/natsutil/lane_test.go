@@ -153,7 +153,7 @@ func TestWaitPool_TimesOutOnAWedgedWorker(t *testing.T) {
 	assert.Contains(t, err.Error(), "worker drain timed out")
 }
 
-// Two lanes sharing one pool is the contract that keeps a buddy lane from
+// Two lanes sharing one pool is the contract that keeps a failover lane from
 // doubling a service's concurrency budget against its databases.
 func TestRunPool_TwoLanesShareOneBudget(t *testing.T) {
 	iterA, iterB := newFakeIter(20), newFakeIter(20)

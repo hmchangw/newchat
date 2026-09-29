@@ -55,7 +55,7 @@ func TestInboxFailover(t *testing.T) {
 	assert.Equal(t, []string{"chat.failover.inbox.site-a.external.>"}, c.Subjects)
 }
 
-// The stream is named for the ORIGIN site, never the hosting buddy — names are
+// The stream is named for the ORIGIN site, never the hosting failover — names are
 // unique supercluster-wide, and naming by host would collide if a cluster ever
 // buddied for more than one peer.
 func TestInboxFailover_NamedForOriginSite(t *testing.T) {

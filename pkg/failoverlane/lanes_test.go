@@ -73,8 +73,8 @@ func (r *recorder) built() []subject.Lane {
 }
 
 var (
-	homeStream  = stream.Config{Name: "LANES-T", Subjects: []string{"lanes.t.>"}}
-	buddyStream = stream.Config{Name: "LANES-T-FAILOVER", Subjects: []string{"lanes.f.>"}}
+	homeStream    = stream.Config{Name: "LANES-T", Subjects: []string{"lanes.t.>"}}
+	standbyStream = stream.Config{Name: "LANES-T-FAILOVER", Subjects: []string{"lanes.f.>"}}
 )
 
 func homeSpec() HomeLane {
@@ -88,23 +88,23 @@ func homeSpec() HomeLane {
 	}
 }
 
-func buddySpec() *BuddyLane {
-	return &BuddyLane{
-		Stream:   buddyStream,
+func standbySpec() *StandbyLane {
+	return &StandbyLane{
+		Stream:   standbyStream,
 		Consumer: jetstream.ConsumerConfig{Durable: "lanes-t-failover", FilterSubject: "lanes.f.>", AckPolicy: jetstream.AckExplicitPolicy},
 	}
 }
 
-func lanesDialer(cfg natsutil.BuddyConfig) *natsutil.BuddyDialer {
-	return &natsutil.BuddyDialer{Config: cfg, TracerProvider: noop.NewTracerProvider(), Propagator: propagation.TraceContext{}}
+func lanesDialer(cfg natsutil.FailoverSiteConfig) *natsutil.FailoverDialer {
+	return &natsutil.FailoverDialer{Config: cfg, TracerProvider: noop.NewTracerProvider(), Propagator: propagation.TraceContext{}}
 }
 
-// The ordinary deployment: home up, no buddy. The home lane binds synchronously
+// The ordinary deployment: home up, no failover. The home lane binds synchronously
 // and consumes; readiness is up; the hooks run clean.
-func TestBindLanes_HomeUpNoBuddy(t *testing.T) {
+func TestBindLanes_HomeUpNoFailover(t *testing.T) {
 	ctx := context.Background()
 	home := embeddedJetStream(t, -1)
-	d := lanesDialer(natsutil.BuddyConfig{})
+	d := lanesDialer(natsutil.FailoverSiteConfig{})
 	nc, js, err := d.ConnectHomeJS(ctx, home.ClientURL(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { nc.NatsConn().Close() })
@@ -125,21 +125,21 @@ func TestBindLanes_HomeUpNoBuddy(t *testing.T) {
 	}
 }
 
-// The case the whole thing exists for: home down at boot, buddy up. The buddy
+// The case the whole thing exists for: home down at boot, failover up. The failover
 // lane binds and serves at once, readiness is up on its account, and the home
 // lane joins on its own when home returns.
-func TestBindLanes_HomeDownBuddyUp(t *testing.T) {
+func TestBindLanes_HomeDownFailoverUp(t *testing.T) {
 	ctx := context.Background()
 	homeURL, startHome := reserveJetStreamPort(t)
-	buddy := embeddedJetStream(t, -1)
-	d := lanesDialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: buddy.ClientURL()})
+	failover := embeddedJetStream(t, -1)
+	d := lanesDialer(natsutil.FailoverSiteConfig{SiteID: "site-b", NatsURL: failover.ClientURL()})
 	nc, js, err := d.ConnectHomeJS(ctx, homeURL, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { nc.NatsConn().Close() })
 
 	rec := &recorder{}
 	lanes, err := BindLanes(ctx, nc, js, d,
-		&LanesSpec{SiteID: "site-a", Home: homeSpec(), Buddy: buddySpec(), Bootstrap: true, MaxWorkers: 4}, rec.build)
+		&LanesSpec{SiteID: "site-a", Home: homeSpec(), Failover: standbySpec(), Bootstrap: true, MaxWorkers: 4}, rec.build)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		for _, h := range append(lanes.StopHooks(), lanes.DrainHooks()...) {
@@ -148,10 +148,10 @@ func TestBindLanes_HomeDownBuddyUp(t *testing.T) {
 	})
 
 	assert.Equal(t, []subject.Lane{subject.LaneHome, subject.LaneFailover}, rec.built(), "both handlers are built up front, home first")
-	assert.NoError(t, lanes.Check().Probe(ctx), "ready on the buddy lane alone")
+	assert.NoError(t, lanes.Check().Probe(ctx), "ready on the failover lane alone")
 	assert.False(t, lanes.HomeReady())
 
-	bconn := natsutil.ConnectBuddy(ctx, buddy.ClientURL(), "", d.TracerProvider, d.Propagator, false)
+	bconn := natsutil.ConnectFailoverSite(ctx, failover.ClientURL(), "", d.TracerProvider, d.Propagator, false)
 	require.NotNil(t, bconn)
 	t.Cleanup(func() { bconn.NatsConn().Close() })
 	bjs, err := bconn.JetStream()
@@ -173,7 +173,7 @@ func TestBindLanes_HomeDownBuddyUp(t *testing.T) {
 func TestBindLanes_HomeBuildErrorIsFatal(t *testing.T) {
 	ctx := context.Background()
 	home := embeddedJetStream(t, -1)
-	d := lanesDialer(natsutil.BuddyConfig{})
+	d := lanesDialer(natsutil.FailoverSiteConfig{})
 	nc, js, err := d.ConnectHomeJS(ctx, home.ClientURL(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { nc.NatsConn().Close() })
@@ -185,18 +185,18 @@ func TestBindLanes_HomeBuildErrorIsFatal(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Nothing bound at all — home down, no buddy — must read not-ready, and the
+// Nothing bound at all — home down, no failover — must read not-ready, and the
 // hooks must still run: shutdown lists them unconditionally.
 func TestBindLanes_NothingBoundIsNotReadyAndStopsClean(t *testing.T) {
 	ctx := context.Background()
 	homeURL, _ := reserveJetStreamPort(t)
-	d := lanesDialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"})
+	d := lanesDialer(natsutil.FailoverSiteConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"})
 	nc, js, err := d.ConnectHomeJS(ctx, homeURL, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { nc.NatsConn().Close() })
 
 	lanes, err := BindLanes(ctx, nc, js, d,
-		&LanesSpec{SiteID: "site-a", Home: homeSpec(), Buddy: buddySpec(), Bootstrap: true, MaxWorkers: 4}, (&recorder{}).build)
+		&LanesSpec{SiteID: "site-a", Home: homeSpec(), Failover: standbySpec(), Bootstrap: true, MaxWorkers: 4}, (&recorder{}).build)
 	require.NoError(t, err)
 
 	assert.Error(t, lanes.Check().Probe(ctx))

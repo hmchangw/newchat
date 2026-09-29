@@ -17,7 +17,7 @@ import (
 type PublishFunc func(ctx context.Context, subj string, data []byte, msgID string) error
 
 // ForwardWithFailover publishes a federation event to the destination site's
-// INBOX, redirecting to its buddy-hosted failover lane when — and only when —
+// INBOX, redirecting to its failover-hosted failover lane when — and only when —
 // the destination is unambiguously unreachable.
 //
 // The fallback triggers on no-responders alone, never on a timeout. INBOX and
@@ -59,7 +59,7 @@ func IsNoResponders(err error) bool {
 
 // PublishWithFailover is PublishTo's producer-side twin of ForwardWithFailover:
 // it buffers the event on the live OUTBOX and, when — and only when — that
-// publish finds no responders, re-buffers it on the buddy-hosted failover
+// publish finds no responders, re-buffers it on the failover-hosted failover
 // OUTBOX. That is the signal that this site's own NATS is down, so the local
 // buffer is unreachable and the site would otherwise stop federating outward.
 //
@@ -67,7 +67,7 @@ func IsNoResponders(err error) bool {
 // the two OUTBOX streams have independent dedup windows, so redirecting a timed
 // out publish that may already have landed would enqueue the event twice.
 //
-// A nil failover publisher (a single-site deployment, or a buddy that never
+// A nil failover publisher (a single-site deployment, or a failover that never
 // bound) returns the live publish's error unchanged.
 func PublishWithFailover(ctx context.Context, live, failover PublishFunc,
 	originSiteID, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupID string, ts int64,

@@ -85,7 +85,7 @@ func TestResolve_BotPipelineHasNoFailover(t *testing.T) {
 }
 
 // Three services hand-rolled this suffix; the shared derivation is what keeps
-// them from drifting to different names on the same buddy cluster.
+// them from drifting to different names on the same failover cluster.
 func TestPipeline_FailoverConsumerName(t *testing.T) {
 	tests := []struct {
 		name string

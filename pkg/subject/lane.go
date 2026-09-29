@@ -13,7 +13,7 @@ type Lane int
 
 const (
 	LaneHome     Lane = iota // the site's own cluster
-	LaneFailover             // the buddy cluster hosting the standby lanes
+	LaneFailover             // the failover cluster hosting the standby lanes
 )
 
 // DefaultFailoverRevertGrace is how long after the home connection is restored

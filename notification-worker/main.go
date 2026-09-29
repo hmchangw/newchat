@@ -63,23 +63,23 @@ type config struct {
 	Valkey                  valkeyutil.Config
 	RoomSubCache            roomsubcache.TTLConfig
 	Breaker                 mongoutil.BreakerConfig
-	PresenceBatchSize       int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
-	PresenceRPCTimeout      time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
-	PresenceEnabled         bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
-	BadgeCountEnabled       bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
-	UserSettingsEnabled     bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
-	UserSettingsBatchSize   int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
-	UserSettingsTimeout     time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
-	UserCacheSize           int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL            time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	MentionNamesEnabled     bool                    `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
-	MentionNamesTimeout     time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
-	Mode                    stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
-	Consumer                stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Buddy                   natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
-	Bootstrap               bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr              string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled            bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	PresenceBatchSize       int                         `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
+	PresenceRPCTimeout      time.Duration               `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
+	PresenceEnabled         bool                        `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled       bool                        `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
+	UserSettingsEnabled     bool                        `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
+	UserSettingsBatchSize   int                         `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
+	UserSettingsTimeout     time.Duration               `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
+	UserCacheSize           int                         `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL            time.Duration               `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	MentionNamesEnabled     bool                        `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
+	MentionNamesTimeout     time.Duration               `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
+	Mode                    stream.Pipeline             `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	Consumer                stream.ConsumerSettings     `envPrefix:"CONSUMER_"`
+	Failover                natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
+	Bootstrap               bootstrapConfig             `envPrefix:"BOOTSTRAP_"`
+	HealthAddr              string                      `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled            bool                        `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
 // natsLane is every HandlerDeps field bound to one NATS connection, split out
@@ -206,11 +206,11 @@ func main() {
 	// Both modes filter on .created — notifications fire on new messages only,
 	// not on edits/deletes/pins/reactions.
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
-	// HasFailover gates the bot pipeline out of the buddy lane; it also keeps
-	// the home dial fail-fast there, since without a buddy a pod that cannot
-	// reach home has nothing to do. With a buddy the dial is lazy, so a pod
-	// that restarts while home is down still boots and serves the buddy lane.
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile, sdk)
+	// HasFailover gates the bot pipeline out of the failover lane; it also keeps
+	// the home dial fail-fast there, since without a failover a pod that cannot
+	// reach home has nothing to do. With a failover the dial is lazy, so a pod
+	// that restarts while home is down still boots and serves the failover lane.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover.OnlyIf(wiring.HasFailover()), cfg.SiteID, cfg.NatsCredsFile, sdk)
 	nc, otelJS, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -369,7 +369,7 @@ func main() {
 				return bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalCreated, wiring.PushStream.Name, wiring.PushInputWildcard, cfg.Bootstrap.Enabled)
 			},
 		},
-		Buddy: &failoverlane.BuddyLane{
+		Failover: &failoverlane.StandbyLane{
 			Stream: wiring.CanonicalFailoverStream,
 			// The push standby stream is published to, not consumed: it must
 			// exist before the first failover notification is built.
@@ -444,7 +444,7 @@ func main() {
 }
 
 // notifyHandler is the per-message body both lanes run, so the home lane and
-// the buddy lane settle a message identically — a failover-lane event is still
+// the failover lane settle a message identically — a failover-lane event is still
 // this site's event.
 //
 // jobguard recovers handler panics: this goroutine runs outside natsrouter's

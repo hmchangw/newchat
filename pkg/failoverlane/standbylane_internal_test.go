@@ -9,24 +9,24 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// Which standby streams a lane readies is the one thing BuddyLane decides on
+// Which standby streams a lane readies is the one thing StandbyLane decides on
 // its own, so it is tested directly rather than through a bind.
-func TestBuddyLane_streamsToEnsure(t *testing.T) {
+func TestStandbyLane_streamsToEnsure(t *testing.T) {
 	tests := []struct {
 		name string
-		lane BuddyLane
+		lane StandbyLane
 		want []string
 	}{
 		{
 			name: "defaults to just the consumed stream",
-			lane: BuddyLane{Stream: stream.MessagesCanonicalFailover("site-a")},
+			lane: StandbyLane{Stream: stream.MessagesCanonicalFailover("site-a")},
 			want: []string{"MESSAGES-CANONICAL-FAILOVER-site-a"},
 		},
 		{
 			// Both have to exist before the first failover message arrives, or
 			// the work would be consumed and then have nowhere to go.
 			name: "consumed stream comes first, then the ones it publishes to",
-			lane: BuddyLane{
+			lane: StandbyLane{
 				Stream:      stream.MessagesFailover("site-a"),
 				PublishesTo: []stream.Config{stream.MessagesCanonicalFailover("site-a")},
 			},
@@ -37,7 +37,7 @@ func TestBuddyLane_streamsToEnsure(t *testing.T) {
 			// and must not assert a placement its owner is responsible for;
 			// binding the consumer is its existence check.
 			name: "a borrowed stream is left to its owner",
-			lane: BuddyLane{
+			lane: StandbyLane{
 				Stream:       stream.PushNotificationFailover("site-a"),
 				BorrowStream: true,
 			},

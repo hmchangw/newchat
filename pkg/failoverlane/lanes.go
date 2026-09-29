@@ -31,10 +31,10 @@ type HomeLane struct {
 type LanesSpec struct {
 	SiteID string
 	Home   HomeLane
-	// Buddy is the standby lane; nil for a service that has none (the bot
+	// Failover is the standby lane; nil for a service that has none (the bot
 	// pipeline, a migration mode). The Dialer's OnlyIf gate says the same thing
 	// from the connection side; both are honoured.
-	Buddy *BuddyLane
+	Failover *StandbyLane
 	// Bootstrap creates the standby streams instead of verifying them. Dev only.
 	Bootstrap bool
 	// MaxWorkers sizes the pool both lanes share and their pull batches.
@@ -43,48 +43,48 @@ type LanesSpec struct {
 	Metrics *natsmetrics.Metrics
 }
 
-// Lanes is a worker's home and buddy lanes bound as one: the worker twin of
+// Lanes is a worker's home and failover lanes bound as one: the worker twin of
 // Routers. One BuildHandler builds both handlers, one pool bounds both, and one
 // set of hooks stops and drains both — so a service cannot wire one lane
 // without the other, which is how a worker was once left on a fail-fast home
-// dial with its buddy lane in place.
+// dial with its failover lane in place.
 //
 // The home lane is bound through natsutil.BindWhenConnected: immediately when
-// the home connection is up, on the first CONNECTED otherwise. The buddy lane
+// the home connection is up, on the first CONNECTED otherwise. The failover lane
 // binds at once and never fails startup.
 type Lanes struct {
-	home      *natsutil.DeferredBind
-	buddy     *loop
-	homeConn  *o11ynats.Conn
-	buddyConn *o11ynats.Conn
-	wg        sync.WaitGroup
+	home        *natsutil.DeferredBind
+	failover    *loop
+	homeConn    *o11ynats.Conn
+	standbyConn *o11ynats.Conn
+	wg          sync.WaitGroup
 	// One guard per lane. Both lanes feed one WaitGroup and one pool, so a live
 	// lane keeps the pod looking busy after the other's pull loop has died —
 	// leaving it ready and silently processing half of what it should. Guards
 	// are built here rather than by each service so every two-lane worker gets
 	// the same coverage without wiring it itself.
-	homeGuard  *loopguard.Guard
-	buddyGuard *loopguard.Guard
+	homeGuard    *loopguard.Guard
+	standbyGuard *loopguard.Guard
 }
 
 // BindLanes builds both handlers up front (home first, so a builder may capture
 // home-lane state) and binds the lanes. Only the home lane's handler build or
-// an immediate home bind failure is fatal; the buddy degrades to home-only.
+// an immediate home bind failure is fatal; the failover degrades to home-only.
 func BindLanes(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStream,
-	dialer *natsutil.BuddyDialer, spec *LanesSpec, build BuildHandler,
+	dialer *natsutil.FailoverDialer, spec *LanesSpec, build BuildHandler,
 ) (*Lanes, error) {
 	l := &Lanes{
 		homeConn: home,
 		// Named by lane so a readiness failure says which one stopped. Built
 		// before either bind: the home bind is deferred until its cluster is
-		// reachable and the buddy bind can fail outright, so a row that appeared
+		// reachable and the failover bind can fail outright, so a row that appeared
 		// only on success would not cover the window before it. A guard whose
-		// loop never starts reads ready, which is what keeps an undialled buddy
+		// loop never starts reads ready, which is what keeps an undialled failover
 		// home-only rather than permanently unready.
-		homeGuard:  loopguard.New("consume-loop-home", loopguard.SelfShutdown),
-		buddyGuard: loopguard.New("consume-loop-buddy", loopguard.SelfShutdown),
+		homeGuard:    loopguard.New("consume-loop-home", loopguard.SelfShutdown),
+		standbyGuard: loopguard.New("consume-loop-failover", loopguard.SelfShutdown),
 	}
-	// One pool for both lanes: a buddy lane with its own semaphore would take
+	// One pool for both lanes: a failover lane with its own semaphore would take
 	// the service to 2×MAX_WORKERS in-flight handlers against the same stores.
 	b := &Binder{
 		SiteID: spec.SiteID, Dialer: dialer,
@@ -95,8 +95,8 @@ func BindLanes(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStre
 	// lane rather than shared: one OnLoopStop could not tell them apart.
 	homeBinder := *b
 	homeBinder.OnLoopStop = l.homeGuard.Stopped
-	buddyBinder := *b
-	buddyBinder.OnLoopStop = l.buddyGuard.Stopped
+	standbyBinder := *b
+	standbyBinder.OnLoopStop = l.standbyGuard.Stopped
 
 	homeHandle, err := build(ctx, home, homeJS, subject.LaneHome)
 	if err != nil {
@@ -123,17 +123,17 @@ func BindLanes(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStre
 		return nil, err
 	}
 
-	if spec.Buddy != nil {
-		l.buddyConn = b.Dialer.Bind(ctx, func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+	if spec.Failover != nil {
+		l.standbyConn = b.Dialer.Bind(ctx, func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
 			handle, err := build(ctx, bconn, bjs, subject.LaneFailover)
 			if err != nil {
 				return fmt.Errorf("build failover handler: %w", err)
 			}
-			cons, err := buddyBinder.BindConsumer(ctx, bjs, spec.Buddy)
+			cons, err := standbyBinder.BindConsumer(ctx, bjs, spec.Failover)
 			if err != nil {
 				return err
 			}
-			l.buddy, err = buddyBinder.startLoop(ctx, cons, spec.Buddy.Stream.Name, &spec.Buddy.Consumer, handle)
+			l.failover, err = standbyBinder.startLoop(ctx, cons, spec.Failover.Stream.Name, &spec.Failover.Consumer, handle)
 			return err
 		})
 	}
@@ -145,7 +145,7 @@ func (l *Lanes) HomeReady() bool { return l.home.Ready() }
 
 // Check is the readiness check: at least one lane serving.
 func (l *Lanes) Check() health.Check {
-	return natsutil.LanesCheck(l.home.Ready, func() bool { return l.buddy != nil })
+	return natsutil.LanesCheck(l.home.Ready, func() bool { return l.failover != nil })
 }
 
 // Checks is Check plus one row per lane's pull loop. Prefer it: Check alone
@@ -153,7 +153,7 @@ func (l *Lanes) Check() health.Check {
 // died, and with two lanes the survivor would keep the pod ready while half its
 // traffic went unprocessed.
 func (l *Lanes) Checks() []health.Check {
-	return []health.Check{l.Check(), l.homeGuard.Check(), l.buddyGuard.Check()}
+	return []health.Check{l.Check(), l.homeGuard.Check(), l.standbyGuard.Check()}
 }
 
 // StopHooks stops both lanes and waits for their in-flight handlers, in the
@@ -166,21 +166,21 @@ func (l *Lanes) StopHooks() []func(context.Context) error {
 			// its Next return, and an unmarked stop reads as a death and
 			// re-signals a process already on its way out.
 			l.homeGuard.BeginShutdown()
-			l.buddyGuard.BeginShutdown()
+			l.standbyGuard.BeginShutdown()
 			l.home.Stop()
-			l.buddy.stop()
+			l.failover.stop()
 			return nil
 		},
 		func(ctx context.Context) error { return natsutil.WaitPool(ctx, &l.wg) },
 	}
 }
 
-// DrainHooks drains the home connection, then the buddy. Separate from
+// DrainHooks drains the home connection, then the failover. Separate from
 // StopHooks so a service can flush its own buffers between the two — after its
 // handlers have finished, before its connections close.
 func (l *Lanes) DrainHooks() []func(context.Context) error {
 	return []func(context.Context) error{
 		func(ctx context.Context) error { return natsutil.Drain(ctx, l.homeConn) },
-		natsutil.DrainBuddy(l.buddyConn),
+		natsutil.DrainFailoverSite(l.standbyConn),
 	}
 }

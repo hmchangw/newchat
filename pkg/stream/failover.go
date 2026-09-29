@@ -8,10 +8,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// EnsureFailoverStream readies a standby stream on a buddy connection.
+// EnsureFailoverStream readies a standby stream on a failover connection.
 //
 // In dev (bootstrapEnabled) it creates the stream and does NOT assert placement:
-// a single-server NATS reports no cluster at all, and there is no buddy to be
+// a single-server NATS reports no cluster at all, and there is no failover to be
 // wrong about.
 //
 // In production it verifies the stream exists AND is hosted by expectedCluster.

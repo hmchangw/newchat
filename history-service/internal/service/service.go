@@ -246,7 +246,7 @@ func (nopRoomTimesCache) Fallback(context.Context, string) (time.Time, bool) {
 }
 
 // WithLane binds this service to the NATS lane its router serves. The failover
-// lane's canonical publishes must reach the standby stream on the buddy: the
+// lane's canonical publishes must reach the standby stream on the failover: the
 // live one sits on the cluster whose outage put the client on that lane.
 func WithLane(lane subject.Lane) Option {
 	return func(s *HistoryService) { s.lane = lane }

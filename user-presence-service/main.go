@@ -53,9 +53,9 @@ type Config struct {
 	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
 	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
 	NATS          NATSConfig    `envPrefix:"NATS_"`
-	// Buddy is the peer cluster hosting this site's standby lanes; the service
+	// Failover is the peer cluster hosting this site's standby lanes; the service
 	// also answers displaced clients' RPCs there while its own NATS is down.
-	Buddy    natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	Failover natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
 	Valkey   valkeyutil.Config
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
 	Presence PresenceConfig `envPrefix:"PRESENCE_"`
@@ -154,9 +154,9 @@ func main() {
 	}
 	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NATS.CredsFile, sdk)
+	dialer := natsutil.NewFailoverDialer(cfg.Failover, cfg.SiteID, cfg.NATS.CredsFile, sdk)
 	// Lazy home dial so a pod restarting mid-outage can still boot and answer displaced clients
-	// on the buddy; see natsutil.BuddyDialer.ConnectHome.
+	// on the failover; see natsutil.FailoverDialer.ConnectHome.
 	nc, err := dialer.ConnectHome(ctx, cfg.NATS.URL, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)

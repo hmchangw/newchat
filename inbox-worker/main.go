@@ -56,8 +56,8 @@ type config struct {
 	HealthAddr       string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled     bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string               `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
-	Buddy           natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	AdminAcctPrefix string                      `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+	Failover        natsutil.FailoverSiteConfig `envPrefix:"FAILOVER_"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
 	// (pkg/badgecache) and best-effort subauthcache L2 invalidation after a
 	// federated role_updated/member_removed write; empty disables both (clear
@@ -810,7 +810,7 @@ type laneMsg struct {
 
 // startInboxLane wires the two-lane pull pattern described at the call site:
 // membership events serialized on one worker, everything else fanned out across
-// a bounded pool. The home connection and the buddy connection each run this
+// a bounded pool. The home connection and the failover connection each run this
 // same pipeline over their own consumer — the handler, the membership
 // serialization and the Ack/Nak disposition are identical on both, because a
 // redirected event is still this site's event.
@@ -862,13 +862,13 @@ func startInboxLane(ctx context.Context, cons o11ynats.Consumer, cfg *config, ha
 	return natsutil.NewLane(iter), nil
 }
 
-// startFailoverLane binds the buddy-hosted INBOX-FAILOVER consumer, feeding the
+// startFailoverLane binds the failover-hosted INBOX-FAILOVER consumer, feeding the
 // same two-lane pattern as the home lane — a failover-lane event is still this
 // site's event.
 func startFailoverLane(ctx context.Context, js o11ynats.JetStream, cfg *config, handler *Handler,
 	binder *failoverlane.Binder, sem chan struct{}, wg *sync.WaitGroup, guard *loopguard.Guard,
 ) (*natsutil.Lane, error) {
-	cons, err := binder.BindConsumer(ctx, js, &failoverlane.BuddyLane{
+	cons, err := binder.BindConsumer(ctx, js, &failoverlane.StandbyLane{
 		Stream:   stream.InboxFailover(cfg.SiteID),
 		Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
 	})
@@ -926,8 +926,8 @@ func main() {
 	}
 	store.ensureIndexes(ctx)
 
-	dialer := natsutil.NewBuddyDialer(cfg.Buddy, cfg.NatsCredsFile, sdk)
-	// Lazy home dial; see natsutil.BuddyDialer.ConnectHome.
+	dialer := natsutil.NewFailoverDialer(cfg.Failover, cfg.SiteID, cfg.NatsCredsFile, sdk)
+	// Lazy home dial; see natsutil.FailoverDialer.ConnectHome.
 	nc, js, err := dialer.ConnectHomeJS(ctx, cfg.NatsURL, nil)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -995,7 +995,7 @@ func main() {
 	// Membership traffic is a tiny fraction of the lane, so serializing it
 	// costs negligible throughput while the read-receipt path keeps its full
 	// MaxWorkers concurrency.
-	// One pool shared by both lanes: a buddy lane with its own semaphore would
+	// One pool shared by both lanes: a failover lane with its own semaphore would
 	// take this worker to 2×MAX_WORKERS in-flight handlers against the same
 	// MongoDB, even though the two lanes carry the same site's events.
 	sem := make(chan struct{}, cfg.MaxWorkers)
@@ -1005,7 +1005,7 @@ func main() {
 	// process, and an unarmed SIGTERM kills it outright instead of draining.
 	sig := shutdown.Signals()
 	homeGuard := loopguard.New("consume-loop-home", loopguard.SelfShutdown)
-	buddyGuard := loopguard.New("consume-loop-buddy", loopguard.SelfShutdown)
+	standbyGuard := loopguard.New("consume-loop-failover", loopguard.SelfShutdown)
 
 	// Home lane, bound once the home connection is up — immediately in the
 	// ordinary case, later if the pod booted during an outage. Dev-only stream
@@ -1039,27 +1039,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Buddy lane. A failed dial leaves buddyLane nil and the service home-only,
+	// Failover lane. A failed dial leaves standbyLane nil and the service home-only,
 	// which beats refusing to boot over a cluster only an outage needs.
-	var buddyLane *natsutil.Lane
+	var standbyLane *natsutil.Lane
 	binder := failoverlane.Binder{
 		SiteID: cfg.SiteID, Dialer: dialer,
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
-	buddyConn := binder.Dialer.Bind(ctx,
+	standbyConn := binder.Dialer.Bind(ctx,
 		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
 			var bErr error
-			buddyLane, bErr = startFailoverLane(ctx, bjs, &cfg, handler, &binder, sem, &wg, buddyGuard)
+			standbyLane, bErr = startFailoverLane(ctx, bjs, &cfg, handler, &binder, sem, &wg, standbyGuard)
 			return bErr
 		})
 
-	// A guard that never started its loop stays ready, so a buddy that was never
+	// A guard that never started its loop stays ready, so a failover that was never
 	// dialled leaves the service home-only rather than permanently unready.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
-		natsutil.LanesCheck(homeLane.Ready, buddyLane.Bound),
+		natsutil.LanesCheck(homeLane.Ready, standbyLane.Bound),
 		homeGuard.Check(),
-		buddyGuard.Check(),
+		standbyGuard.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -1077,14 +1077,14 @@ func main() {
 		// neither should re-signal a process already on its way out.
 		func(_ context.Context) error {
 			homeGuard.BeginShutdown()
-			buddyGuard.BeginShutdown()
+			standbyGuard.BeginShutdown()
 			return nil
 		},
 		// Stop both iterators before draining either, so neither lane pulls new
 		// work while the other is still finishing.
 		func(_ context.Context) error {
 			homeLane.Stop()
-			buddyLane.Stop()
+			standbyLane.Stop()
 			return nil
 		},
 		// Both lanes feed one WaitGroup, so waiting on it drains both.
@@ -1092,7 +1092,7 @@ func main() {
 		// Unsubscribe before the drain so no refresh arrives after the store closes.
 		func(_ context.Context) error { return activitySub.Unsubscribe() },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
-		natsutil.DrainBuddy(buddyConn),
+		natsutil.DrainFailoverSite(standbyConn),
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		// Closes the pool shared by the badge cache and the subauthcache bust.
 		func(ctx context.Context) error {
@@ -1215,7 +1215,7 @@ func valkeyDial(ctx context.Context, cfg valkeyutil.Config, sdk valkeyutil.Obser
 }
 
 // buildFailoverConsumerConfig returns the durable consumer config for the
-// buddy-hosted INBOX-FAILOVER lane, which carries federation events peers
+// failover-hosted INBOX-FAILOVER lane, which carries federation events peers
 // redirected here because this site's own NATS was unreachable.
 //
 // The durable name differs from the home lane's so the two keep independent
