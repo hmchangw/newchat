@@ -13,27 +13,23 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/reqid"
 )
 
 // RequestIDHeader is the canonical NATS/HTTP header for the request correlation ID.
 const RequestIDHeader = "X-Request-ID"
 
-type ctxKey int
-
-const requestIDKey ctxKey = 0
-
 // WithRequestID returns ctx with the request ID stored; empty id is a no-op.
+//
+// The key itself lives in pkg/reqid so packages that must sit below natsutil —
+// pkg/jsretry names the id in its retry log lines — can read it without a cycle.
 func WithRequestID(ctx context.Context, id string) context.Context {
-	if id == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, requestIDKey, id)
+	return reqid.With(ctx, id)
 }
 
 // RequestIDFromContext returns the request ID stored in ctx, or "" if none.
 func RequestIDFromContext(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDKey).(string)
-	return id
+	return reqid.From(ctx)
 }
 
 // HeaderForContext returns a nats.Header carrying the propagated correlation

@@ -24,7 +24,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/reqid"
 )
 
 // minNakDelay floors every nak delay. A delay of 0 serializes as a bare -NAK,
@@ -113,29 +113,29 @@ func Nak(ctx context.Context, msg Msg, backoff []time.Duration, reason string) {
 func nak(ctx context.Context, msg Msg, delay time.Duration, reason string) {
 	if err := msg.NakWithDelay(delay); err != nil {
 		slog.ErrorContext(ctx, "failed to nak message", "reason", reason,
-			"delay", delay.String(), "error", err, "request_id", natsutil.RequestIDFromContext(ctx))
+			"delay", delay.String(), "error", err, "request_id", reqid.From(ctx))
 	}
 }
 
 func settle(ctx context.Context, msg Msg, backoff []time.Duration, err error, logBusiness bool) {
 	if err == nil {
 		if ackErr := msg.Ack(); ackErr != nil {
-			slog.ErrorContext(ctx, "failed to ack message", "error", ackErr, "request_id", natsutil.RequestIDFromContext(ctx))
+			slog.ErrorContext(ctx, "failed to ack message", "error", ackErr, "request_id", reqid.From(ctx))
 		}
 		return
 	}
 	if _, isPermanent := errcode.IsPermanent(err); isPermanent {
 		if logBusiness {
-			slog.WarnContext(ctx, "permanent message failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(ctx))
+			slog.WarnContext(ctx, "permanent message failure — dropping (Ack)", "error", err, "request_id", reqid.From(ctx))
 		}
 		if ackErr := msg.Ack(); ackErr != nil {
-			slog.ErrorContext(ctx, "failed to ack permanent message", "error", ackErr, "request_id", natsutil.RequestIDFromContext(ctx))
+			slog.ErrorContext(ctx, "failed to ack permanent message", "error", ackErr, "request_id", reqid.From(ctx))
 		}
 		return
 	}
 	delay := backoffFor(msg, backoff)
 	if logBusiness {
-		slog.ErrorContext(ctx, "message failed — retrying", "error", err, "delay", delay.String(), "request_id", natsutil.RequestIDFromContext(ctx))
+		slog.ErrorContext(ctx, "message failed — retrying", "error", err, "delay", delay.String(), "request_id", reqid.From(ctx))
 	}
 	nak(ctx, msg, delay, "transient failure")
 }

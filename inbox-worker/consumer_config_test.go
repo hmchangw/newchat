@@ -311,3 +311,62 @@ func TestLastAttemptFailed(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildFailoverConsumerConfig(t *testing.T) {
+	cc := buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a")
+
+	assert.Equal(t, "inbox-worker-failover", cc.Durable,
+		"distinct durable name so the two lanes keep independent cursors")
+	assert.Equal(t, []string{"chat.failover.inbox.site-a.external.>"}, cc.FilterSubjects)
+}
+
+// The failover lane carries the same federation events as the home lane and is the
+// lane in use during exactly the outage the budget exists for, so it takes the same
+// delivery budget and ack-pending ceiling. A default budget here would drop
+// redirected events after minutes while the home lane retried for an hour.
+func TestBuildFailoverConsumerConfig_TakesTheOutageBudget(t *testing.T) {
+	base := stream.ConsumerSettings{
+		AckWait: 30 * time.Second, MaxDeliver: stream.DefaultMaxDeliver,
+		MaxWaiting: 512, BackOffSteps: 5, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+	}
+
+	t.Run("an unset budget takes the outage window", func(t *testing.T) {
+		s := base
+		s.MaxAckPending = stream.DefaultMaxAckPending
+		cc := buildFailoverConsumerConfig(s, "site-a")
+
+		assert.Equal(t, jsretry.DeliveriesFor(jsretry.DefaultBackoff, stream.OutageRetryWindow), cc.MaxDeliver,
+			"the redirected lane rides out the same peer outage as the home lane")
+		assert.Equal(t, federationMaxAckPending, cc.MaxAckPending,
+			"a parked event holds its slot for the whole window on this lane too")
+	})
+
+	t.Run("both lanes agree on the budget", func(t *testing.T) {
+		s := base
+		s.MaxAckPending = stream.DefaultMaxAckPending
+		home := buildConsumerConfig(s, "site-a")
+		failover := buildFailoverConsumerConfig(s, "site-a")
+
+		assert.Equal(t, home.MaxDeliver, failover.MaxDeliver)
+		assert.Equal(t, home.MaxAckPending, failover.MaxAckPending)
+	})
+
+	t.Run("an operator's choices are left alone", func(t *testing.T) {
+		s := base
+		s.MaxDeliver, s.MaxAckPending = 3, 250
+		cc := buildFailoverConsumerConfig(s, "site-a")
+
+		assert.Equal(t, 3, cc.MaxDeliver)
+		assert.Equal(t, 250, cc.MaxAckPending)
+	})
+}
+
+// The two lanes must never share a durable, or one lane's cursor would clobber
+// the other's when both streams live on the same server (dev, single NATS).
+func TestFailoverConsumerDurable_DiffersFromPrimary(t *testing.T) {
+	primary := buildConsumerConfig(stream.ConsumerSettings{}, "site-a")
+	failover := buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a")
+
+	assert.NotEqual(t, primary.Durable, failover.Durable)
+	assert.NotEqual(t, primary.FilterSubjects, failover.FilterSubjects)
+}

@@ -145,7 +145,7 @@ func assertConcurrentLaneForwards(t *testing.T, siteID, destSiteID, roomID, even
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(stream.ConsumerSettings{
 		AckWait: 30 * time.Second, MaxDeliver: 5, MaxWaiting: 512, MaxAckPending: 1000,
-	}, siteID, destSiteID))
+	}, siteID, destSiteID, subject.LaneHome))
 	require.NoError(t, err)
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
@@ -250,7 +250,7 @@ func TestIntegration_ConcurrentLanePerDestinationIsolation(t *testing.T) {
 	// saturation is reachable with a handful of events.
 	settings := stream.ConsumerSettings{AckWait: 2 * time.Second, MaxDeliver: 5, MaxWaiting: 512, MaxAckPending: 2}
 	for _, dest := range []string{downDest, upDest} {
-		cons, err := js.CreateOrUpdateConsumer(ctx, stream.Outbox(siteID).Name, buildConcurrentConsumerConfig(settings, siteID, dest))
+		cons, err := js.CreateOrUpdateConsumer(ctx, stream.Outbox(siteID).Name, buildConcurrentConsumerConfig(settings, siteID, dest, subject.LaneHome))
 		require.NoError(t, err)
 		cc, err := cons.Consume(func(msg jetstream.Msg) {
 			jsretry.Settle(ctx, msg, []time.Duration{50 * time.Millisecond}, h.HandleEvent(ctx, msg.Subject(), msg.Data()))
@@ -321,7 +321,7 @@ func TestIntegration_OrderedLaneFIFOThroughOutage(t *testing.T) {
 	// jsretry disposition (short backoff so the test converges quickly).
 	mcons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(stream.ConsumerSettings{
 		AckWait: 5 * time.Second, MaxDeliver: 5, MaxWaiting: 512, MaxAckPending: 1000,
-	}, siteID, destSiteID))
+	}, siteID, destSiteID, subject.LaneHome))
 	require.NoError(t, err)
 	cc, err := mcons.Consume(func(msg jetstream.Msg) {
 		jsretry.Settle(ctx, msg, []time.Duration{50 * time.Millisecond}, h.HandleEvent(ctx, msg.Subject(), msg.Data()))
@@ -410,7 +410,7 @@ func TestIntegration_OrderedLaneKeepsRenameBehindMemberAdded(t *testing.T) {
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, stream.Outbox(siteID).Name, buildOrderedConsumerConfig(stream.ConsumerSettings{
 		AckWait: 5 * time.Second, MaxDeliver: 5, MaxWaiting: 512, MaxAckPending: 1000,
-	}, siteID, destSiteID))
+	}, siteID, destSiteID, subject.LaneHome))
 	require.NoError(t, err)
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, h.HandleEvent(ctx, msg.Subject(), msg.Data()))

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -47,13 +48,43 @@ func parseSiteURLs(raw string) (map[string]siteURL, error) {
 	return sites, nil
 }
 
+// sitePeer is one entry of the failover peer list. natsUrl only: a displaced
+// client relocates its NATS connection, not its HTTP calls, which still go to
+// its own home gateway, so a peer's baseUrl would widen the disclosure for no
+// use.
+type sitePeer struct {
+	SiteID  string `json:"siteId"`
+	NATSURL string `json:"natsUrl"`
+}
+
 // settingsResponse is the deployment config served to the frontend: the
 // backend API generation, the OTEL base URL (client appends /trace, /log),
-// and whether bot-role accounts may log in through this client.
+// whether bot-role accounts may log in through this client, and the federation
+// peer list a client shuffles when its home site's NATS is unreachable.
+//
+// Sites is omitempty so a single-site deployment serves exactly the payload it
+// served before this field existed.
 type settingsResponse struct {
-	APIVersion      string `json:"apiVersion"`
-	OTELBaseURL     string `json:"otelBaseUrl"`
-	BotLoginEnabled bool   `json:"botLoginEnabled"`
+	APIVersion      string     `json:"apiVersion"`
+	OTELBaseURL     string     `json:"otelBaseUrl"`
+	BotLoginEnabled bool       `json:"botLoginEnabled"`
+	Sites           []sitePeer `json:"sites,omitempty"`
+}
+
+// buildPeerList flattens the site registry into the client-facing peer list,
+// sorted for a deterministic, cacheable response. The client shuffles it, so
+// this order carries no selection meaning.
+//
+// Every site is included, the caller's own among them: the client filters its
+// home site out itself, and which site is "home" differs per caller while this
+// payload is identical for all of them.
+func buildPeerList(sites map[string]siteURL) []sitePeer {
+	peers := make([]sitePeer, 0, len(sites))
+	for id, s := range sites {
+		peers = append(peers, sitePeer{SiteID: id, NATSURL: s.NATSURL})
+	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].SiteID < peers[j].SiteID })
+	return peers
 }
 
 // parseOTELBaseURL fails startup unless the value is an absolute http(s) URL

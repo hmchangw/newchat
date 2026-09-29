@@ -28,9 +28,9 @@ import (
 //   - request-class history failure → NAK until the accumulated retry time reaches
 //     the window, then drop — subject to the kill switch and the per-pod drop rate cap
 //
-// The consumer runs MaxDeliver=-1 (enforced in buildConsumerConfig and re-checked at
-// startup), so JetStream never terminates a message behind this function's back;
-// every give-up is deliberate.
+// Both lanes' consumers run MaxDeliver=-1 (enforced in buildConsumerConfig and
+// buildFailoverConsumerConfig, each re-checked at startup), so JetStream never
+// terminates a message behind this function's back; every give-up is deliberate.
 //
 // The degraded marker is deliberately NOT read here. Reading it was the wedge that
 // forced the earlier revert: a history failure re-degrades the site, so a message's
