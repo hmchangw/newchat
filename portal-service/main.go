@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -61,6 +63,19 @@ type config struct {
 	// offloads the primary.
 	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
 
+	// FailoverOpsToken gates the operator failover control surface. Empty
+	// disables the internal control server entirely (no control surface).
+	FailoverOpsToken string `env:"FAILOVER_OPS_TOKEN" envDefault:""`
+	// FailoverInternalAddr is the listen address for the internal-only control
+	// surface — kept off the public browser-facing server.
+	FailoverInternalAddr string `env:"FAILOVER_INTERNAL_ADDR" envDefault:":8090"`
+	// FailoverStateTTL bounds how long portal caches a site's serving target
+	// before re-reading it (routing freshness vs. Mongo load).
+	FailoverStateTTL time.Duration `env:"FAILOVER_STATE_TTL" envDefault:"5s"`
+	// BackupSiteID is the reserved PORTAL_SITE_URLS id served for a failed-over
+	// site. Empty in single-site/dev deployments (no failover occurs there).
+	BackupSiteID string `env:"PORTAL_BACKUP_SITE_ID" envDefault:""`
+
 	Pool mongoutil.PoolConfig
 	HTTP ginutil.TimeoutConfig
 
@@ -88,10 +103,19 @@ func run() error {
 	if err := cfg.HTTP.Validate(); err != nil {
 		return fmt.Errorf("validate http timeout: %w", err)
 	}
+	// A non-positive TTL expires every cache entry immediately, turning each
+	// login into a Mongo read. Reject it at startup rather than degrade quietly.
+	if cfg.FailoverStateTTL <= 0 {
+		return fmt.Errorf("FAILOVER_STATE_TTL must be positive, got %s", cfg.FailoverStateTTL)
+	}
 
 	sites, err := parseSiteURLs(cfg.SiteURLs)
 	if err != nil {
 		return fmt.Errorf("parse site URL registry: %w", err)
+	}
+
+	if err := validateFailoverConfig(cfg.FailoverOpsToken, cfg.BackupSiteID, sites); err != nil {
+		return fmt.Errorf("validate failover config: %w", err)
 	}
 
 	otelBaseURL, err := parseOTELBaseURL(cfg.OTELBaseURL)
@@ -136,10 +160,26 @@ func run() error {
 
 	slog.Info("directory config", "sites", len(sites), "refreshInterval", cfg.CacheRefreshInterval.String())
 
+	// The failover store backs both the always-on routing reader (SP3) and the
+	// optional operator control surface (SP4), so it is built unconditionally.
+	failoverStore := newMongoFailoverStore(mongoClient.Database(cfg.MongoDB))
+	failoverReader := newFailoverReader(failoverStore, cfg.FailoverStateTTL)
+
+	// controlSurfaceUp is flipped by the internal listener's goroutine when it
+	// stops unexpectedly, so /readyz can take this pod out of rotation.
+	var controlSurfaceUp atomic.Bool
+	controlSurfaceUp.Store(true)
+
 	rc := restyutil.New(cfg.BotplatformURL, restyutil.WithTimeout(5*time.Second))
+	opts := []PortalHandlerOption{
+		WithRestyClient(rc), WithDirectoryStore(store),
+		WithFailoverReader(failoverReader), WithBackupSiteID(cfg.BackupSiteID),
+	}
+	if cfg.FailoverOpsToken != "" {
+		opts = append(opts, WithControlSurfaceHealth(controlSurfaceUp.Load))
+	}
 	handler := NewPortalHandler(cache, cfg.DevMode,
-		cfg.DevFallbackSiteID, cfg.DevFallbackNatsURL, sites, settings,
-		WithRestyClient(rc), WithDirectoryStore(store))
+		cfg.DevFallbackSiteID, cfg.DevFallbackNatsURL, sites, settings, opts...)
 	if cfg.DevMode {
 		slog.Info("dev mode enabled — unknown accounts fall back to the dev site")
 	}
@@ -156,6 +196,41 @@ func run() error {
 	r.Use(ginutil.AccessLog())
 	r.Use(cfg.HTTP.Middleware())
 	registerRoutes(r, handler)
+
+	// Optional internal-only failover control surface. Bound on a separate
+	// listener so no privileged write shares the public discovery server.
+	var internalSrv *http.Server
+	if cfg.FailoverOpsToken != "" {
+		failoverHandler := NewFailoverHandler(failoverStore, sites, cfg.BackupSiteID)
+
+		ir := gin.New()
+		ir.Use(gin.Recovery())
+		ir.Use(ginutil.RequestID())
+		ir.Use(ginutil.AccessLog())
+		registerFailoverRoutes(ir, failoverHandler, cfg.FailoverOpsToken)
+
+		// net.Listen up front so a bad bind fails startup, not silently later.
+		ln, lerr := net.Listen("tcp", cfg.FailoverInternalAddr)
+		if lerr != nil {
+			return fmt.Errorf("bind failover control surface %q: %w", cfg.FailoverInternalAddr, lerr)
+		}
+		internalSrv = &http.Server{
+			Handler:      ir,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+		}
+		go func() {
+			slog.Info("failover control surface starting", "addr", cfg.FailoverInternalAddr)
+			if serveErr := internalSrv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+				// Not fatal to the public API, but operators have lost the
+				// break-glass surface — fail readiness so this pod is replaced.
+				controlSurfaceUp.Store(false)
+				slog.Error("failover control surface stopped", "error", serveErr)
+			}
+		}()
+	} else {
+		slog.Info("failover control surface disabled (FAILOVER_OPS_TOKEN unset)")
+	}
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
@@ -177,6 +252,11 @@ func run() error {
 		shutdown.Wait(ctx, 25*time.Second,
 			func(ctx context.Context) error {
 				slog.Info("shutting down portal service")
+				if internalSrv != nil {
+					if err := internalSrv.Shutdown(ctx); err != nil {
+						slog.Error("shutdown failover control surface", "error", err)
+					}
+				}
 				err := srv.Shutdown(ctx)
 				refreshCancel()
 				refreshWG.Wait()

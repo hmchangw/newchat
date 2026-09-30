@@ -26,8 +26,9 @@ services:
       # backend origin (`{baseUrl}/api/v1/...` via the Traefik gateway on :7777);
       # natsUrl is the site's NATS WS URL.
       # site-remote maps to the same local endpoints: `make seed` homes ivan and
-      # judy there, and an unregistered site is a 500 on /api/userInfo.
-      - 'PORTAL_SITE_URLS=${PORTAL_SITE_URLS:-{"${SITE_ID:-site-local}":{"baseUrl":"http://localhost:${GATEWAY_HOST_PORT:-7777}","natsUrl":"ws://localhost:9222"},"site-remote":{"baseUrl":"http://localhost:${GATEWAY_HOST_PORT:-7777}","natsUrl":"ws://localhost:9222"}}}'
+      # judy there, and an unregistered site is a 500 on /api/userInfo. _backup
+      # is the reserved failover backup entry (SP3), same local stack in dev.
+      - 'PORTAL_SITE_URLS=${PORTAL_SITE_URLS:-{"${SITE_ID:-site-local}":{"baseUrl":"http://localhost:${GATEWAY_HOST_PORT:-7777}","natsUrl":"ws://localhost:9222"},"site-remote":{"baseUrl":"http://localhost:${GATEWAY_HOST_PORT:-7777}","natsUrl":"ws://localhost:9222"},"_backup":{"baseUrl":"http://localhost:${GATEWAY_HOST_PORT:-7777}","natsUrl":"ws://localhost:9222"}}}'
       # 1m, not the 2h prod default, so `make seed` lands without a restart.
       - PORTAL_CACHE_REFRESH_INTERVAL=${PORTAL_CACHE_REFRESH_INTERVAL:-1m}
       # Single cluster-internal botplatform endpoint /api/v1/login forwards to.
@@ -40,6 +41,14 @@ services:
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
+      # Operator failover control surface (SP4). Empty by default — matching
+      # main.go's safe default, the control surface stays off until an operator
+      # supplies a token. Set FAILOVER_OPS_TOKEN in the env to exercise it
+      # locally; it binds an internal-only listener, off the public :8085 API.
+      - FAILOVER_OPS_TOKEN=${FAILOVER_OPS_TOKEN:-}
+      - FAILOVER_INTERNAL_ADDR=${FAILOVER_INTERNAL_ADDR:-:8090}
+      # Reserved backup entry served for a failed-over site (SP3).
+      - PORTAL_BACKUP_SITE_ID=${PORTAL_BACKUP_SITE_ID:-_backup}
     networks:
       - chat-local
 
