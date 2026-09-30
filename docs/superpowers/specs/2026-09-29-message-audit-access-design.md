@@ -168,7 +168,7 @@ sequenceDiagram
     Req->>FE: open console
     FE->>IdP: authorization code + PKCE
     IdP-->>FE: ID token with groups claim
-    FE->>S: POST /requests (targets p.ortiz, d.kwan; range; reason) [bearer]
+    FE->>S: POST /requests (targets p.ortiz and d.kwan, range, reason) [bearer]
     S->>IdP: validate token (JWKS)
     S->>H: search *:audit-memberships-* for targets (existence check)
     H->>EA: fan out
@@ -180,7 +180,7 @@ sequenceDiagram
 
     Apr->>FE: open approvals queue
     FE->>S: POST /requests/:id/approve (narrowed range, 3 d) [bearer]
-    S->>S: approver sub ≠ requester sub; neither username in targets
+    S->>S: check approver sub differs from requester sub and neither username is a target
     S->>M: update audit_requests {approved, validUntil}
     S->>M: append audit_ops request.approve
     S->>K: PUT ops entry
@@ -199,7 +199,7 @@ sequenceDiagram
     H-->>S: merged hits + _clusters {answered: A, B}
     S-->>FE: rooms with intervals, sitesAnswered [A, B]
 
-    Req->>FE: read #apac-sales (archived at site B)
+    Req->>FE: read room apac-sales (archived at site B)
     FE->>S: GET /grants/:id/rooms/B/{roomId}/messages
     S->>M: load grant, re-check status and requester
     S->>S: room in scope? (a target's interval overlaps the range)
