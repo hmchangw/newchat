@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	o11ynats "github.com/flywindy/o11y/nats"
@@ -130,3 +131,26 @@ func TestRawConsumerAdapter_Fetch_ReturnsError(t *testing.T) {
 }
 
 type testContextKey string
+
+func TestBatchErrorIsTerminal(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"a clean batch", nil, false},
+		{"a missed heartbeat leaves the consumer live", jetstream.ErrNoHeartbeat, false},
+		{"a wrapped missed heartbeat is still recoverable", fmt.Errorf("fetch: %w", jetstream.ErrNoHeartbeat), false},
+		{"shutdown cancels the context", context.Canceled, false},
+		{"a deadline is not the consumer's fault", context.DeadlineExceeded, false},
+		{"a deleted consumer never produces again", jetstream.ErrConsumerDeleted, true},
+		{"a missing consumer never produces again", jetstream.ErrConsumerNotFound, true},
+		{"a wrapped deleted consumer is still terminal", fmt.Errorf("fetch: %w", jetstream.ErrConsumerDeleted), true},
+		{"an unrecognised error is treated as terminal", errors.New("boom"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, batchErrorIsTerminal(tt.err))
+		})
+	}
+}
