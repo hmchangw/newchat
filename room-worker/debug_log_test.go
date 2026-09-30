@@ -132,9 +132,9 @@ func TestProcessRemoveMember_DebugEdge(t *testing.T) {
 		store := NewMockSubscriptionStore(ctrl)
 		userResult := &UserWithMembership{User: model.User{ID: "u1", Account: account, SiteID: siteID, EngName: "Alice", ChineseName: "愛麗絲"}}
 		store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).Return(userResult, nil).AnyTimes()
-		store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil).AnyTimes()
+		store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), subIsBot(account), nil).AnyTimes()
 		store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil).AnyTimes()
-		store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil).AnyTimes()
+		store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil).AnyTimes()
 		store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil).AnyTimes()
 		expectThreadCleanupAny(store)
 		h := NewHandler(store, siteID, func(context.Context, string, []byte, string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)

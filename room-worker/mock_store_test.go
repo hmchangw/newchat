@@ -131,12 +131,13 @@ func (mr *MockSubscriptionStoreMockRecorder) DeleteRoomMember(ctx, roomID, membe
 }
 
 // DeleteSubscription mocks base method.
-func (m *MockSubscriptionStore) DeleteSubscription(ctx context.Context, roomID, account string) (int64, error) {
+func (m *MockSubscriptionStore) DeleteSubscription(ctx context.Context, roomID, account string) (int64, bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeleteSubscription", ctx, roomID, account)
 	ret0, _ := ret[0].(int64)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // DeleteSubscription indicates an expected call of DeleteSubscription.
@@ -158,6 +159,22 @@ func (m *MockSubscriptionStore) DeleteSubscriptionsByAccounts(ctx context.Contex
 func (mr *MockSubscriptionStoreMockRecorder) DeleteSubscriptionsByAccounts(ctx, roomID, accounts any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSubscriptionsByAccounts", reflect.TypeOf((*MockSubscriptionStore)(nil).DeleteSubscriptionsByAccounts), ctx, roomID, accounts)
+}
+
+// DeleteSubscriptionsWithBotSplit mocks base method.
+func (m *MockSubscriptionStore) DeleteSubscriptionsWithBotSplit(ctx context.Context, roomID string, accounts []string) (int64, int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteSubscriptionsWithBotSplit", ctx, roomID, accounts)
+	ret0, _ := ret[0].(int64)
+	ret1, _ := ret[1].(int64)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// DeleteSubscriptionsWithBotSplit indicates an expected call of DeleteSubscriptionsWithBotSplit.
+func (mr *MockSubscriptionStoreMockRecorder) DeleteSubscriptionsWithBotSplit(ctx, roomID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSubscriptionsWithBotSplit", reflect.TypeOf((*MockSubscriptionStore)(nil).DeleteSubscriptionsWithBotSplit), ctx, roomID, accounts)
 }
 
 // DeleteThreadSubscriptions mocks base method.

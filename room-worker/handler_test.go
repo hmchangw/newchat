@@ -97,12 +97,12 @@ func TestHandler_ProcessRemoveMember_SelfLeave_IndividualOnly(t *testing.T) {
 		Return(userResult, nil)
 	store.EXPECT().
 		DeleteSubscription(gomock.Any(), roomID, account).
-		Return(int64(1), nil)
+		Return(int64(1), subIsBot(account), nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").
 		Return(nil)
 	store.EXPECT().
-		ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+		ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().
 		GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 
@@ -173,9 +173,9 @@ func TestHandler_ProcessRemoveMember_BotTarget_RotatesAndSubUpdate(t *testing.T)
 	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, botAcct).Return(&UserWithMembership{
 		User: model.User{ID: "u_bot", Account: botAcct, SiteID: siteID, EngName: "Weather"},
 	}, nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, botAcct).Return(int64(1), nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, botAcct).Return(int64(1), subIsBot(botAcct), nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	// The departed bot must be scrubbed from thread followers + subs (#308).
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, []string{botAcct}).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, []string{botAcct}).Return(nil)
@@ -274,12 +274,12 @@ func TestHandler_ProcessRemoveIndividual_CleansThreadState(t *testing.T) {
 		HasOrgMembership: false,
 	}
 	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).Return(userResult, nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), subIsBot(account), nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil)
 	// The departed member must be scrubbed from thread followers + subs (#308).
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, []string{account}).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, []string{account}).Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 
 	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
@@ -306,12 +306,12 @@ func TestHandler_ProcessRemoveOrg_CleansThreadStateForRemovedOnly(t *testing.T) 
 		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
 	}
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), int64(0), nil)
 	// Thread cleanup targets exactly the departed accounts — not eve.
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID, EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -404,14 +404,14 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesIndividual(t *testing.T) {
 		Return(userResult, nil)
 	store.EXPECT().
 		DeleteSubscription(gomock.Any(), roomID, account).
-		Return(int64(1), nil)
+		Return(int64(1), subIsBot(account), nil)
 	// Owner-removes uses the same single-entry delete as self-leave since the
 	// dual-membership branch is the only case that needs separate handling.
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u2").
 		Return(nil)
 	store.EXPECT().
-		ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+		ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().
 		GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().
@@ -1707,13 +1707,13 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 		GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).
 		Return(orgMembers, nil)
 	store.EXPECT().
-		DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).
-		Return(int64(2), nil)
+		DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).
+		Return(int64(2), int64(0), nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).
 		Return(nil)
 	store.EXPECT().
-		ReconcileMemberCounts(gomock.Any(), roomID).Return(nil) // recount after removal
+		ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil) // recount after removal
 	store.EXPECT().
 		GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().
@@ -1783,12 +1783,12 @@ func TestHandler_ProcessRemoveMember_CrossSiteInbox(t *testing.T) {
 		Return(userResult, nil)
 	store.EXPECT().
 		DeleteSubscription(gomock.Any(), roomID, account).
-		Return(int64(1), nil)
+		Return(int64(1), subIsBot(account), nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").
 		Return(nil)
 	store.EXPECT().
-		ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+		ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().
 		GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 
@@ -1903,7 +1903,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteSubscriptionError(t *testing.T) {
 		Return(nil)
 	store.EXPECT().
 		DeleteSubscription(gomock.Any(), "r1", "alice").
-		Return(int64(0), fmt.Errorf("write failed"))
+		Return(int64(0), false, fmt.Errorf("write failed"))
 
 	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
 	req := model.RemoveMemberRequest{RoomID: "r1", Requester: "alice", Account: "alice", Timestamp: 1000, RoomType: model.RoomTypeChannel}
@@ -1914,7 +1914,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteSubscriptionError(t *testing.T) {
 	assert.Contains(t, err.Error(), "delete subscription")
 }
 
-func TestHandler_ProcessRemoveIndividual_ReconcileMemberCountsError(t *testing.T) {
+func TestHandler_ProcessRemoveIndividual_CountDeltaError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 	expectThreadCleanupAny(store)
@@ -1929,16 +1929,29 @@ func TestHandler_ProcessRemoveIndividual_ReconcileMemberCountsError(t *testing.T
 		Return(nil)
 	store.EXPECT().
 		DeleteSubscription(gomock.Any(), "r1", "alice").
-		Return(int64(1), nil)
+		Return(int64(1), subIsBot("alice"), nil)
 	store.EXPECT().
-		ReconcileMemberCounts(gomock.Any(), "r1").
-		Return(fmt.Errorf("write failed"))
+		ApplyMemberCountDelta(gomock.Any(), "r1", -1, 0, gomock.Any()).
+		Return(false, fmt.Errorf("write failed"))
 
 	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
 	req := model.RemoveMemberRequest{RoomID: "r1", Requester: "alice", Account: "alice", Timestamp: 1000, RoomType: model.RoomTypeChannel}
 	data, _ := json.Marshal(req)
 
 	err := h.processRemoveMember(context.Background(), data)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "apply member count delta")
+}
+
+// A due drift check still recomputes, and its failure must still propagate.
+func TestHandler_ProcessRemoveIndividual_ReconcileOnDueError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "r1", "alice", "site-a"
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 1, model.IsBot(account))
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, -1, 0, gomock.Any()).Return(true, nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(fmt.Errorf("write failed"))
+
+	err := runRemoveIndividual(t, store, roomID, account, siteID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reconcile member counts")
 }
@@ -2129,9 +2142,9 @@ func TestHandler_ProcessRemoveIndividual_InboxFailurePropagates(t *testing.T) {
 		Return(nil)
 	store.EXPECT().
 		DeleteSubscription(gomock.Any(), roomID, account).
-		Return(int64(1), nil)
+		Return(int64(1), subIsBot(account), nil)
 	store.EXPECT().
-		ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+		ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().
 		GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 
@@ -2170,9 +2183,9 @@ func TestHandler_ProcessRemoveOrg_InboxFailurePropagates(t *testing.T) {
 	}
 
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, []string{"carol"}).Return(int64(1), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, []string{"carol"}).Return(int64(1), int64(0), nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), requester).
 		Return(&model.User{ID: "u_alice", Account: requester, SiteID: localSite, EngName: "Alice", ChineseName: "愛"}, nil)
@@ -6065,8 +6078,8 @@ func TestHandler_ProcessRemoveIndividual_SelfLeave_Content(t *testing.T) {
 			Roles:            []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_b").Return(nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "bob").Return(int64(1), nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "bob").Return(int64(1), subIsBot("bob"), nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
 
 	var published []publishedMsg
@@ -6096,8 +6109,8 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_Content(t *testing.T) {
 			User: model.User{ID: "u_b", Account: "bob", SiteID: "site-a", EngName: "Bob", ChineseName: "鮑"},
 		}, nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_b").Return(nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "bob").Return(int64(1), nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "bob").Return(int64(1), subIsBot("bob"), nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
@@ -6151,8 +6164,8 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_BotAware(t *testing.T) {
 			store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, tt.removed.Account).
 				Return(&UserWithMembership{User: tt.removed}, nil)
 			store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, tt.removed.ID).Return(nil)
-			store.EXPECT().DeleteSubscription(gomock.Any(), roomID, tt.removed.Account).Return(int64(1), nil)
-			store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+			store.EXPECT().DeleteSubscription(gomock.Any(), roomID, tt.removed.Account).Return(int64(1), subIsBot(tt.removed.Account), nil)
+			store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 			store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
 			store.EXPECT().GetUser(gomock.Any(), tt.requester.Account).Return(&tt.requester, nil)
 			store.EXPECT().GetApp(gomock.Any(), botUser.Account).Return(&model.App{Name: "Helper Bot"}, nil)
@@ -6220,8 +6233,8 @@ func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent(t *testing.T) {
 					Roles: []model.Role{model.RoleUser},
 				}, nil)
 			store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
-			store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
-			store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+			store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), subIsBot("helper.bot"), nil)
+			store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 			store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
 			tt.setupApp(store)
 
@@ -6255,7 +6268,7 @@ func TestHandler_ProcessRemoveOrg_AllOverlap_SectNameFromUnfiltered(t *testing.T
 		}, nil)
 	// toRemove is empty → no DeleteSubscriptionsByAccounts call expected.
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "o1").Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// Nothing deleted: no delta and no recompute.
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -6289,7 +6302,7 @@ func TestHandler_ProcessRemoveOrg_AllSectNamesEmpty(t *testing.T) {
 		}, nil)
 	// toRemove is empty (the member has individual membership) → no DeleteSubscriptionsByAccounts expected.
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "o1").Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// Nothing deleted: no delta and no recompute.
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -6332,12 +6345,12 @@ func TestHandler_ProcessRemoveOrg_OtherOrgCovers_PreservesSub(t *testing.T) {
 			},
 		}, nil)
 	// MUST NOT be called — alice is still covered by the sibling org.
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	// MUST NOT rotate — no survivors were displaced.
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), gomock.Any()).Times(0)
 	// The X org row still gets deleted; the count gets reconciled.
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "X").Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// Nothing deleted: no delta and no recompute.
 	store.EXPECT().GetUser(gomock.Any(), "alice-req").
 		Return(&model.User{ID: "u_r", Account: "alice-req", SiteID: "site-a", EngName: "Req", ChineseName: "求"}, nil)
 
@@ -6790,7 +6803,7 @@ func TestHandler_ProcessRemoveOrg_DeptFirstTiebreak(t *testing.T) {
 			store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, "o1").Return(tc.members, nil)
 			// toRemove is empty (all members have individual membership) → no DeleteSubscriptionsByAccounts expected.
 			store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "o1").Return(nil)
-			store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+			// Nothing deleted: no delta and no recompute.
 			store.EXPECT().GetUser(gomock.Any(), "alice").
 				Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -7502,9 +7515,9 @@ func TestHandler_ProcessRemoveIndividual_BustsSubL2(t *testing.T) {
 		HasOrgMembership: false,
 	}
 	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).Return(userResult, nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), subIsBot(account), nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 
 	fake := valkeyfake.New()
@@ -7569,11 +7582,11 @@ func TestHandler_ProcessRemoveOrg_BustsSubL2ForEachRemovedAccount(t *testing.T) 
 		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
 	}
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), int64(0), nil)
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID, EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -8163,4 +8176,203 @@ func TestProcessRoomRename_UsesProjectedAccountsQuery(t *testing.T) {
 	})
 
 	require.NoError(t, h.processRoomRename(ctx, body))
+}
+
+// Remove paths $inc an exact delta, falling back to the whole-room recompute
+// only when the TTL says drift is due or the delete was partial.
+
+func removeIndividualStore(t *testing.T, ctrl *gomock.Controller, roomID, account, siteID string, deleted int64, wasBot bool) *MockSubscriptionStore {
+	t.Helper()
+	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).Return(&UserWithMembership{
+		User: model.User{ID: "u1", Account: account, SiteID: siteID},
+	}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(deleted, wasBot, nil)
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, []string{account}).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, []string{account}).Return(nil)
+	// Downstream of the counter work asserted here; error cases never reach it.
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil).AnyTimes()
+	// Only a bot account reaches the app-name lookup; no registration is fine.
+	store.EXPECT().GetApp(gomock.Any(), gomock.Any()).Return(nil, ErrAppNotFound).AnyTimes()
+	return store
+}
+
+func runRemoveIndividual(t *testing.T, store *MockSubscriptionStore, roomID, account, siteID string) error {
+	t.Helper()
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	data, _ := json.Marshal(model.RemoveMemberRequest{
+		RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel,
+	})
+	return h.processRemoveMember(context.Background(), data)
+}
+
+func TestHandler_ProcessRemoveIndividual_AppliesUserCountDelta(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "alice", "site-a"
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 1, model.IsBot(account))
+	// Exact -1 user delta, and no full recompute because the TTL is not due.
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, -1, 0, gomock.Any()).Return(false, nil)
+
+	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
+}
+
+func TestHandler_ProcessRemoveIndividual_BotRemovalDecrementsAppCount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "helper.bot", "site-a"
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 1, model.IsBot(account))
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, 0, -1, gomock.Any()).Return(false, nil)
+
+	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
+}
+
+func TestHandler_ProcessRemoveIndividual_ReconcilesWhenDeltaReportsDue(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "alice", "site-a"
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 1, model.IsBot(account))
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, -1, 0, gomock.Any()).Return(true, nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+
+	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
+}
+
+// A zero delete cannot distinguish a completed prior delivery from one that
+// failed before adjusting the counters, so it must recompute authoritatively
+// rather than assume the first delivery already decremented.
+func TestHandler_ProcessRemoveIndividual_ZeroDeleteReconcilesAuthoritatively(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "alice", "site-a"
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 0, false)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// No ApplyMemberCountDelta: a second decrement would drift the counter.
+
+	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
+}
+
+func TestHandler_ProcessRemoveIndividual_ZeroDeleteReconcileErrorPropagates(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "alice", "site-a"
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 0, false)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(fmt.Errorf("write failed"))
+
+	err := runRemoveIndividual(t, store, roomID, account, siteID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reconcile member counts")
+}
+
+func TestHandler_ProcessRemoveOrg_AppliesCountDeltaForDeletedAccounts(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	const roomID, orgID, requester, siteID = "room-1", "org-1", "alice", "site-a"
+
+	orgMembers := []OrgMemberStatus{
+		{Account: "carol", SiteID: siteID, Name: "Engineering"},
+		{Account: "svc.bot", SiteID: siteID, Name: "Engineering"},
+		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
+	}
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).Return(int64(2), int64(1), nil)
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).Return(nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	// One human + one bot left, so the split must be exact, not lumped.
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, -1, -1, gomock.Any()).Return(false, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID}, nil)
+
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	data, _ := json.Marshal(model.RemoveMemberRequest{RoomID: roomID, Requester: requester, OrgID: orgID, Timestamp: 1000, RoomType: model.RoomTypeChannel})
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+}
+
+// Fewer deleted than targeted means the delta cannot come from the target set,
+// so the authoritative recompute must run instead.
+func TestHandler_ProcessRemoveOrg_PartialDeleteFallsBackToReconcile(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	const roomID, orgID, requester, siteID = "room-1", "org-1", "alice", "site-a"
+
+	orgMembers := []OrgMemberStatus{
+		{Account: "carol", SiteID: siteID, Name: "Engineering"},
+		{Account: "dave", SiteID: siteID, Name: "Engineering"},
+	}
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.Any()).Return(int64(1), int64(0), nil)
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.Any()).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.Any()).Return(nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID}, nil)
+
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	data, _ := json.Marshal(model.RemoveMemberRequest{RoomID: roomID, Requester: requester, OrgID: orgID, Timestamp: 1000, RoomType: model.RoomTypeChannel})
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+}
+
+// An org whose members all survive deletes nothing, so it must not count.
+func TestHandler_ProcessRemoveOrg_NoDeletionsSkipsCountWork(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	const roomID, orgID, requester, siteID = "room-1", "org-1", "alice", "site-a"
+
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return([]OrgMemberStatus{
+		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
+	}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID}, nil)
+
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	data, _ := json.Marshal(model.RemoveMemberRequest{RoomID: roomID, Requester: requester, OrgID: orgID, Timestamp: 1000, RoomType: model.RoomTypeChannel})
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+}
+
+// The counters are computed from the persisted u.isBot flag (ReconcileMemberCounts
+// counts u.isBot==true and derives userCount by subtraction), so a subscription
+// written before that flag existed sits in userCount however its account reads.
+// The delta must follow the stored flag, never the account shape.
+
+func TestHandler_ProcessRemoveIndividual_LegacyBotSubWithoutFlagDecrementsUserCount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "helper.bot", "site-a"
+	// Legacy row: bot-shaped account, u.isBot absent, so it was counted as a user.
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 1, false)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, -1, 0, gomock.Any()).Return(false, nil)
+
+	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
+}
+
+func TestHandler_ProcessRemoveIndividual_PersistedBotFlagWinsOverAccountShape(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "svc", "site-a"
+	// Stamped as a bot despite the plain account, so it was counted in appCount.
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 1, true)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, 0, -1, gomock.Any()).Return(false, nil)
+
+	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
+}
+
+func TestHandler_ProcessRemoveOrg_SplitsByPersistedBotFlagNotAccountShape(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	const roomID, orgID, requester, siteID = "room-1", "org-1", "alice", "site-a"
+
+	orgMembers := []OrgMemberStatus{
+		{Account: "carol", SiteID: siteID, Name: "Engineering"},
+		{Account: "svc.bot", SiteID: siteID, Name: "Engineering"},
+	}
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
+	// Both rows predate u.isBot, so both sat in userCount despite one bot account.
+	store.EXPECT().DeleteSubscriptionsWithBotSplit(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "svc.bot"})).
+		Return(int64(2), int64(0), nil)
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.Any()).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.Any()).Return(nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, -2, 0, gomock.Any()).Return(false, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID}, nil)
+
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	data, _ := json.Marshal(model.RemoveMemberRequest{RoomID: roomID, Requester: requester, OrgID: orgID, Timestamp: 1000, RoomType: model.RoomTypeChannel})
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
 }
