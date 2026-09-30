@@ -6,6 +6,8 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -17,9 +19,15 @@ type SubscriptionRepo struct {
 	subscriptions *mongoutil.Collection[model.Subscription]
 }
 
-func NewSubscriptionRepo(db *mongo.Database) *SubscriptionRepo {
+// NewSubscriptionRepo fronts the subscriptions collection. readPref pins this
+// collection's reads: these are access-control reads, and the service-wide
+// default is secondaryPreferred — a lagging secondary would let the sub-cache's
+// evict-then-reload re-cache a stale pre-revocation grant, so callers pass strict
+// primary here (read-your-writes, and fail-closed on a primary outage).
+func NewSubscriptionRepo(db *mongo.Database, readPref *readpref.ReadPref) *SubscriptionRepo {
+	coll := db.Collection(subscriptionsCollection, options.Collection().SetReadPreference(readPref))
 	return &SubscriptionRepo{
-		subscriptions: mongoutil.NewCollection[model.Subscription](db.Collection(subscriptionsCollection)),
+		subscriptions: mongoutil.NewCollection[model.Subscription](coll),
 	}
 }
 
