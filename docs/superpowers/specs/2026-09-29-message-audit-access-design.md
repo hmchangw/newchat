@@ -107,6 +107,128 @@ site B: (same)                                       archive ES(B) ◄─┤ CCS
 audit-frontend ─► audit-service ─► grant check ─► ops log ─► CCS hub ─┘ query + decrypt
 ```
 
+### Sequence: archiving one batch at a site
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant JS as NATS JetStream (site A)
+    participant W as archive-worker (site A)
+    participant V as Vault (chat-audit-kek)
+    participant B as Archive bucket (A)
+    participant ES as Archive ES (A)
+
+    Note over W,V: Once, at first start
+    W->>V: GenerateDataKey
+    V-->>W: plaintext DEK + wrapped DEK
+    W->>ES: index audit-keys-A / current {wrappedDek}
+    Note over W: Later starts read the wrapped DEK from ES and ask Vault to unwrap it
+
+    loop every batch (10 s, 2000 events or 8 MiB)
+        JS->>W: deliver canonical message and member events
+        W->>W: fill batch, keep every message un-acked
+        W->>W: seal segment: header, per-event encrypted frames, SHA-256 trailer
+        W->>B: PUT {A}/{yyyy}/{mm}/{dd}/{hh}/{firstSeq}-{lastSeq}.seg
+        alt PUT succeeds
+            B-->>W: 200
+            W->>ES: bulk upsert audit-messages-A-* and audit-memberships-A (segmentKey, frameOffset, encBody)
+            alt bulk succeeds
+                ES-->>W: ok
+                W->>JS: Ack every message in the batch
+            else item rejected as retryable
+                ES-->>W: item errors
+                W->>JS: Ack the succeeded items, NAK the rejected ones with jittered delay
+            end
+        else PUT fails after 2 attempts
+            B-->>W: error or timeout
+            W->>JS: NAK the whole batch with jittered delay, drop it from memory
+            Note over JS,W: Redelivery lands in a later segment. The index keeps the last write.
+        end
+    end
+```
+
+### Sequence: a cross-site investigation
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Req as Requester (auditor)
+    actor Apr as Approver
+    participant FE as audit-frontend
+    participant IdP as OIDC issuer
+    participant S as audit-service
+    participant M as Audit MongoDB
+    participant K as Ops log sink
+    participant H as CCS hub
+    participant EA as Archive ES (A)
+    participant EB as Archive ES (B)
+    participant V as Vault (chat-audit-kek)
+    participant BB as Archive bucket (B)
+
+    Req->>FE: open console
+    FE->>IdP: authorization code + PKCE
+    IdP-->>FE: ID token with groups claim
+    FE->>S: POST /requests (targets p.ortiz, d.kwan; range; reason) [bearer]
+    S->>IdP: validate token (JWKS)
+    S->>H: search *:audit-memberships-* for targets (existence check)
+    H->>EA: fan out
+    H->>EB: fan out
+    S->>M: insert audit_requests {pending}
+    S->>M: append audit_ops request.create (prevHash, hash)
+    S->>K: PUT ops entry
+    S-->>FE: 201 pending
+
+    Apr->>FE: open approvals queue
+    FE->>S: POST /requests/:id/approve (narrowed range, 3 d) [bearer]
+    S->>S: approver sub ≠ requester sub; neither username in targets
+    S->>M: update audit_requests {approved, validUntil}
+    S->>M: append audit_ops request.approve
+    S->>K: PUT ops entry
+    S-->>FE: 200 approved
+
+    Req->>FE: open rooms for grant
+    FE->>S: GET /grants/:id/rooms
+    S->>M: load grant, check approved and not expired, caller is requester
+    S->>M: append audit_ops rooms.list
+    S->>K: PUT ops entry
+    S->>H: search *:audit-memberships-* for targets
+    H->>EA: fan out
+    H->>EB: fan out
+    EA-->>H: memberships (site A rooms)
+    EB-->>H: memberships (site B rooms)
+    H-->>S: merged hits + _clusters {answered: A, B}
+    S-->>FE: rooms with intervals, sitesAnswered [A, B]
+
+    Req->>FE: read #apac-sales (archived at site B)
+    FE->>S: GET /grants/:id/rooms/B/{roomId}/messages
+    S->>M: load grant, re-check status and requester
+    S->>S: room in scope? (a target's interval overlaps the range)
+    S->>M: append audit_ops messages.read {siteId B, roomId}
+    S->>K: PUT ops entry
+    S->>H: search B:audit-messages-* (room, clamped range, search-after)
+    H->>EB: forward
+    EB-->>H: hits with encBody, segmentKey, frameOffset
+    H-->>S: hits
+    alt site B DEK not cached
+        S->>H: get B:audit-keys-B / current
+        H->>EB: forward
+        EB-->>S: wrappedDek
+        S->>V: decrypt wrappedDek
+        V-->>S: plaintext DEK (cached in process)
+    end
+    S->>S: decrypt encBody and versions in memory
+    S-->>FE: page of messages, sitesAnswered [B], Cache-Control: no-store
+
+    Req->>FE: verify one message
+    FE->>S: GET /grants/:id/messages/B/{messageId}/verify
+    S->>M: append audit_ops message.verify
+    S->>K: PUT ops entry
+    S->>BB: GET segmentKey (range at frameOffset)
+    BB-->>S: encrypted frame
+    S->>S: decrypt frame with site B DEK, recompute SHA-256, compare with contentHash
+    S-->>FE: match / mismatch
+```
+
 ## 2. Prerequisite hardening
 
 These changes are required before the audit plane is meaningful. They are small and
