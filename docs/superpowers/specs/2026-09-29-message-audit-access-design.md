@@ -23,7 +23,7 @@ developer with production access to the platform.
 | Consumption | Interactive console; export is a follow-up |
 | Message source | A per-site archive fed from MESSAGES-CANONICAL, not live Cassandra |
 | Archive record | Sealed segments in a per-site S3-compatible bucket under Object Lock, encrypted with an audit-only Vault key |
-| Archive index | Per-site dedicated Elasticsearch cluster, metadata plus encrypted body, no plaintext search |
+| Archive index | Per-site dedicated Elasticsearch cluster, append-only event documents with encrypted bodies, folded to state on read, no plaintext search |
 | Operation log | Hash-chained collection in a dedicated MongoDB deployment, mirrored to an Object Lock bucket |
 | Membership history | Recorded by the archive from rollout on; rooms the target left stay readable for the membership interval |
 
@@ -88,7 +88,7 @@ plane holds (§7).
 | Store | Scope | Purpose | Written by | Read by |
 |---|---|---|---|---|
 | Archive bucket (S3-compatible, Object Lock compliance mode) | per site | System of record: sealed, encrypted segments of canonical events | that site's `archive-worker` | `audit-service` (verification only) |
-| Archive Elasticsearch cluster | per site | Query index: message metadata with encrypted body, membership intervals, the site's wrapped archive DEK | that site's `archive-worker` | `audit-service`, through CCS |
+| Archive Elasticsearch cluster | per site | Append-only query index: one document per message and membership event, encrypted bodies, the site's wrapped archive DEK | that site's `archive-worker` | `audit-service`, through CCS |
 | CCS hub Elasticsearch cluster | central | Holds no data; every site's archive cluster is registered on it as a remote | nobody | `audit-service` |
 | Audit MongoDB deployment | central | `audit_requests`, `audit_ops`, `audit_chain_checkpoints` | `audit-service` | `audit-service` |
 | Operation log sink (S3-compatible, Object Lock) | central | Immutable copy of every `audit_ops` entry | `audit-service` | Ops, on demand |
@@ -131,7 +131,7 @@ sequenceDiagram
         W->>B: PUT {A}/{yyyy}/{mm}/{dd}/{hh}/{firstSeq}-{lastSeq}.seg
         alt PUT succeeds
             B-->>W: 200
-            W->>ES: bulk upsert audit-messages-A-* and audit-memberships-A (segmentKey, frameOffset, encBody)
+            W->>ES: bulk create (op_type create) audit-events-A-* and audit-members-A-* (segmentKey, frameOffset, encBody)
             alt bulk succeeds
                 ES-->>W: ok
                 W->>JS: Ack every message in the batch
@@ -142,7 +142,7 @@ sequenceDiagram
         else PUT fails after 2 attempts
             B-->>W: error or timeout
             W->>JS: NAK the whole batch with jittered delay, drop it from memory
-            Note over JS,W: Redelivery lands in a later segment. The index keeps the last write.
+            Note over JS,W: Redelivery lands in a later segment. Its index create conflicts on the same id and is treated as done.
         end
     end
 ```
@@ -170,7 +170,7 @@ sequenceDiagram
     IdP-->>FE: ID token with groups claim
     FE->>S: POST /requests (targets p.ortiz and d.kwan, range, reason) [bearer]
     S->>IdP: validate token (JWKS)
-    S->>H: search *:audit-memberships-* for targets (existence check)
+    S->>H: search *:audit-members-* for targets (existence check)
     H->>EA: fan out
     H->>EB: fan out
     S->>M: insert audit_requests {pending}
@@ -191,7 +191,7 @@ sequenceDiagram
     S->>M: load grant, check approved and not expired, caller is requester
     S->>M: append audit_ops rooms.list
     S->>K: PUT ops entry
-    S->>H: search *:audit-memberships-* for targets
+    S->>H: search *:audit-members-* for targets
     H->>EA: fan out
     H->>EB: fan out
     EA-->>H: memberships (site A rooms)
@@ -205,9 +205,9 @@ sequenceDiagram
     S->>S: room in scope? (a target's interval overlaps the range)
     S->>M: append audit_ops messages.read {siteId B, roomId}
     S->>K: PUT ops entry
-    S->>H: search B:audit-messages-* (room, clamped range, search-after)
+    S->>H: search B:audit-events-* (room, clamped range, search-after, collapse on messageId)
     H->>EB: forward
-    EB-->>H: hits with encBody, segmentKey, frameOffset
+    EB-->>H: event hits with encBody, segmentKey, frameOffset
     H-->>S: hits
     alt site B DEK not cached
         S->>H: get B:audit-keys-B / current
@@ -216,7 +216,7 @@ sequenceDiagram
         S->>V: decrypt wrappedDek
         V-->>S: plaintext DEK (cached in process)
     end
-    S->>S: decrypt encBody and versions in memory
+    S->>S: fold events per message, decrypt encBody in memory
     S-->>FE: page of messages, sitesAnswered [B], Cache-Control: no-store
 
     Req->>FE: verify one message
@@ -291,7 +291,7 @@ target list. Auditors and approvers do not need a chat account.
 
 A grant has no site field. It is valid on every site the audit plane is connected to.
 
-Target accounts are checked against `*:audit-memberships-*` at submission. An account
+Target accounts are checked against `*:audit-members-*` at submission. An account
 with no membership document on any site is accepted, since it may simply have joined
 nothing since rollout, but the request shows it as "no rooms found" so a typo is
 visible to the approver.
@@ -354,7 +354,7 @@ Two durable pull consumers in one process, each guarded by `pkg/loopguard`:
   message, so no Cassandra read and no chat-side decrypt is needed.
 - **INBOX**, filter on `subject.InboxMemberEventSubjects(siteID)`: member added, member
   removed, joined-at refreshed, room renamed, on both lanes. A local user joining a
-  remote-site room arrives on the external lane, so a site's memberships index knows
+  remote-site room arrives on the external lane, so a site's members index knows
   every room its own users are in, including rooms whose messages are archived
   elsewhere.
 
@@ -424,17 +424,20 @@ the audit key.
 1. Seal the segment and compute the trailer.
 2. PUT the segment. Up to `ARCHIVE_WRITE_ATTEMPTS` attempts in process with a short
    jittered wait between them. A 200 means durable.
-3. Bulk-index the batch, each document pointing at `segmentKey` and `frameOffset`.
-   Retry the same way. This order means the index never points at a missing segment.
-4. Ack every message whose bulk item succeeded. NAK any item the bulk rejected as
+3. Bulk-index the batch with `op_type: create`, one document per event with id
+   `{site}-{streamSeq}`, each pointing at `segmentKey` and `frameOffset`. Retry the
+   same way. This order means the index never points at a missing segment.
+4. Ack every message whose bulk item succeeded or returned a version conflict, since a
+   conflict means that event is already archived. NAK any item the bulk rejected as
    retryable, through `jsretry` with the default jittered backoff.
 5. If the PUT fails after all attempts, nothing has been written anywhere: NAK the whole
    batch through `jsretry` and drop it from memory. The batch is rebuilt from
    redelivery, never from memory.
 
-A redelivered event lands in a later segment and is upserted again in the index. The
-bucket gains a duplicate frame, the index keeps the last write, and a rebuild dedups by
-stream sequence. Duplicates cost storage, never correctness.
+A redelivered event lands in a later segment and its index create is refused as a
+conflict on the same id. The bucket gains a duplicate frame, the index is unchanged,
+and a rebuild dedups by stream sequence. Duplicates cost storage, never correctness.
+The worker never issues an update or a delete against any index.
 
 ### Behaviour when the bucket is unavailable
 
@@ -457,37 +460,64 @@ worker sets no per-object retention. At startup it reads the bucket's lock
 configuration and refuses to run if lock is absent or the mode is not compliance. The
 worker's bucket credential has `PutObject` only.
 
+### Why sealed segments rather than Elasticsearch snapshots
+
+Once frames are encrypted, a stolen segment and a stolen snapshot are equally
+unreadable, so confidentiality does not decide this. Three other things do. A segment
+is sealed before its events are indexed, in the same batch, so no event is ever in the
+index without already being in the record; a snapshot leaves everything since the last
+snapshot unprotected. Object Lock works on a segment, which is written once, and fights
+a snapshot repository, which rewrites its metadata and deletes shared files on every
+cycle. And a segment is a versioned framing a small Go tool opens with the DEK for a
+single ranged read, where a snapshot is Lucene files that need a compatible
+Elasticsearch to restore in full. Snapshots stay as the archive cluster's operational
+backup, for fast restore rather than evidence.
+
 ### Index shape
 
+The index is append-only and event-sourced: one immutable document per archived event,
+never a document per message that gets updated. Two Elasticsearch controls enforce it.
+The worker's role holds only the `create_doc` privilege on the audit indices, which
+allows new documents and refuses updates, deletes, and overwrites, so a stolen worker
+credential cannot change history. The lifecycle policy sets `index.blocks.write` on
+each daily index at rollover, after which even creates are refused. Altering the index
+then takes cluster-admin rights, which is why the bucket remains the evidence copy:
+Elasticsearch has no equivalent of Object Lock.
+
 Three indices on each site's archive cluster, templates pushed by the worker's
-`bootstrap.go` when `BOOTSTRAP_STREAMS=true`, following the repo convention. Message
-indices are daily under an index lifecycle policy: hot, warm, cold, then searchable
-snapshots on the same S3 service. Retention is a lifecycle policy.
+`bootstrap.go` when `BOOTSTRAP_STREAMS=true`, following the repo convention. Event
+indices are daily under an index lifecycle policy: read-only at rollover, then hot,
+warm, cold, then searchable snapshots on the same S3 service. Retention is a lifecycle
+policy.
 
-**`audit-messages-{site}-{yyyy.mm.dd}`**, one document per message ID:
+**`audit-events-{site}-{yyyy.mm.dd}`**, one document per message event, id
+`{site}-{streamSeq}`:
 
 | Field | ES type | Notes |
 |---|---|---|
+| `seq` | long | Stream sequence; the fold order |
+| `eventType` | keyword | `created`, `updated`, `deleted`, `pinned`, `unpinned`, `reacted` |
+| `eventAt` | date | Event timestamp |
 | `messageId`, `roomId`, `siteId`, `roomType` | keyword | |
-| `senderAccount`, `senderId` | keyword | |
-| `createdAt`, `editedAt`, `deletedAt` | date | |
-| `eventType`, `lastSeq` | keyword, long | Last event applied |
+| `senderAccount`, `senderId` | keyword | Author of the message, on every event |
+| `createdAt` | date | Message creation time, on every event, for range clamping and sort |
 | `threadParentId` | keyword | |
-| `attachmentCount`, `attachmentTypes` | integer, keyword | |
-| `pinned`, `reactionCount` | boolean, integer | |
+| `attachmentCount`, `attachmentTypes` | integer, keyword | On `created` and `updated` |
+| `actorAccount` | keyword | On `pinned`, `unpinned`, `reacted`, `deleted` |
 | `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | Pointer to the sealed record |
-| `encBody` | binary, not indexed | Ciphertext of the current body, cards, quoted parent |
-| `versions` | nested | Prior `{editedAt, encBody, segmentKey, frameOffset}` entries |
+| `encBody` | binary, not indexed | Ciphertext of body, cards, quoted parent; only on `created` and `updated` |
 
-**`audit-memberships-{site}`**, one document per room and account:
+**`audit-members-{site}-{yyyy.mm.dd}`**, one document per membership event, id
+`{site}-{streamSeq}`:
 
 | Field | ES type | Notes |
 |---|---|---|
-| `roomId`, `roomSiteId`, `account`, `roomType`, `roomName` | keyword | `roomSiteId` is the site that archives the room's messages, which for a remote room differs from the index's site |
-| `intervals` | nested `{joinedAt, leftAt}` | `leftAt` null while a member |
-| `firstSeenSeq` | long | For "history begins at rollout" flagging |
+| `seq`, `eventType`, `eventAt` | long, keyword, date | `member_added`, `member_removed`, `room_renamed` |
+| `roomId`, `roomSiteId`, `account`, `roomType`, `roomName` | keyword | `roomSiteId` is the site that archives the room's messages, which for a remote room differs from the index's site; `account` empty on `room_renamed` |
+| `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | |
 
-**`audit-keys-{site}`**, exactly one document, id `current`:
+**`audit-keys-{site}`**, exactly one document, id `current`, written once with
+`op_type: create` and never again:
 
 | Field | ES type | Notes |
 |---|---|---|
@@ -495,18 +525,19 @@ snapshots on the same S3 service. Retention is a lifecycle policy.
 | `wrappedDek` | binary, not indexed | Output of the transit `datakey/wrapped` call |
 | `createdAt` | date | |
 
-`encBody` is kept for `ARCHIVE_INDEX_BODY_RETENTION` (default 180d), then stripped by
-a lifecycle step. Older messages are read from the segment by ranged GET at the stored
-offset.
+`encBody` is kept for `ARCHIVE_INDEX_BODY_RETENTION` (default 180d). Because documents
+are immutable, stripping it is done by the lifecycle policy reindexing the day into a
+body-less index and swapping the alias, not by updating documents. Older messages are
+read from the segment by ranged GET at the stored offset.
 
 ### Cross-cluster search
 
 Each site's archive cluster is registered as a remote on the central CCS hub under its
 site ID as the cluster alias, with a cross-cluster API key granting read on
-`audit-messages-*`, `audit-memberships-*`, and `audit-keys-*` and nothing else. Every
+`audit-events-*`, `audit-members-*`, and `audit-keys-*` and nothing else. Every
 remote is marked `skip_unavailable: true`, so one site being down degrades a query to
 the sites that answered rather than failing it. `audit-service` queries
-`*:audit-messages-*` and `*:audit-memberships-*` through the hub, exactly as
+`*:audit-events-*` and `*:audit-members-*` through the hub, exactly as
 `search-service` queries `*:messages-*`, and reads the `_clusters` section of every
 response to learn which sites answered. Local docker-compose registers the local
 archive cluster on the hub under `site-local` so the code path is the same in dev.
@@ -520,27 +551,38 @@ the log entry writes a second entry with a `.failed` action. Every response that
 touched the archive carries `sitesAnswered` and `sitesSkipped`, and the console shows
 them.
 
-**Room enumeration** queries `*:audit-memberships-*` for the grant's targets and merges
-by `(roomSiteId, roomId)`. Each room carries the targets who are members and their
-membership intervals. A room is in scope if at least one target's interval overlaps the
-grant's message range. Rooms whose `firstSeenSeq` is the archive's first sequence are
-flagged so the auditor knows visible history begins at rollout. A room whose site was
-skipped is listed from the memberships the answering sites hold, marked as unreachable
-until its site answers.
+The index holds events, so every read folds them into state at query time. The fold is
+in `audit-service`, in one package with table-driven tests, and it is the only place
+that knows how event types combine.
+
+**Room enumeration** queries `*:audit-members-*` for the grant's targets, sorted by
+`seq`, and folds `member_added` and `member_removed` per `(roomSiteId, roomId, account)`
+into intervals; the latest `room_renamed` gives the name. Each room carries the targets
+who are members and their intervals. A room is in scope if at least one target's
+interval overlaps the grant's message range. Rooms whose first membership event is the
+archive's first sequence are flagged so the auditor knows visible history begins at
+rollout. A room whose site was skipped is listed from the events the answering sites
+hold, marked as unreachable until its site answers.
 
 **Room messages** take grant, site, room, optional cursor, page size (default 100, max
-500). The query runs against `{site}:audit-messages-*`, clamped to the intersection of
+500). The query runs against `{site}:audit-events-*`, clamped to the intersection of
 the grant's message range and the union of the targets' intervals in that room, sorted
-by `createdAt` then `messageId`, paged with search-after. The cursor does not carry the
-grant ID, so it cannot be replayed under a different grant. Each hit's `encBody` and
-`versions` are decrypted in memory with that site's archive DEK, unwrapped from
-`{site}:audit-keys-{site}` on first use and cached. Deleted messages return `deletedAt`
-and their last body. Thread replies read the same way, filtered by parent.
+by `createdAt` then `messageId`, paged with search-after, and collapsed on `messageId`
+with inner hits ordered by `seq` descending. Each collapsed group is folded: the newest
+`created` or `updated` event supplies the body, a `deleted` event supplies the deletion
+time, the `updated` events form the edit history, and pins and reactions fold to their
+last state. The cursor does not carry the grant ID, so it cannot be replayed under a
+different grant. Each body's `encBody` is decrypted in memory with that site's archive
+DEK, unwrapped from `{site}:audit-keys-{site}` on first use and cached. Deleted
+messages return their deletion time and their last body. Thread replies read the same
+way, filtered by parent.
 
 **Cross-room query** takes grant plus metadata filters: sender in the target set, date
 range, has attachment, deleted, edited, room type, thread only, and optionally a site
-list. It runs against `*:audit-messages-*`, restricted to the rooms in scope, and
-returns the same page shape with the site on every hit. There is no body filter.
+list. It runs against `*:audit-events-*`, restricted to the rooms in scope, collapsed
+and folded the same way, and returns the same page shape with the site on every hit.
+"Deleted" and "edited" filters are answered by the presence of a `deleted` or `updated`
+event for the message. There is no body filter.
 
 **Verify** takes grant, site, and message ID, fetches the segment from that site's
 bucket with that site's read credential, decrypts the frame at the offset with that
@@ -589,8 +631,20 @@ given sequence and reports the first break.
 - **Vault.** One key, two roles. Workers, one role per site bound to that site's
   ServiceAccount: `datakey`, `encrypt` on `chat-audit-kek`. Service: `decrypt` on
   `chat-audit-kek`. Neither has any policy on `chat-kek`.
+- **Storage encryption.** Every audit bucket also has server-side encryption on by
+  default, bucket-managed (SSE-S3 or MinIO's KMS-backed default), with a KMS key
+  separate from anything the chat services use. It is defence in depth for disks and
+  backups, not the control: server-side encryption is transparent to any holder of a
+  read credential, which is why the frames are encrypted by the worker first. No
+  customer-provided keys (SSE-C), since a lost key would make a locked bucket
+  permanently unreadable. The operation log sink is deliberately not
+  application-encrypted: its entries carry no bodies, and keeping them readable lets a
+  reviewer walk the hash chain from the bucket alone, with no Vault and no running
+  service.
 - **Credentials.** Worker: NATS user limited to its two consumers, its site's bucket
-  `PutObject` only, its site's Elasticsearch write role on the three indices. Service:
+  `PutObject` only, its site's Elasticsearch role with `create_doc` only on the three
+  index patterns plus the template and lifecycle privileges `bootstrap.go` needs.
+  Service:
   one `GetObject`-only credential per site's bucket, a read role on the hub, the audit
   MongoDB user, sink `PutObject` only. CCS: one cross-cluster API key per site,
   installed on the hub, read-only on the three index patterns. All from secrets in the
@@ -663,14 +717,17 @@ wait and either the fill window or the ack wait needs adjusting. A non-zero
 Unit tests per handler with mocked stores, table-driven, covering the state machine,
 every distinctness rule, expiry at the boundary, range clamping, skipped sites in
 `_clusters`, the log-before-read ordering, and a refused read when the log insert
-fails. Chain tests with a tampered middle entry and a truncated tail. Segment format
+fails. Fold tests, table-driven over event sequences: create then edit then delete,
+edit after delete, out-of-order delivery, pin and unpin, a reaction on a deleted
+message, join then leave then rejoin, and a rename with no membership change. Chain tests with a tampered middle entry and a truncated tail. Segment format
 round-trip tests with a corrupted trailer and a corrupted frame. Batching tests for
 each of the three bounds and for the ack-wait startup check.
 
 Integration tests with `pkg/testutil` containers: MongoDB, Elasticsearch, MinIO, NATS.
 The worker test publishes canonical and member events, kills the bucket mid-batch, and
 asserts nothing is acked, then restores it and asserts one segment per batch and
-idempotent index state after a forced redelivery. The service test runs a request
+a create conflict, not a second document, after a forced redelivery, and that an
+update or delete with the worker's role is refused. The service test runs a request
 through approval and reads a real archived room. The CCS test uses two Elasticsearch
 nodes on a shared docker network, as `search-service`'s CCS test already does, with
 one registered on the other as a remote, and asserts a cross-site room read and a
@@ -711,6 +768,10 @@ Coverage floor 80%, target 90% on handlers and stores, per the repo rule.
 - **The central service can decrypt every site's archive** and read every site's
   bucket. Its namespace, Vault role, and credentials are the whole control. This is the
   price of one console and one log.
+- **The index is append-only by privilege, not by physics.** `create_doc` and write
+  blocks stop the worker's credential and ordinary mistakes; a cluster administrator
+  can still alter it. That is acceptable because the index is derived and the bucket is
+  the record. The two are compared on Verify.
 - **The archive index holds ciphertext for 180 days** and metadata forever. Metadata
   alone reveals who talked to whom and when; the cluster's isolation is the control.
 - **The archive DEK is one key per site.** Compromise of the audit Vault role exposes
