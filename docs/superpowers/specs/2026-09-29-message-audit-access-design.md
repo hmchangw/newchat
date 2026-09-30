@@ -33,7 +33,6 @@ developer with production access to the platform.
 - Plaintext full-text search over message bodies. The index shape allows it later, but
   no mode flag or migration tool is designed here.
 - Backfill of messages sent before the archive worker was deployed.
-- Attachment blob retrieval through `media-service`.
 - Legal hold on live deletes in Cassandra. The archive keeps deleted content; the live
   store is unchanged.
 - Changes to the chat clients or to how users see their own messages.
@@ -87,7 +86,7 @@ plane holds (§7).
 
 | Store | Scope | Purpose | Written by | Read by |
 |---|---|---|---|---|
-| Archive bucket (S3-compatible, Object Lock compliance mode) | per site | System of record: sealed, encrypted segments of canonical events | that site's `archive-worker` | `audit-service` (verification only) |
+| Archive bucket (S3-compatible, Object Lock compliance mode) | per site | System of record: sealed, encrypted segments of canonical events, and encrypted copies of attachment blobs | that site's `archive-worker` | `audit-service` (verification only) |
 | Archive Elasticsearch cluster | per site | Append-only query index: one document per message and membership event, encrypted bodies, the site's wrapped archive DEK | that site's `archive-worker` | `audit-service`, through CCS |
 | CCS hub Elasticsearch cluster | central | Holds no data; every site's archive cluster is registered on it as a remote | nobody | `audit-service` |
 | Audit MongoDB deployment | central | `audit_requests`, `audit_ops`, `audit_chain_checkpoints` | `audit-service` | `audit-service` |
@@ -327,6 +326,7 @@ All under `/v1/audit`, bearer-authenticated, JSON.
 | `GET /grants/:id/rooms/:siteId/:roomId/threads/:parentId/messages` | requester | Page a thread |
 | `GET /grants/:id/messages` | requester | Cross-room, cross-site metadata query |
 | `GET /grants/:id/messages/:siteId/:messageId/verify` | requester | Verify against that site's bucket |
+| `GET /grants/:id/attachments/:siteId/:fileId` | requester | Stream an archived attachment (§5) |
 | `GET /ops` | approver | Operation log, filterable |
 | `GET /ops/verify` | approver | Walk the hash chain |
 | `GET /sites` | any role | Sites the plane is connected to and whether each answered its last health probe |
@@ -347,7 +347,8 @@ and archive Elasticsearch cluster.
 
 ### Sources
 
-Two durable pull consumers in one process, each guarded by `pkg/loopguard`:
+Three durable pull consumers in one process, each guarded by `pkg/loopguard`. The first
+two feed the segment batches; the third is the attachment lane described below.
 
 - **MESSAGES-CANONICAL**, filter on the per-message event subjects: created, updated,
   deleted, pinned, unpinned, reacted. The canonical event carries the full plaintext
@@ -516,6 +517,16 @@ policy.
 | `roomId`, `roomSiteId`, `account`, `roomType`, `roomName` | keyword | `roomSiteId` is the site that archives the room's messages, which for a remote room differs from the index's site; `account` empty on `room_renamed` |
 | `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | |
 
+**`audit-blobs-{site}`**, one document per attachment, id `{site}-{fileId}`:
+
+| Field | ES type | Notes |
+|---|---|---|
+| `fileId`, `messageId`, `roomId`, `siteId` | keyword | |
+| `fileName`, `contentType`, `sizeBytes` | keyword, keyword, long | From the attachment metadata |
+| `blobKey`, `plainSha256`, `chunkBytes` | keyword, keyword, integer | Empty when skipped |
+| `skipped` | keyword | Absent, `size`, or `missing` |
+| `archivedAt` | date | |
+
 **`audit-keys-{site}`**, exactly one document, id `current`, written once with
 `op_type: create` and never again:
 
@@ -529,6 +540,35 @@ policy.
 are immutable, stripping it is done by the lifecycle policy reindexing the day into a
 body-less index and swapping the alias, not by updating documents. Older messages are
 read from the segment by ranged GET at the stored offset.
+
+### Attachment lane
+
+Attachments are blobs in the legacy Drive backend or the upload MinIO bucket, and the
+message carries only their metadata. The platform never deletes them today, but the
+audit plane does not control them, so the archive takes its own copy.
+
+The third consumer on MESSAGES-CANONICAL filters to `created` events and ignores any
+without attachments. It runs on its own durable with `CONSUMER_ACK_WAIT` sized for
+large downloads (`ARCHIVE_BLOB_ACK_WAIT`, default 10m), the outage retry budget, and
+`jsretry.Heartbeat` to hold the deadline open during a slow transfer, since this lane,
+unlike the segment lane, does honest long work per message. Per attachment it:
+
+1. Skips the blob when its declared size exceeds `ARCHIVE_BLOB_MAX_BYTES` (default the
+   upload cap, 100 MiB) and records a metadata-only document with `skipped: size`.
+2. Downloads the blob the way `upload-service` does: `pkg/drive` with the site's Drive
+   credential for Drive-hosted files, the S3 client for MinIO-hosted ones.
+3. Streams it through chunked AES-GCM with the site's archive DEK, 4 MiB chunks, a
+   fresh nonce per chunk, and the chunk index and file id as authenticated data, while
+   computing the plaintext SHA-256.
+4. PUTs the result once to `{site}/blobs/{fileId}` in the archive bucket, under the
+   bucket's Object Lock rule.
+5. Creates one `audit-blobs-{site}` document (below) with `op_type: create`. A
+   redelivery conflicts on the id and is done. Acks the message.
+
+A download that fails after the in-process attempts NAKs through `jsretry`; a blob that
+no longer exists at the source is recorded as `skipped: missing` and acked, since
+retrying cannot bring it back. Blobs are archived once per file id even when the same
+file is referenced by several messages.
 
 ### Cross-cluster search
 
@@ -584,6 +624,17 @@ and folded the same way, and returns the same page shape with the site on every 
 "Deleted" and "edited" filters are answered by the presence of a `deleted` or `updated`
 event for the message. There is no body filter.
 
+**Attachments** are listed on their message from the event's metadata. Opening one
+calls `GET /grants/:id/attachments/:siteId/:fileId`, which loads the `audit-blobs`
+document, checks that its message's room is in scope for the grant, logs
+`attachment.download` with the file id and size, fetches the blob from that site's
+bucket, decrypts it chunk by chunk with that site's DEK, verifies the plaintext hash
+before sending the last byte, and streams it with `Content-Disposition: attachment`
+and `no-store`. Images are additionally rendered inline in the console. A skipped blob
+returns its metadata and the reason, never a fetch from the live platform. This is the
+one read whose content leaves the audit plane onto the auditor's machine, which is why
+it is logged as a download rather than a read.
+
 **Verify** takes grant, site, and message ID, fetches the segment from that site's
 bucket with that site's read credential, decrypts the frame at the offset with that
 site's DEK, recomputes the record hash, and reports whether it matches `contentHash`.
@@ -601,7 +652,7 @@ Responses set `Cache-Control: no-store`.
 | `seq` | Monotonic sequence across the whole plane |
 | `prevHash`, `hash` | SHA-256 of the previous entry, and of this entry's canonical JSON including `prevHash` |
 | `actorSubject`, `actorAccount`, `actorRoles` | From the token |
-| `action` | `login`, `request.create`, `request.approve`, `request.deny`, `request.revoke`, `rooms.list`, `messages.read`, `messages.query`, `message.verify`, `ops.list`, `ops.verify`, `auth.denied`, each with a `.failed` variant |
+| `action` | `login`, `request.create`, `request.approve`, `request.deny`, `request.revoke`, `rooms.list`, `messages.read`, `messages.query`, `message.verify`, `attachment.download`, `ops.list`, `ops.verify`, `auth.denied`, each with a `.failed` variant |
 | `grantId`, `targetAccounts`, `siteId`, `roomId`, `messageIds` | Scope; `siteId` on every archive read; `messageIds` only on reads, capped at the page size |
 | `sitesAnswered`, `sitesSkipped` | For reads that fanned out |
 | `query` | Filter or cursor used, never message content |
@@ -641,8 +692,9 @@ given sequence and reports the first break.
   application-encrypted: its entries carry no bodies, and keeping them readable lets a
   reviewer walk the hash chain from the bucket alone, with no Vault and no running
   service.
-- **Credentials.** Worker: NATS user limited to its two consumers, its site's bucket
-  `PutObject` only, its site's Elasticsearch role with `create_doc` only on the three
+- **Credentials.** Worker: NATS user limited to its three consumers, its site's bucket
+  `PutObject` only, a read-only Drive API credential and a `GetObject`-only credential
+  on the upload MinIO bucket for the attachment lane, its site's Elasticsearch role with `create_doc` only on the three
   index patterns plus the template and lifecycle privileges `bootstrap.go` needs.
   Service:
   one `GetObject`-only credential per site's bucket, a read role on the hub, the audit
@@ -689,7 +741,9 @@ there is no body filter.
 `archive-worker`: the §4 batching table plus `NATS_URL`, `NATS_CREDS_FILE`, `SITE_ID`,
 `ARCHIVE_SEARCH_URL`, `ARCHIVE_SEARCH_USERNAME`, `ARCHIVE_SEARCH_PASSWORD`,
 `ARCHIVE_BUCKET`, `ARCHIVE_S3_*`, `VAULT_*`, `ATREST_VAULT_TRANSIT_KEY`,
-`ARCHIVE_INDEX_BODY_RETENTION`, `CONSUMER_*`, `BOOTSTRAP_STREAMS`, `MAX_WORKERS`.
+`ARCHIVE_INDEX_BODY_RETENTION`, `ARCHIVE_BLOB_MAX_BYTES`, `ARCHIVE_BLOB_ACK_WAIT`,
+`DRIVE_*` (as `upload-service`), `UPLOAD_S3_*` (read-only), `CONSUMER_*`,
+`BOOTSTRAP_STREAMS`, `MAX_WORKERS`.
 
 Both services follow the repo layout: `main.go`, `handler.go`, `routes.go` (service
 only), `store.go` with mockgen, `store_mongo.go` (service only), `store_search.go`,
@@ -705,7 +759,8 @@ Metrics: `audit_ops_total{action,outcome}`, `audit_ops_sink_backlog`,
 `archive_events_total{source,outcome}`, `archive_segments_total`,
 `archive_segment_bytes`, `archive_write_failures_total{store}`,
 `archive_lag_seconds` (event timestamp to ack), `archive_redeliveries_total`,
-`audit_decrypt_failures_total{site}`.
+`audit_decrypt_failures_total{site}`, `archive_blobs_total{outcome}`,
+`archive_blob_bytes_total`, `archive_blob_lag_seconds`.
 
 The alerting relationship to state in the runbook: a steady non-zero
 `archive_redeliveries_total` with no pod restarts means batches are exceeding the ack
@@ -734,6 +789,11 @@ one registered on the other as a remote, and asserts a cross-site room read and 
 skipped-site response when the remote is stopped. OIDC is validated against a test
 issuer with group claims.
 
+The attachment lane test seeds a blob in MinIO, publishes a create event referencing
+it, and asserts one encrypted object, one `audit-blobs` document, a matching hash on
+download through the service, and a `skipped: missing` document when the source blob
+is removed before the event arrives.
+
 Coverage floor 80%, target 90% on handlers and stores, per the repo rule.
 
 ## 12. Rollout
@@ -753,7 +813,6 @@ Coverage floor 80%, target 90% on handlers and stores, per the repo rule.
 
 - Export bundles on the same grant model.
 - Plaintext full-text search, gated by its own sign-off and a reindex tool.
-- Attachment blob retrieval through `media-service` under the same grant check.
 - Backfill of pre-rollout history from Cassandra.
 - Legal hold on live deletes.
 - A write-ahead-log variant of the worker that acks per message, if the NATS team
@@ -779,6 +838,9 @@ Coverage floor 80%, target 90% on handlers and stores, per the repo rule.
 - **Partial results are silent unless shown.** `skip_unavailable` returns what answered.
   The `sitesSkipped` field, the console indicator, and the metric exist so an auditor
   never mistakes a site outage for "nothing there".
+- **Attachment storage doubles.** Every attachment up to the cap is stored once more,
+  encrypted, for the archive retention. Size the archive bucket against the upload
+  bucket's growth. Skipped blobs are visible in the index and the console.
 - **Object counts.** About 3 million segments a year per site at the default batching.
   Within MinIO's comfortable range for objects of this size; the fill interval is the
   knob if that changes.
