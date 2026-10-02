@@ -172,37 +172,37 @@ sequenceDiagram
     S->>H: search *:audit-members-* for targets (existence check)
     H->>EA: fan out
     H->>EB: fan out
-    S->>M: insert audit_requests {pending}
-    S->>M: append audit_ops request.create (prevHash, hash)
+    S->>M: one transaction: insert audit_requests {pending} + append audit_ops request.create (prevHash, hash)
     S->>K: PUT ops entry
     S-->>FE: 201 pending
 
     Apr->>FE: open approvals queue
     FE->>S: POST /requests/:id/approve (narrowed range, 3 d) [bearer]
     S->>S: check approver sub differs from requester sub and neither username is a target
-    S->>M: update audit_requests {approved, validUntil}
-    S->>M: append audit_ops request.approve
+    S->>M: one transaction: update audit_requests {approved, validUntil} + append audit_ops request.approve
     S->>K: PUT ops entry
     S-->>FE: 200 approved
 
     Req->>FE: open rooms for grant
     FE->>S: GET /grants/:id/rooms
     S->>M: load grant, check approved and not expired, caller is requester
-    S->>M: append audit_ops rooms.list
+    S->>M: append audit_ops rooms.list (phase intent)
     S->>K: PUT ops entry
     S->>H: search *:audit-members-* for targets
     H->>EA: fan out
     H->>EB: fan out
-    EA-->>H: memberships (site A rooms)
-    EB-->>H: memberships (site B rooms)
+    EA-->>H: member events (site A rooms)
+    EB-->>H: member events (site B rooms)
     H-->>S: merged hits + _clusters {answered: A, B}
+    S->>M: append audit_ops rooms.list (phase outcome, sitesAnswered A and B)
+    S->>K: PUT ops entry
     S-->>FE: rooms with intervals, sitesAnswered [A, B]
 
     Req->>FE: read room apac-sales (archived at site B)
     FE->>S: GET /grants/:id/rooms/B/{roomId}/messages
     S->>M: load grant, re-check status and requester
     S->>S: room in scope? (a target's interval overlaps the range)
-    S->>M: append audit_ops messages.read {siteId B, roomId}
+    S->>M: append audit_ops messages.read (phase intent, siteId B, roomId, cursor)
     S->>K: PUT ops entry
     S->>H: search B:audit-events-* (room, clamped range, search-after, collapse on messageId)
     H->>EB: forward
@@ -216,15 +216,19 @@ sequenceDiagram
         V-->>S: plaintext DEK (cached in process)
     end
     S->>S: fold events per message, decrypt encBody in memory
+    S->>M: append audit_ops messages.read (phase outcome, messageIds served)
+    S->>K: PUT ops entry
     S-->>FE: page of messages, sitesAnswered [B], Cache-Control: no-store
 
     Req->>FE: verify one message
     FE->>S: GET /grants/:id/messages/B/{messageId}/verify
-    S->>M: append audit_ops message.verify
+    S->>M: append audit_ops message.verify (phase intent)
     S->>K: PUT ops entry
     S->>BB: GET segmentKey (range at frameOffset)
     BB-->>S: encrypted frame
     S->>S: decrypt frame with site B DEK, recompute SHA-256, compare with contentHash
+    S->>M: append audit_ops message.verify (phase outcome, match)
+    S->>K: PUT ops entry
     S-->>FE: match / mismatch
 ```
 
@@ -585,9 +589,9 @@ archive cluster on the hub under `site-local` so the code path is the same in de
 ## 5. Read path
 
 Every read follows the same order: validate token and role, load the grant and check
-status, expiry, and that the caller is its requester, check scope, append the
-operation entry and confirm it is durable (§6), then query and decrypt. A failure after
-the log entry writes a second entry with a `.failed` action. Every response that
+status, expiry, and that the caller is its requester, check scope, append the intent
+entry and confirm it is durable (§6), then query and decrypt, then append the outcome
+entry. Nothing is served before the intent entry is acknowledged. Every response that
 touched the archive carries `sitesAnswered` and `sitesSkipped`, and the console shows
 them.
 
@@ -652,19 +656,49 @@ Responses set `Cache-Control: no-store`.
 | `seq` | Monotonic sequence across the whole plane |
 | `prevHash`, `hash` | SHA-256 of the previous entry, and of this entry's canonical JSON including `prevHash` |
 | `actorSubject`, `actorAccount`, `actorRoles` | From the token |
-| `action` | `login`, `request.create`, `request.approve`, `request.deny`, `request.revoke`, `rooms.list`, `messages.read`, `messages.query`, `message.verify`, `attachment.download`, `ops.list`, `ops.verify`, `auth.denied`, each with a `.failed` variant |
-| `grantId`, `targetAccounts`, `siteId`, `roomId`, `messageIds` | Scope; `siteId` on every archive read; `messageIds` only on reads, capped at the page size |
-| `sitesAnswered`, `sitesSkipped` | For reads that fanned out |
-| `query` | Filter or cursor used, never message content |
+| `action` | `login`, `auth.denied`, `request.create`, `request.approve`, `request.deny`, `request.revoke`, `rooms.list`, `messages.read`, `messages.query`, `message.verify`, `attachment.download`, `ops.list`, `ops.verify` |
+| `phase` | `intent` or `outcome` for reads; absent for mutations and authentication events |
+| `outcome` | On outcome entries: `ok` or `failed`, with an error class on failure |
+| `intentSeq` | On outcome entries: the `seq` of the matching intent entry |
+| `grantId`, `targetAccounts`, `siteId`, `roomId` | Scope; `siteId` on every archive read |
+| `messageIds`, `fileId`, `bytes` | On outcome entries only: what was served, `messageIds` capped at the page size |
+| `sitesAnswered`, `sitesSkipped` | On outcome entries of reads that fanned out |
+| `query` | On intent entries: the filter or cursor used, never message content |
 | `requestId`, `clientIp`, `userAgent`, `timestamp` | Context |
+
+### When entries are written
+
+The rule: no operation is performed unless its record is already durable, and no
+record claims an outcome the operation did not have. Entries are written synchronously
+on the request path with majority write concern, never buffered or batched. If the
+insert fails the operation is refused with `AuditLogUnavailable`.
+
+- **Mutations** (`request.*`): the `audit_requests` update and the `audit_ops` insert
+  run in one MongoDB transaction on the audit replica set, so neither exists without
+  the other.
+- **Reads** (`rooms.list`, `messages.*`, `message.verify`, `attachment.download`,
+  `ops.*`): two entries. The intent entry, carrying grant, scope, and the exact query or
+  cursor, is acknowledged before the archive is touched. The outcome entry, carrying
+  what was served or the failure, is written after. A crash between them leaves an
+  intent with no outcome, which the log makes visible rather than hiding. Writing the
+  record first means a failure can over-report a read, never under-report one.
+- **Authentication events** (`login`, `auth.denied`): one entry, acknowledged before
+  the response is sent.
+
+### Chain and sink
 
 One serialized appender per process holds the last hash in memory and reloads it on
 start. Two replicas would fork the chain, so `audit-service` runs as exactly one
-replica. The insert uses majority write concern. After it is acknowledged the same
-entry is uploaded to the sink at `{yyyy-mm-dd}/{seq}.json`. If the insert fails the
-operation is refused with `AuditLogUnavailable`. If the sink upload fails the operation
-proceeds, the entry is queued for retry, and `audit_ops_sink_backlog` turns readiness
-red until it drains, so a sink outage is visible but does not stop an investigation.
+replica. After an insert is acknowledged the same entry is uploaded to the sink at
+`{yyyy-mm-dd}/{seq}.json`. If the sink upload fails the operation proceeds, the entry
+is queued for retry, and `audit_ops_sink_backlog` turns readiness red until it drains,
+so a sink outage is visible but does not stop an investigation.
+
+The service's MongoDB user holds `insert` and `find` on `audit_ops` and
+`audit_chain_checkpoints` and nothing else, so the appender cannot update or delete an
+entry even by bug; `audit_requests` is granted separately with `update` for state
+transitions. This is the same append-only-by-privilege rule the index gets from
+`create_doc`.
 
 `audit_chain_checkpoints` stores `{seq, hash, at}` every `AUDIT_CHECKPOINT_EVERY`
 (default 1000) entries. `GET /ops/verify` walks from the latest checkpoint before a
@@ -832,7 +866,11 @@ Coverage floor 80%, target 90% on handlers and stores, per the repo rule.
   can still alter it. That is acceptable because the index is derived and the bucket is
   the record. The two are compared on Verify.
 - **The archive index holds ciphertext for 180 days** and metadata forever. Metadata
-  alone reveals who talked to whom and when; the cluster's isolation is the control.
+  alone reveals who talked to whom and when, and it is plaintext in the index, in the
+  cluster's own snapshots, and in the memberships fold alike. The control for all three
+  is the archive cluster's isolation and read credentials, plus server-side encryption
+  on the snapshot repository; snapshots need no further encryption because bodies are
+  already ciphertext.
 - **The archive DEK is one key per site.** Compromise of the audit Vault role exposes
   every site's archive. Rotation follows the same re-wrap procedure as `chat-kek`.
 - **Partial results are silent unless shown.** `skip_unavailable` returns what answered.
