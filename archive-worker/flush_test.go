@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -189,6 +192,57 @@ func TestFlush(t *testing.T) {
 		assert.False(t, m.naked, "one rejected document is permanent for the message")
 		assert.True(t, m.acked || m.termed)
 	})
+	t.Run("a multi-doc item settles on its worst outcome whatever the doc order", func(t *testing.T) {
+		busy := searchengine.BulkResult{Status: 429, ErrorType: "es_rejected_execution_exception"}
+		bad := searchengine.BulkResult{Status: 400, ErrorType: "mapper_parsing_exception"}
+		boom := searchengine.BulkResult{Status: 500, ErrorType: "internal"}
+		ok := searchengine.BulkResult{Status: 201}
+		tests := []struct {
+			name         string
+			results      []searchengine.BulkResult
+			nak          bool
+			backpressure bool
+		}{
+			{"permanent then backpressure", []searchengine.BulkResult{bad, busy}, true, true},
+			{"backpressure then permanent", []searchengine.BulkResult{busy, bad}, true, true},
+			{"permanent then transient", []searchengine.BulkResult{bad, boom}, true, false},
+			{"transient then permanent", []searchengine.BulkResult{boom, bad}, true, false},
+			{"transient then backpressure", []searchengine.BulkResult{boom, busy}, true, true},
+			{"success then permanent", []searchengine.BulkResult{ok, bad}, false, false},
+			{"permanent only", []searchengine.BulkResult{bad, bad}, false, false},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				it := mkItem(50, 8)
+				it.msg = &fakeMsg{seq: 50}
+				it.docs = append(it.docs, docSpec{Index: "audit-events-site-a-2026.10.05", ID: "site-a-50-b", Doc: &auditarchive.EventDoc{Seq: 50}})
+				s, err := seal("site-a", "events", []item{it}, time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC))
+				require.NoError(t, err)
+				newFlusher(&fakeObjects{}, &fakeIndex{results: tc.results}, cfgFast(), &metrics{}).flush(ctx, s)
+				m := it.msg.(*fakeMsg)
+				assert.Equal(t, tc.nak, m.naked)
+				assert.Equal(t, !tc.nak, m.acked || m.termed)
+				if tc.nak {
+					if tc.backpressure {
+						assert.GreaterOrEqual(t, m.nakDelay, jsretry.BackpressureBackoff[0]/2)
+					} else {
+						assert.LessOrEqual(t, m.nakDelay, jsretry.DefaultBackoff[0])
+					}
+				}
+			})
+		}
+	})
+	t.Run("an Ack-dropped document is logged once with disposition=drop", func(t *testing.T) {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+		idx := &fakeIndex{results: []searchengine.BulkResult{{Status: 400, ErrorType: "mapper_parsing_exception"}}}
+		s := sealedWith(t, 60)
+		newFlusher(&fakeObjects{}, idx, cfgFast(), &metrics{}).flush(ctx, s)
+		assert.Equal(t, 1, strings.Count(buf.String(), `"disposition":"drop"`))
+		assert.Contains(t, buf.String(), `"seq":60`)
+	})
 	t.Run("cancelled context stops the retry wait", func(t *testing.T) {
 		obj, idx := &fakeObjects{failFirst: 5}, &fakeIndex{}
 		cfg := cfgFast()
@@ -200,6 +254,14 @@ func TestFlush(t *testing.T) {
 		assert.True(t, s.items[0].msg.(*fakeMsg).naked)
 		assert.Equal(t, 0, idx.calls)
 	})
+}
+
+func TestNewFlusher_ClampsAttempts(t *testing.T) {
+	obj, idx := &fakeObjects{}, &fakeIndex{}
+	s := sealedWith(t, 70)
+	newFlusher(obj, idx, flushConfig{putTimeout: time.Second, bulkTimeout: time.Second}, &metrics{}).flush(context.Background(), s)
+	assert.Len(t, obj.puts, 1, "zero attempts still tries once")
+	assert.True(t, s.items[0].msg.(*fakeMsg).acked)
 }
 
 func TestNewFlusher_DefaultsRetryWait(t *testing.T) {

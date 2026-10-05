@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -32,6 +33,7 @@ type flusher struct {
 }
 
 func newFlusher(objects objectStore, index indexStore, cfg flushConfig, m *metrics) *flusher {
+	cfg.attempts = max(cfg.attempts, 1) // zero attempts would never run fn and NAK every batch forever
 	if cfg.retryWait == nil {
 		cfg.retryWait = defaultRetryWait
 	}
@@ -98,30 +100,48 @@ func (f *flusher) flush(ctx context.Context, s *sealed) {
 
 	pos := 0
 	for _, it := range s.items {
-		var itemErr error
-		backoff := jsretry.DefaultBackoff
-		for range it.docs {
-			r := results[pos]
-			pos++
-			if itemErr != nil || searchengine.IsBulkItemSuccess(searchengine.ActionCreate, r) {
-				continue
-			}
-			switch {
-			case searchengine.IsBulkItemPermanent(r):
-				itemErr = errcode.Permanent(errcode.BadRequest(fmt.Sprintf("archive index rejected the document: status %d %s", r.Status, r.ErrorType)))
-			case searchengine.IsBulkItemBackpressure(r):
-				itemErr, backoff = fmt.Errorf("archive index backpressure: status %d %s", r.Status, r.ErrorType), jsretry.BackpressureBackoff
-			default:
-				itemErr = fmt.Errorf("archive index item failed: status %d %s", r.Status, r.ErrorType)
-			}
-			slog.ErrorContext(it.ctx, "archive index item failed", "seq", it.seq, "status", r.Status, "errorType", r.ErrorType)
-		}
+		backoff, itemErr := f.settleOutcome(it, results[pos:pos+len(it.docs)])
+		pos += len(it.docs)
 		if itemErr == nil {
 			f.metrics.events("archived", 1)
 		} else {
 			f.metrics.events("failed", 1)
 		}
+		if _, permanent := errcode.IsPermanent(itemErr); permanent {
+			slog.WarnContext(it.ctx, "archive index rejected the document permanently", "seq", it.seq, "disposition", "drop", "error", itemErr)
+		}
 		jsretry.SettleQuiet(it.ctx, it.msg, backoff, itemErr)
+	}
+}
+
+// settleOutcome folds every document result of one item into a single
+// disposition, worst first: backpressure (retry slowly) over any other
+// transient failure over a permanent rejection over success. A permanent
+// rejection of one document must not drop its siblings that only need a retry,
+// since the segment already holds the frame and a redelivery conflicts safely.
+func (f *flusher) settleOutcome(it item, results []searchengine.BulkResult) ([]time.Duration, error) { //nolint:gocritic // hugeParam: item is moved, not mutated
+	var perm, transient, pressure error
+	for i, r := range results {
+		if searchengine.IsBulkItemSuccess(searchengine.ActionCreate, r) {
+			continue
+		}
+		slog.ErrorContext(it.ctx, "archive index item failed", "seq", it.seq, "docID", it.docs[i].ID, "status", r.Status, "errorType", r.ErrorType)
+		switch {
+		case searchengine.IsBulkItemBackpressure(r):
+			pressure = cmp.Or(pressure, fmt.Errorf("archive index backpressure: status %d %s", r.Status, r.ErrorType))
+		case searchengine.IsBulkItemPermanent(r):
+			perm = cmp.Or[error](perm, errcode.Permanent(errcode.BadRequest(fmt.Sprintf("archive index rejected the document: status %d %s", r.Status, r.ErrorType))))
+		default:
+			transient = cmp.Or(transient, fmt.Errorf("archive index item failed: status %d %s", r.Status, r.ErrorType))
+		}
+	}
+	switch {
+	case pressure != nil:
+		return jsretry.BackpressureBackoff, pressure
+	case transient != nil:
+		return jsretry.DefaultBackoff, transient
+	default:
+		return jsretry.DefaultBackoff, perm
 	}
 }
 

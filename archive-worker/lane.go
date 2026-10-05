@@ -9,11 +9,13 @@ import (
 	"time"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/auditarchive"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/loopguard"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
@@ -35,6 +37,10 @@ type msgFetcher interface {
 // msgBatch yields already-unwrapped messages for one Fetch.
 type msgBatch interface {
 	Messages() <-chan o11ynats.FetchedMessage
+	// Error is the batch's terminal error, valid once Messages has closed.
+	// nats.go reports a deleted consumer, a bad request, no responders and a
+	// missing heartbeat here rather than from Fetch.
+	Error() error
 }
 
 // rawConsumerAdapter wraps a raw jetstream.Consumer; each delivered message
@@ -53,6 +59,8 @@ type rawBatch struct {
 	b   jetstream.MessageBatch
 	ctx context.Context
 }
+
+func (r rawBatch) Error() error { return r.b.Error() }
 
 func (r rawBatch) Messages() <-chan o11ynats.FetchedMessage {
 	out := make(chan o11ynats.FetchedMessage)
@@ -96,6 +104,7 @@ type lane struct {
 	flusher    *flusher
 	guard      *loopguard.Guard
 	fetchRetry time.Duration
+	newTimer   func(time.Duration) *time.Timer // swapped in tests to observe the pause
 	inFlight   sync.WaitGroup
 	slot       chan struct{} // one background flush at a time
 }
@@ -103,14 +112,21 @@ type lane struct {
 func newLane(cfg laneConfig, fetcher msgFetcher, build builder, cipher *auditarchive.Cipher, b *batcher, f *flusher, guard *loopguard.Guard) *lane {
 	return &lane{
 		cfg: cfg, fetcher: fetcher, build: build, cipher: cipher, batcher: b, flusher: f, guard: guard,
-		fetchRetry: defaultFetchRetry, slot: make(chan struct{}, 1),
+		fetchRetry: defaultFetchRetry, newTimer: time.NewTimer, slot: make(chan struct{}, 1),
 	}
 }
 
 // terminalFetchErr reports errors no further Fetch can recover from; anything
 // else (timeouts, a missing heartbeat, a dropped connection) is retried.
 func terminalFetchErr(err error) bool {
-	return errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDeleted) || errors.Is(err, jetstream.ErrStreamNotFound)
+	return errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDeleted) ||
+		errors.Is(err, jetstream.ErrStreamNotFound) || errors.Is(err, jetstream.ErrBadRequest)
+}
+
+// benignBatchErr reports batch errors that just mean "nothing arrived this
+// round"; the next Fetch resumes on an intact consumer.
+func benignBatchErr(err error) bool {
+	return err == nil || errors.Is(err, nats.ErrTimeout) || errors.Is(err, jetstream.ErrNoMessages) || natsmetrics.Recoverable(err)
 }
 
 // run is the consume loop: fetch up to fetchBatch, build each message (poison
@@ -144,37 +160,46 @@ func (l *lane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<- st
 		default:
 		}
 		batch, err := l.fetcher.Fetch(ctx, l.cfg.fetchBatch, jetstream.FetchMaxWait(fetchWait))
-		if err != nil {
-			select {
-			case <-stopCh:
-				drain()
-				return
-			case <-ctx.Done():
-				drain()
-				return
-			default:
+		if err == nil {
+			for fm := range batch.Messages() {
+				l.handle(fm.Ctx, flushCtx, fm.Msg)
 			}
-			if terminalFetchErr(err) {
-				drain()
-				l.guard.Stopped(err)
-				return
+			// Only the batch's own error can be benign: a Fetch call that
+			// itself fails always takes the pause below.
+			if err = batch.Error(); benignBatchErr(err) {
+				l.flushIfDue(flushCtx)
+				continue
 			}
-			slog.WarnContext(ctx, "fetch failed, retrying", "lane", l.cfg.name, "error", err)
-			l.flushIfDue(flushCtx)
-			retry := time.NewTimer(l.fetchRetry)
-			select {
-			case <-retry.C:
-			case <-stopCh:
-				retry.Stop()
-			case <-ctx.Done():
-				retry.Stop()
-			}
-			continue
 		}
-		for fm := range batch.Messages() {
-			l.handle(fm.Ctx, flushCtx, fm.Msg)
+		select {
+		case <-stopCh:
+			drain()
+			return
+		case <-ctx.Done():
+			drain()
+			return
+		default:
 		}
+		if terminalFetchErr(err) {
+			drain()
+			l.guard.Stopped(err)
+			return
+		}
+		slog.WarnContext(ctx, "fetch failed, retrying", "lane", l.cfg.name, "error", err)
 		l.flushIfDue(flushCtx)
+		l.pause(ctx, stopCh)
+	}
+}
+
+// pause waits fetchRetry, or less if the lane is told to stop, so a consumer
+// that fails instantly cannot turn the loop into a hot spin.
+func (l *lane) pause(ctx context.Context, stopCh <-chan struct{}) {
+	t := l.newTimer(l.fetchRetry)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-stopCh:
+	case <-ctx.Done():
 	}
 }
 

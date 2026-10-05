@@ -26,6 +26,10 @@ type scriptedFetcher struct {
 	i       int
 	idle    sync.Once
 	idleCh  chan struct{}
+	// firstErr is the Error() of the first scripted batch, reported after its
+	// message channel closes the way nats.go reports a failed pull.
+	firstErr error
+	calls    atomic.Int32
 }
 
 // scripted builds a fetcher over batches; its idle channel closes on the first
@@ -33,6 +37,12 @@ type scriptedFetcher struct {
 // every scripted message and is back at the top of its loop.
 func scripted(batches ...[]jetstream.Msg) *scriptedFetcher {
 	return &scriptedFetcher{batches: batches, idleCh: make(chan struct{})}
+}
+
+func scriptedErr(err error, batches ...[]jetstream.Msg) *scriptedFetcher {
+	f := scripted(batches...)
+	f.firstErr = err
+	return f
 }
 
 func (f *scriptedFetcher) waitIdle(t *testing.T) {
@@ -44,7 +54,12 @@ func (f *scriptedFetcher) waitIdle(t *testing.T) {
 	}
 }
 
-type sliceBatch struct{ msgs []jetstream.Msg }
+type sliceBatch struct {
+	msgs []jetstream.Msg
+	err  error
+}
+
+func (b sliceBatch) Error() error { return b.err }
 
 func (b sliceBatch) Messages() <-chan o11ynats.FetchedMessage {
 	ch := make(chan o11ynats.FetchedMessage, len(b.msgs))
@@ -59,9 +74,13 @@ func (b sliceBatch) Messages() <-chan o11ynats.FetchedMessage {
 // Once the script is spent it behaves like an idle consumer: an empty batch
 // after a short wait, or the context error once the lane is cancelled.
 func (f *scriptedFetcher) Fetch(ctx context.Context, _ int, _ ...jetstream.FetchOpt) (msgBatch, error) {
+	f.calls.Add(1)
 	if f.i < len(f.batches) {
 		b := f.batches[f.i]
 		f.i++
+		if f.i == 1 {
+			return sliceBatch{msgs: b, err: f.firstErr}, nil
+		}
 		return sliceBatch{msgs: b}, nil
 	}
 	f.idle.Do(func() { close(f.idleCh) })
@@ -289,6 +308,80 @@ func TestLane_TerminalFetchErrorStopsGuard(t *testing.T) {
 	}
 }
 
+func TestLane_TerminalBatchError(t *testing.T) {
+	for _, terr := range []error{jetstream.ErrConsumerDeleted, jetstream.ErrBadRequest, jetstream.ErrConsumerNotFound} {
+		t.Run(terr.Error(), func(t *testing.T) {
+			events := loadEvents(t)
+			only := eventMsg(t, 1, events["created"])
+			obj := &fakeObjects{}
+			fired := make(chan struct{}, 1)
+			guard := loopguard.New("test-lane", func() { fired <- struct{}{} })
+			sf := scriptedErr(terr, []jetstream.Msg{only})
+			l := newLane(laneCfg(), sf, buildEventItem, testCipher(t), newBatcher(100, 1<<20, time.Hour),
+				newFlusher(obj, &fakeIndex{}, cfgFast(), &metrics{}), guard)
+			done := make(chan struct{})
+			go l.run(context.Background(), make(chan struct{}), done)
+			<-done
+			assert.Equal(t, int32(1), sf.calls.Load(), "the loop stops instead of re-fetching a dead consumer")
+			assert.Equal(t, 1, obj.putCount(), "messages delivered with the failing batch are archived first")
+			assert.True(t, only.acked)
+			assert.ErrorIs(t, guard.Check().Probe(context.Background()), terr)
+			select {
+			case <-fired:
+			default:
+				t.Error("unexpected-stop hook did not run")
+			}
+		})
+	}
+}
+
+func TestLane_BenignBatchErrorKeepsRunning(t *testing.T) {
+	for _, berr := range []error{nats.ErrTimeout, jetstream.ErrNoMessages, jetstream.ErrNoHeartbeat} {
+		t.Run(berr.Error(), func(t *testing.T) {
+			events := loadEvents(t)
+			only := eventMsg(t, 1, events["created"])
+			obj := &fakeObjects{}
+			guard := loopguard.New("test-lane", func() {})
+			sf := scriptedErr(berr, []jetstream.Msg{only})
+			l := newLane(laneCfg(), sf, buildEventItem, testCipher(t), newBatcher(1, 1<<20, time.Hour),
+				newFlusher(obj, &fakeIndex{}, cfgFast(), &metrics{}), guard)
+			stop, done := make(chan struct{}), make(chan struct{})
+			go l.run(context.Background(), stop, done)
+			sf.waitIdle(t) // the lane fetched again after the errored batch
+			close(stop)
+			<-done
+			assert.True(t, only.acked)
+			assert.NoError(t, guard.Check().Probe(context.Background()))
+		})
+	}
+}
+
+func TestLane_UnknownBatchErrorPausesBeforeRefetch(t *testing.T) {
+	sf := scriptedErr(nats.ErrNoResponders, []jetstream.Msg{})
+	guard := loopguard.New("test-lane", func() {})
+	l := newLane(laneCfg(), sf, buildEventItem, testCipher(t), newBatcher(100, 1<<20, time.Hour),
+		newFlusher(&fakeObjects{}, &fakeIndex{}, cfgFast(), &metrics{}), guard)
+	l.fetchRetry = time.Hour
+	paused := make(chan time.Duration, 1)
+	l.newTimer = func(d time.Duration) *time.Timer {
+		paused <- d
+		return time.NewTimer(time.Hour)
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+	select {
+	case d := <-paused:
+		assert.Equal(t, time.Hour, d, "pause uses fetchRetry")
+	case <-time.After(2 * time.Second):
+		t.Fatal("lane did not pause after a batch error")
+	}
+	assert.Equal(t, int32(1), sf.calls.Load(), "no re-fetch while paused")
+	close(stop)
+	<-done
+	assert.Equal(t, int32(1), sf.calls.Load())
+	assert.NoError(t, guard.Check().Probe(context.Background()), "no responders is retried, not a loop death")
+}
+
 func TestLane_TerminalFetchErrorDrainsBuffered(t *testing.T) {
 	events := loadEvents(t)
 	only := eventMsg(t, 1, events["created"])
@@ -335,7 +428,10 @@ func TestLane_ContextCancelEndsLoop(t *testing.T) {
 	assert.NoError(t, guard.Check().Probe(context.Background()))
 }
 
-type fakeO11yBatch struct{ msgs []o11ynats.FetchedMessage }
+type fakeO11yBatch struct {
+	msgs []o11ynats.FetchedMessage
+	err  error
+}
 
 func (f fakeO11yBatch) Messages() <-chan o11ynats.FetchedMessage {
 	ch := make(chan o11ynats.FetchedMessage, len(f.msgs))
@@ -345,7 +441,7 @@ func (f fakeO11yBatch) Messages() <-chan o11ynats.FetchedMessage {
 	close(ch)
 	return ch
 }
-func (f fakeO11yBatch) Error() error { return nil }
+func (f fakeO11yBatch) Error() error { return f.err }
 func (f fakeO11yBatch) Stop()        {}
 
 type fakeO11yConsumer struct {
@@ -358,7 +454,10 @@ func (f fakeO11yConsumer) Fetch(context.Context, int, ...jetstream.FetchOpt) (o1
 	return f.batch, f.err
 }
 
-type fakeRawBatch struct{ msgs []jetstream.Msg }
+type fakeRawBatch struct {
+	msgs []jetstream.Msg
+	err  error
+}
 
 func (f fakeRawBatch) Messages() <-chan jetstream.Msg {
 	ch := make(chan jetstream.Msg, len(f.msgs))
@@ -368,7 +467,7 @@ func (f fakeRawBatch) Messages() <-chan jetstream.Msg {
 	close(ch)
 	return ch
 }
-func (f fakeRawBatch) Error() error { return nil }
+func (f fakeRawBatch) Error() error { return f.err }
 
 type fakeRawConsumer struct {
 	jetstream.Consumer
@@ -404,6 +503,16 @@ func TestConsumerAdapters(t *testing.T) {
 		b, err := a.Fetch(ctx, 10)
 		require.NoError(t, err)
 		assert.Equal(t, []o11ynats.FetchedMessage{{Ctx: ctx, Msg: m1}, {Ctx: ctx, Msg: m2}}, drain(b))
+	})
+	t.Run("both adapters forward the batch error", func(t *testing.T) {
+		b, err := o11yConsumerAdapter{c: fakeO11yConsumer{batch: fakeO11yBatch{err: jetstream.ErrConsumerDeleted}}}.Fetch(ctx, 10)
+		require.NoError(t, err)
+		drain(b)
+		assert.ErrorIs(t, b.Error(), jetstream.ErrConsumerDeleted)
+		b, err = rawConsumerAdapter{c: fakeRawConsumer{batch: fakeRawBatch{err: jetstream.ErrBadRequest}}}.Fetch(ctx, 10)
+		require.NoError(t, err)
+		drain(b)
+		assert.ErrorIs(t, b.Error(), jetstream.ErrBadRequest)
 	})
 	t.Run("wrapped fetch errors still classify as terminal", func(t *testing.T) {
 		_, err := o11yConsumerAdapter{c: fakeO11yConsumer{err: jetstream.ErrConsumerNotFound}}.Fetch(ctx, 10)
