@@ -222,7 +222,7 @@ endif
 # Start third-party deps (NATS, Mongo, Cassandra, ES, Keycloak, Vault, MinIO)
 # in the background. Runs setup.sh on first use. Blocks until every dep's
 # healthcheck passes, then runs the init one-shots (cassandra schema, vault
-# transit key).
+# transit keys, locked archive buckets).
 deps-up:
 	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(NATS_CONF) ] || [ ! -f $(ENV_FILE) ]; then \
 	  echo "First-time setup: generating nats.conf + backend.creds + .env..."; \
@@ -231,6 +231,7 @@ deps-up:
 	docker compose -f $(DEPS_COMPOSE) up -d --wait
 	docker compose -f $(DEPS_COMPOSE) --profile init run --rm cassandra-init
 	docker compose -f $(DEPS_COMPOSE) --profile init run --rm vault-init
+	docker compose -f $(DEPS_COMPOSE) --profile init run --rm minio-init
 
 # Stop third-party deps.
 deps-down:
@@ -315,6 +316,7 @@ fed-deps-up:
 	KEYSPACE=chat docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm cassandra-init
 	KEYSPACE=chat_remote docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm cassandra-init
 	docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm vault-init
+	docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm minio-init
 
 # Force a full regeneration of the per-site NATS confs and env files, then
 # recreate the containers. Needed because `fed-deps-up` only runs setup.sh when

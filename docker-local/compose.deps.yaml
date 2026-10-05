@@ -346,6 +346,34 @@ services:
         set -e
         vault secrets enable -path=transit transit || true
         vault write -f transit/keys/chat-kek
+        vault write -f transit/keys/chat-audit-kek
+    networks:
+      - chat-local
+
+  # One-shot archive buckets for archive-worker, which refuses to start on a
+  # bucket without a COMPLIANCE default retention (ARCHIVE_REQUIRE_OBJECT_LOCK).
+  # Object Lock can only be enabled at bucket creation; --with-lock also turns
+  # versioning on. Names track the worker's ARCHIVE_BUCKET default,
+  # archive-<SITE_ID>. pgsty/minio ships mc (a symlink to mcli).
+  minio-init:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: chat-local-minio-init
+    profiles: ["init"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        for bucket in archive-site-local archive-site-remote; do
+          mc mb --with-lock --ignore-existing local/$$bucket
+          mc version enable local/$$bucket
+          mc retention set --default COMPLIANCE 1d local/$$bucket
+        done
     networks:
       - chat-local
 

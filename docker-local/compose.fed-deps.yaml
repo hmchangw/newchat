@@ -178,6 +178,11 @@ services:
     container_name: chat-fed-vault-init
     networks: [chat-site-remote]
 
+  minio-init:
+    extends: { file: ./compose.deps.yaml, service: minio-init }
+    container_name: chat-fed-minio-init
+    networks: [chat-site-remote]
+
 volumes:
   nats-site-local-data:
   nats-site-remote-data:

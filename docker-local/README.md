@@ -668,3 +668,18 @@ Reset the derivative cache and let services re-provision:
 ```sh
 docker compose -f docker-local/compose.deps.yaml --profile dek-reset run --rm vault-dek-reset
 ```
+
+## Audit archive
+
+`archive-worker` copies canonical message and membership events into a MinIO
+bucket and `audit-*` Elasticsearch indices. The init profile (`vault-init`,
+`minio-init`) also creates the Vault transit key `chat-audit-kek` and the
+Object-Lock buckets `archive-site-local` and `archive-site-remote`, each with
+versioning on and a 1-day COMPLIANCE default retention. Locked objects cannot
+be deleted for a day, so `docker compose down -v` is the way to reset the
+archive locally. Reset the Elasticsearch volume along with it: a Vault restart
+(or `down -v`) replaces `chat-audit-kek`, and the wrapped archive DEK kept in
+`audit-keys-<site>` can no longer be unwrapped.
+
+`minio-init` runs `mc` from the same `pgsty/minio` image as the server (it ships
+`mc`), so no separate client image is pulled.

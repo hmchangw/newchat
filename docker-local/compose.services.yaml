@@ -9,6 +9,7 @@ name: chat-local-services
 
 include:
   - ../admin-service/deploy/docker-compose.yml
+  - ../archive-worker/deploy/docker-compose.yml
   - ../auth-service/deploy/docker-compose.yml
   - ../botplatform-service/deploy/docker-compose.yml
   - ../broadcast-worker/deploy/user/docker-compose.yml
@@ -52,6 +53,7 @@ x-local-o11y: &local-o11y
 
 services:
   admin-service: *local-o11y
+  archive-worker: *local-o11y
   auth-service: *local-o11y
   botplatform-service: *local-o11y
   broadcast-worker: *local-o11y
