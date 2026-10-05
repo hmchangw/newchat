@@ -41,8 +41,10 @@ const (
 	// by refreshing explicitly) and slow CI.
 	segmentWait = 30 * time.Second
 	pollEvery   = 250 * time.Millisecond
-	// recoveryWait covers the jittered NAK schedule (1s, 5s, 30s) after the
-	// bucket heals: the next delivery can be up to ~30s out.
+	// recoveryWait covers the redelivery after the bucket heals. The server
+	// enforces BackOff[dc-1] as the redelivery deadline even on a NakWithDelay,
+	// so the dominant term is that offset (BackOff[1] - AckWait, about 30s)
+	// plus the jittered client delay (up to 5s), not the client schedule alone.
 	recoveryWait = 90 * time.Second
 )
 
@@ -84,6 +86,7 @@ func setupArchive(t *testing.T, eventTimes ...time.Time) *archiveEnv {
 
 	nc, err := nats.Connect(testutil.NATS(t))
 	require.NoError(t, err)
+	// Drain's error is dropped: it only reports a connection that is already closed, and this is the last cleanup.
 	t.Cleanup(func() { _ = nc.Drain() }) // runs last: streams and lanes are torn down while the connection is still up
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
@@ -123,19 +126,24 @@ func setupArchive(t *testing.T, eventTimes ...time.Time) *archiveEnv {
 	v := testutil.Vault(t, ctx)
 	wrapper, err := atrest.NewVaultKeyWrapper(ctx, atrest.VaultConfig{Address: v.Address, TransitMount: v.TransitMount, TransitKey: v.TransitKey, Token: v.Token})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = wrapper.Close() })
+	t.Cleanup(func() { _ = wrapper.Close() }) // Close only releases the Vault token renewer; a failure leaves nothing to recover
 	dek, err := loadOrCreateDEK(ctx, engine, wrapper, site, time.Now)
 	require.NoError(t, err)
 	cipher, err := auditarchive.NewCipher(dek)
 	require.NoError(t, err)
 
 	// Production defaults for the consumer, with the 1-second fill the scenario needs.
-	consumer, err := env.ParseAs[stream.ConsumerSettings]()
+	// The CONSUMER_ prefix is the one production reads, so a runner exporting a
+	// bare ACK_WAIT or MAX_DELIVER cannot alter the consumer under test.
+	consumer, err := env.ParseAsWithOptions[stream.ConsumerSettings](env.Options{Prefix: "CONSUMER_"})
 	require.NoError(t, err)
 	cfg := config{
 		SiteID: site, FillInterval: time.Second, BatchEvents: 2000, BatchBytes: 8 << 20, FetchBatch: 100,
-		PutTimeout: 10 * time.Second, BulkTimeout: 10 * time.Second, WriteAttempts: 2, Consumer: consumer,
+		// 5s timeouts keep fill + attempts x (put + bulk) under AckWait, as validate requires.
+		PutTimeout: 5 * time.Second, BulkTimeout: 5 * time.Second, WriteAttempts: 2, Consumer: consumer,
+		IndexRetention: "30d", BlobWorkers: 1, Vault: atrest.VaultConfig{Address: v.Address},
 	}
+	require.NoError(t, cfg.validate(), "the test config must be one the service accepts")
 	return &archiveEnv{site: site, esURL: esURL, js: js, engine: engine, mc: mc, bucket: bucket, sink: newBucketSink(mc, bucket), cipher: cipher, cfg: cfg}
 }
 
@@ -280,17 +288,31 @@ func esURLFor(t *testing.T, base string, segments ...string) string {
 	return u.JoinPath(segments...).String()
 }
 
-func esDo(t *testing.T, method, rawURL string, body []byte) (int, []byte) {
-	t.Helper()
+// esRequest is the error-returning request helper; polling conditions use it
+// directly, so a failed call never reaches a require from a non-test goroutine.
+func esRequest(method, rawURL string, body []byte) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(context.Background(), method, rawURL, bytes.NewReader(body))
-	require.NoError(t, err)
+	if err != nil {
+		return 0, nil, fmt.Errorf("build %s request: %w", method, err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := esHTTPClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
+	if err != nil {
+		return 0, nil, fmt.Errorf("%s %s: %w", method, rawURL, err)
+	}
+	defer resp.Body.Close() // read side: the body is fully consumed below, a close error is moot
 	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("read %s response: %w", method, err)
+	}
+	return resp.StatusCode, out, nil
+}
+
+func esDo(t *testing.T, method, rawURL string, body []byte) (int, []byte) {
+	t.Helper()
+	status, out, err := esRequest(method, rawURL, body)
 	require.NoError(t, err)
-	return resp.StatusCode, out
+	return status, out
 }
 
 // deleteIndex removes one index by exact name (ES refuses wildcard deletes by
@@ -308,19 +330,29 @@ func deleteIndex(t *testing.T, esURL, index string) {
 		t.Logf("delete index %s: %v", index, err)
 		return
 	}
-	_ = resp.Body.Close()
+	_ = resp.Body.Close() // best-effort cleanup: the response body carries nothing we need
 }
 
-// countDocs refreshes index first (engine.Search does not, and the template's
+// docCount refreshes index first (engine.Search does not, and the template's
 // refresh_interval is 5s), then counts every document in it. A missing index
-// counts as zero.
-func countDocs(t *testing.T, engine searchengine.SearchEngine, esURL, index string) int {
-	t.Helper()
-	if status, body := esDo(t, http.MethodPost, esURLFor(t, esURL, index, "_refresh"), nil); status != http.StatusOK && status != http.StatusNotFound {
-		require.Failf(t, "refresh failed", "index %s: status %d: %s", index, status, body)
+// counts as zero. It returns errors rather than failing so a polling condition
+// can report them from the test goroutine.
+func docCount(engine searchengine.SearchEngine, esURL, index string) (int, error) {
+	u, err := url.Parse(esURL)
+	if err != nil {
+		return 0, fmt.Errorf("parse es url: %w", err)
+	}
+	status, body, err := esRequest(http.MethodPost, u.JoinPath(index, "_refresh").String(), nil)
+	if err != nil {
+		return 0, fmt.Errorf("refresh %s: %w", index, err)
+	}
+	if status != http.StatusOK && status != http.StatusNotFound {
+		return 0, fmt.Errorf("refresh %s: status %d: %s", index, status, body)
 	}
 	raw, err := engine.Search(context.Background(), []string{index}, json.RawMessage(`{"query":{"match_all":{}},"size":0,"track_total_hits":true}`))
-	require.NoError(t, err)
+	if err != nil {
+		return 0, fmt.Errorf("search %s: %w", index, err)
+	}
 	var resp struct {
 		Hits struct {
 			Total struct {
@@ -328,8 +360,41 @@ func countDocs(t *testing.T, engine searchengine.SearchEngine, esURL, index stri
 			} `json:"total"`
 		} `json:"hits"`
 	}
-	require.NoError(t, json.Unmarshal(raw, &resp))
-	return resp.Hits.Total.Value
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0, fmt.Errorf("decode search %s: %w", index, err)
+	}
+	return resp.Hits.Total.Value, nil
+}
+
+func countDocs(t *testing.T, engine searchengine.SearchEngine, esURL, index string) int {
+	t.Helper()
+	n, err := docCount(engine, esURL, index)
+	require.NoError(t, err)
+	return n
+}
+
+// waitFor polls cond on the test goroutine until it reports true or timeout
+// passes. A condition error fails the test at once instead of burning the
+// budget, and nothing runs off the test goroutine, so there is no require
+// outside it and no log after the test returns.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() (bool, error)) {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(pollEvery)
+	defer tick.Stop()
+	for {
+		ok, err := cond()
+		require.NoError(t, err, what)
+		if ok {
+			return
+		}
+		select {
+		case <-deadline.C:
+			require.FailNow(t, "timed out", "%s (after %s)", what, timeout)
+		case <-tick.C:
+		}
+	}
 }
 
 // getEventDoc and getMemberDoc read one document by id; GetDoc is realtime,
@@ -424,20 +489,30 @@ func readSegmentFrames(t *testing.T, e *archiveEnv, key string) (auditarchive.He
 	return h, frames
 }
 
-func consumerInfo(t *testing.T, c jetstream.Consumer) *jetstream.ConsumerInfo {
-	t.Helper()
+func consumerState(c jetstream.Consumer) (*jetstream.ConsumerInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	info, err := c.Info(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("consumer info: %w", err)
+	}
+	return info, nil
+}
+
+func consumerInfo(t *testing.T, c jetstream.Consumer) *jetstream.ConsumerInfo {
+	t.Helper()
+	info, err := consumerState(c)
 	require.NoError(t, err)
 	return info
 }
 
 // drained reports that the durable has delivered and had acked everything.
-func drained(t *testing.T, c jetstream.Consumer) bool {
-	t.Helper()
-	info := consumerInfo(t, c)
-	return info.NumAckPending == 0 && info.NumPending == 0
+func drained(c jetstream.Consumer) (bool, error) {
+	info, err := consumerState(c)
+	if err != nil {
+		return false, err
+	}
+	return info.NumAckPending == 0 && info.NumPending == 0, nil
 }
 
 // canonicalEvent builds a canonical message event whose timestamp (and so its
@@ -503,9 +578,14 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 	membersLane := e.startLane(t, e.membersSpec(membersDurable, e.sink, membersIdx))
 
 	// Both lanes sealed and wrote: segments in the bucket, documents indexed.
-	require.Eventually(t, func() bool {
-		return countDocs(t, e.engine, e.esURL, eventsIndex) == 3 && countDocs(t, e.engine, e.esURL, membersIndex) == 2
-	}, segmentWait, pollEvery, "events and members documents must be indexed")
+	waitFor(t, segmentWait, "events and members documents must be indexed", func() (bool, error) {
+		ev, err := docCount(e.engine, e.esURL, eventsIndex)
+		if err != nil {
+			return false, err
+		}
+		mem, err := docCount(e.engine, e.esURL, membersIndex)
+		return ev == 3 && mem == 2, err
+	})
 
 	t.Run("one segment per lane that parses and opens with the DEK", func(t *testing.T) {
 		evKeys, memKeys := listLaneKeys(t, e, "events"), listLaneKeys(t, e, "members")
@@ -584,7 +664,7 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 
 	t.Run("everything is acked", func(t *testing.T) {
 		for name, c := range map[string]jetstream.Consumer{"events": eventsLane.cons, "members": membersLane.cons} {
-			require.Eventually(t, func() bool { return drained(t, c) }, segmentWait, pollEvery, "%s durable must end with NumAckPending=0 and NumPending=0", name)
+			waitFor(t, segmentWait, name+" durable must end with NumAckPending=0 and NumPending=0", func() (bool, error) { return drained(c) })
 		}
 		for _, s := range append(eventsIdx.statuses(), membersIdx.statuses()...) {
 			assert.Equal(t, http.StatusCreated, s, "the first write of every document is a create")
@@ -600,9 +680,9 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 		replayIdx := &bulkStatusRecorder{indexStore: e.engine}
 		replay := e.startLane(t, e.eventsSpec(eventsDurable+"-replay", e.sink, replayIdx))
 
-		require.Eventually(t, func() bool { return len(replayIdx.statuses()) == 3 }, segmentWait, pollEvery, "the replay must attempt all three creates")
+		waitFor(t, segmentWait, "the replay must attempt all three creates", func() (bool, error) { return len(replayIdx.statuses()) == 3, nil })
 		assert.Equal(t, []int{http.StatusConflict, http.StatusConflict, http.StatusConflict}, replayIdx.statuses(), "every replayed create is refused with 409")
-		require.Eventually(t, func() bool { return drained(t, replay.cons) }, segmentWait, pollEvery, "409s count as archived, so the replay acks everything")
+		waitFor(t, segmentWait, "409s count as archived, so the replay acks everything", func() (bool, error) { return drained(replay.cons) })
 
 		// Same site, lane, hour and sequence range give the same key, so the
 		// second segment is a second stored version of it (Object Lock retains
@@ -613,12 +693,12 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 	})
 
 	t.Run("a create_doc-only role is refused writes and deletes", func(t *testing.T) {
-		// The test cluster runs with xpack.security.enabled=false. Without
-		// security the role API is unavailable, and with it enabled the
-		// unauthenticated probe is refused: both mean this cannot be exercised.
+		// The test cluster runs with xpack.security.enabled=false (the role API
+		// is then unavailable), and a secured cluster refuses the unauthenticated
+		// probe: either way this cannot be exercised, and the status says which.
 		status, _ := esDo(t, http.MethodGet, esURLFor(t, e.esURL, "_security", "role"), nil)
 		if status != http.StatusOK {
-			t.Skip("security disabled in the test cluster")
+			t.Skipf("security API unavailable in the test cluster (status %d)", status)
 		}
 		role := `{"indices":[{"names":["audit-*"],"privileges":["create_doc","auto_configure"]}]}`
 		status, body := esDo(t, http.MethodPut, esURLFor(t, e.esURL, "_security", "role", "audit-writer"), []byte(role))
@@ -634,7 +714,7 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := esHTTPClient.Do(req)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			defer resp.Body.Close() // the status is all this helper returns; a close error is moot
 			return resp.StatusCode
 		}
 		fresh := auditarchive.EventDocID(e.site, 9001)
@@ -655,7 +735,13 @@ func TestArchiveWorker_BucketOutage(t *testing.T) {
 
 	// The segment PUT fails after its attempts and the batch is NAKed; the
 	// server redelivers it. Nothing was written, so nothing may be acked.
-	require.Eventually(t, func() bool { return consumerInfo(t, lane.cons).NumRedelivered >= 1 }, segmentWait, pollEvery, "the NAKed event must be redelivered")
+	waitFor(t, segmentWait, "the NAKed event must be redelivered", func() (bool, error) {
+		info, err := consumerState(lane.cons)
+		if err != nil {
+			return false, err
+		}
+		return info.NumRedelivered >= 1, nil
+	})
 	info := consumerInfo(t, lane.cons)
 	assert.GreaterOrEqual(t, bucket.failed.Load(), int64(1), "the decorator must have refused at least one PUT")
 	assert.Zero(t, info.AckFloor.Stream, "an event whose segment was not stored must not be acked")
@@ -665,8 +751,11 @@ func TestArchiveWorker_BucketOutage(t *testing.T) {
 	// The bucket recovers: the next delivery stores the segment, indexes the
 	// document and acks.
 	bucket.heal()
-	require.Eventually(t, func() bool { return countDocs(t, e.engine, e.esURL, eventsIndex) == 1 }, recoveryWait, pollEvery, "the document must appear once the bucket recovers")
-	require.Eventually(t, func() bool { return drained(t, lane.cons) }, segmentWait, pollEvery, "the recovered event must be acked")
+	waitFor(t, recoveryWait, "the document must appear once the bucket recovers", func() (bool, error) {
+		n, err := docCount(e.engine, e.esURL, eventsIndex)
+		return n == 1, err
+	})
+	waitFor(t, segmentWait, "the recovered event must be acked", func() (bool, error) { return drained(lane.cons) })
 	assert.Len(t, listLaneKeys(t, e, "events"), 1, "exactly one segment after recovery")
 	doc := getEventDoc(t, e, eventsIndex, seq)
 	rec, _ := openFrame(t, e, doc.SegmentKey, doc.FrameOffset, seq, doc.ContentHash)
