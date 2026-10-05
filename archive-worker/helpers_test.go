@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/auditarchive"
@@ -20,10 +21,12 @@ type fakeMsg struct {
 	acked, termed bool
 	nakDelay      time.Duration
 	naked         bool
+	headers       nats.Header
 }
 
-func (m *fakeMsg) Subject() string { return m.subject }
-func (m *fakeMsg) Data() []byte    { return m.data }
+func (m *fakeMsg) Subject() string      { return m.subject }
+func (m *fakeMsg) Data() []byte         { return m.data }
+func (m *fakeMsg) Headers() nats.Header { return m.headers }
 func (m *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	return &jetstream.MsgMetadata{Stream: m.stream, Sequence: jetstream.SequencePair{Stream: m.seq}}, nil
 }

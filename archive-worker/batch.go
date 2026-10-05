@@ -75,7 +75,7 @@ func (b *batcher) take() []item {
 	return out
 }
 
-func (b *batcher) len() int { //nolint:unused // read by the flush loop, a later task
+func (b *batcher) len() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.items)
