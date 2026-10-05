@@ -65,7 +65,16 @@ type archiveEnv struct {
 	cipher *auditarchive.Cipher
 	keyID  string
 	cfg    config
+	// archiveDay is the day the injected lane clock (now) runs on; daily
+	// index names and segment-key prefixes derive from it, never from the
+	// fixture event times, which sit on another day on purpose.
+	archiveDay time.Time
+	now        func() time.Time
 }
+
+// archiveDay is a fixed UTC midnight, so the lane clock that starts there has
+// a whole day before it would roll into the next daily index.
+var archiveDay = time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 
 // siteFor derives a per-test site id. Stream names are <STREAM>-<siteID> and
 // cannot be made unique any other way; the hash is lowercase hex so the id is
@@ -79,10 +88,12 @@ func siteFor(t *testing.T) string {
 
 // setupArchive wires everything main.run wires before the lanes start, in the
 // same order and through the same constructors, against real containers.
-func setupArchive(t *testing.T, eventTimes ...time.Time) *archiveEnv {
+func setupArchive(t *testing.T) *archiveEnv {
 	t.Helper()
 	ctx := context.Background()
 	site := siteFor(t)
+	started := time.Now()
+	clock := func() time.Time { return archiveDay.Add(time.Since(started)) }
 	esURL := testutil.Elasticsearch(t)
 
 	nc, err := nats.Connect(testutil.NATS(t))
@@ -109,10 +120,10 @@ func setupArchive(t *testing.T, eventTimes ...time.Time) *archiveEnv {
 
 	engine, err := searchengine.New(ctx, searchengine.Config{Backend: "elasticsearch", URL: esURL})
 	require.NoError(t, err)
-	// Daily event indexes derive from the fixture timestamps, never time.Now().
-	indexes := []string{auditarchive.KeysIndex(site)}
-	for _, at := range eventTimes {
-		indexes = append(indexes, auditarchive.EventsIndex(site, at), auditarchive.MembersIndex(site, at))
+	// Daily indexes are named for the archive day the lane clock runs on.
+	indexes := []string{
+		auditarchive.KeysIndex(site), auditarchive.BlobsIndex(site),
+		auditarchive.EventsIndex(site, archiveDay), auditarchive.MembersIndex(site, archiveDay),
 	}
 	t.Cleanup(func() {
 		for _, idx := range indexes {
@@ -144,10 +155,14 @@ func setupArchive(t *testing.T, eventTimes ...time.Time) *archiveEnv {
 		// 2s timeouts keep the worst-case batch time, 1 + 2 x (2 x (2+2) + 2 + 1.5)
 		// = 24s, under the default 30s AckWait, as validate requires.
 		PutTimeout: 2 * time.Second, BulkTimeout: 2 * time.Second, WriteAttempts: 2, Consumer: consumer,
-		IndexRetention: "30d", BlobWorkers: 1, BlobMaxBytes: 1 << 20, Replicas: 1, Vault: atrest.VaultConfig{Address: v.Address},
+		IndexRetention: "30d", BlobWorkers: 1, BlobMaxBytes: 1 << 20, BlobAckWait: 2 * time.Minute, Replicas: 1,
+		Vault: atrest.VaultConfig{Address: v.Address},
 	}
 	require.NoError(t, cfg.validate(), "the test config must be one the service accepts")
-	return &archiveEnv{site: site, esURL: esURL, js: js, engine: engine, mc: mc, bucket: bucket, sink: sink, cipher: cipher, keyID: keyID, cfg: cfg}
+	return &archiveEnv{
+		site: site, esURL: esURL, js: js, engine: engine, mc: mc, bucket: bucket, sink: sink,
+		cipher: cipher, keyID: keyID, cfg: cfg, archiveDay: archiveDay, now: clock,
+	}
 }
 
 type laneSpec struct {
@@ -180,7 +195,9 @@ func (e *archiveEnv) startLane(t *testing.T, s *laneSpec) *runningLane {
 
 	unexpected := &atomic.Bool{}
 	guard := loopguard.New(s.name+"-lane", func() { unexpected.Store(true) })
-	l := newLane(newLaneConfig(&e.cfg, s.name, e.keyID, nil), rawConsumerAdapter{c: cons}, s.build, e.cipher,
+	lc := newLaneConfig(&e.cfg, s.name, e.keyID, nil)
+	lc.now = e.now
+	l := newLane(lc, rawConsumerAdapter{c: cons}, s.build, e.cipher,
 		newBatcher(e.cfg.BatchEvents, e.cfg.BatchBytes, e.cfg.FillInterval), newFlusher(s.objects, s.index, newFlushConfig(&e.cfg, s.name), nil), guard)
 
 	g := newLaneGroup()
@@ -194,6 +211,38 @@ func (e *archiveEnv) startLane(t *testing.T, s *laneSpec) *runningLane {
 			defer cancel()
 			assert.NoError(t, g.wait(wctx), "lane %s did not drain", s.name)
 			assert.False(t, unexpected.Load(), "lane %s reported an unexpected stop", s.name)
+		})
+	}
+	t.Cleanup(stop)
+	return &runningLane{cons: cons, stop: stop, unexpected: unexpected}
+}
+
+// startBlobLane creates the attachment durable as main does (blobConsumerSettings,
+// created-subject filter) and starts the blob lane against src.
+func (e *archiveEnv) startBlobLane(t *testing.T, src blobSource) *runningLane {
+	t.Helper()
+	ctx := context.Background()
+	cc := consumerConfig(blobsDurable, []string{subject.MsgCanonicalCreated(e.site)}, blobConsumerSettings(&e.cfg))
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, stream.MessagesCanonical(e.site).Name, cc)
+	require.NoError(t, err)
+
+	unexpected := &atomic.Bool{}
+	guard := loopguard.New("blobs-lane", func() { unexpected.Store(true) })
+	bc := newBlobLaneConfig(&e.cfg, &cc, e.keyID)
+	bc.now = e.now
+	l := newBlobLane(bc, rawConsumerAdapter{c: cons}, src, e.sink, e.engine, e.cipher, guard, nil)
+
+	g := newLaneGroup()
+	g.start(ctx, l.run)
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			guard.BeginShutdown()
+			g.stopAll()
+			wctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			assert.NoError(t, g.wait(wctx), "blob lane did not drain")
+			assert.False(t, unexpected.Load(), "blob lane reported an unexpected stop")
 		})
 	}
 	t.Cleanup(stop)
@@ -444,6 +493,25 @@ func listKeys(t *testing.T, client *minio.Client, bucket, prefix string) []strin
 	return keys
 }
 
+// getBlobDoc reads one audit-blobs document by file id.
+func getBlobDoc(t *testing.T, e *archiveEnv, fileID string) auditarchive.BlobDoc {
+	t.Helper()
+	raw, found, err := e.engine.GetDoc(context.Background(), auditarchive.BlobsIndex(e.site), auditarchive.BlobDocID(e.site, fileID))
+	require.NoError(t, err)
+	require.True(t, found, "blob doc for %s", fileID)
+	var hit struct {
+		Source auditarchive.BlobDoc `json:"_source"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &hit))
+	return hit.Source
+}
+
+// segmentKeyRe is the shape of a lane's segment key on the archive day:
+// {site}/{yyyy}/{mm}/{dd}/{hh}/{lane}-{first}-{last}-{rand8hex}.seg.
+func (e *archiveEnv) segmentKeyRe(lane string) string {
+	return `^` + e.site + `/` + e.archiveDay.Format("2006/01/02") + `/\d{2}/` + lane + `-\d+-\d+-[0-9a-f]{8}\.seg$`
+}
+
 // listLaneKeys narrows listKeys to one lane's segments ("events"/"members").
 func listLaneKeys(t *testing.T, e *archiveEnv, lane string) []string {
 	t.Helper()
@@ -457,7 +525,7 @@ func listLaneKeys(t *testing.T, e *archiveEnv, lane string) []string {
 }
 
 // countLaneVersions counts stored object versions (delete markers excluded) of
-// one lane's segments; a second PUT of an existing key adds a version.
+// one lane's segments, across every key.
 func countLaneVersions(t *testing.T, e *archiveEnv, lane string) int {
 	t.Helper()
 	n := 0
@@ -553,16 +621,17 @@ func memberAddedEvent(t *testing.T, site string, ts time.Time) model.InboxEvent 
 }
 
 func TestArchiveWorker_EndToEnd(t *testing.T) {
-	// Fixture time: fixed so the expected daily indexes never depend on time.Now.
+	// Fixture event time sits on another day than the archive clock, so the
+	// assertions prove daily indexes follow the archive day, not eventAt.
 	base := time.Date(2026, 3, 14, 9, 26, 53, 0, time.UTC)
 	createdAt, updatedAt, deletedAt := base, base.Add(time.Second), base.Add(2*time.Second)
 	memberAt := base.Add(3 * time.Second)
 
-	e := setupArchive(t, createdAt, memberAt)
+	e := setupArchive(t)
 	ctx := context.Background()
-	eventsIndex := auditarchive.EventsIndex(e.site, createdAt)
-	membersIndex := auditarchive.MembersIndex(e.site, memberAt)
-	require.Equal(t, eventsIndex, auditarchive.EventsIndex(e.site, deletedAt), "fixture events must share one daily index")
+	eventsIndex := auditarchive.EventsIndex(e.site, e.archiveDay)
+	membersIndex := auditarchive.MembersIndex(e.site, e.archiveDay)
+	require.NotEqual(t, eventsIndex, auditarchive.EventsIndex(e.site, createdAt), "precondition: event day and archive day differ")
 
 	// Publish before the lanes start, so the three events always land in one
 	// batch and "exactly one segment" cannot be split by a fill-interval tick.
@@ -597,14 +666,31 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 		return ev == 3 && mem == 2, err
 	})
 
+	t.Run("the DEK is escrowed in the bucket under its key id", func(t *testing.T) {
+		require.Equal(t, auditarchive.KeyID(readEscrow(t, e, e.site+"/keys/current.json").WrappedDek), e.keyID)
+		byID := readEscrow(t, e, e.site+"/keys/"+e.keyID+".json")
+		assert.Equal(t, e.site, byID.SiteID)
+		raw, found, err := e.engine.GetDoc(ctx, auditarchive.KeysIndex(e.site), auditarchive.KeyDocID)
+		require.NoError(t, err)
+		require.True(t, found)
+		var hit struct {
+			Source auditarchive.KeyDoc `json:"_source"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &hit))
+		assert.Equal(t, hit.Source.WrappedDek, byID.WrappedDek, "bucket and index hold the same wrapped DEK")
+	})
+
 	t.Run("one segment per lane that parses and opens with the DEK", func(t *testing.T) {
 		evKeys, memKeys := listLaneKeys(t, e, "events"), listLaneKeys(t, e, "members")
 		require.Len(t, evKeys, 1, "exactly one events segment: %v", evKeys)
 		require.Len(t, memKeys, 1, "exactly one members segment: %v", memKeys)
+		assert.Regexp(t, e.segmentKeyRe("events"), evKeys[0], "archive-day prefix and random suffix")
+		assert.Regexp(t, e.segmentKeyRe("members"), memKeys[0])
 
 		h, frames := readSegmentFrames(t, e, evKeys[0])
 		assert.Equal(t, e.site, h.Site)
 		assert.Equal(t, "events", h.Lane)
+		assert.Equal(t, e.keyID, h.KeyID, "the header names the DEK that sealed the frames")
 		assert.Equal(t, uint64(1), h.FirstSeq)
 		assert.Equal(t, uint64(3), h.LastSeq)
 		require.Len(t, frames, 3)
@@ -622,6 +708,7 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 
 		mh, mframes := readSegmentFrames(t, e, memKeys[0])
 		assert.Equal(t, "members", mh.Lane)
+		assert.Equal(t, e.keyID, mh.KeyID)
 		assert.Equal(t, memberSeq, mh.FirstSeq)
 		require.Len(t, mframes, 1)
 		plain, err := e.cipher.Open(mframes[0], auditarchive.FrameAAD(e.site, memberSeq))
@@ -639,6 +726,7 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 			doc := getEventDoc(t, e, eventsIndex, seq)
 			assert.Equal(t, seq, doc.Seq)
 			assert.Equal(t, wantTypes[i], doc.EventType)
+			assert.Equal(t, []time.Time{createdAt, updatedAt, deletedAt}[i], doc.EventAt, "eventAt stays the event's own time")
 			assert.Equal(t, "msg-1", doc.MessageID)
 			assert.Equal(t, e.site, doc.SiteID)
 			assert.Equal(t, evKey, doc.SegmentKey)
@@ -683,6 +771,7 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 
 	t.Run("redelivery writes a second segment and creates no documents", func(t *testing.T) {
 		require.Equal(t, 1, countLaneVersions(t, e, "events"), "precondition: one stored events segment")
+		original := listLaneKeys(t, e, "events")
 
 		// A fresh durable on the same stream (DeliverAll) is the redelivery: the
 		// server hands back the same three messages with the same stream
@@ -692,12 +781,15 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 
 		waitFor(t, segmentWait, "the replay must attempt all three creates", func() (bool, error) { return len(replayIdx.statuses()) == 3, nil })
 		assert.Equal(t, []int{http.StatusConflict, http.StatusConflict, http.StatusConflict}, replayIdx.statuses(), "every replayed create is refused with 409")
-		waitFor(t, segmentWait, "409s count as archived, so the replay acks everything", func() (bool, error) { return drained(replay.cons) })
+		waitFor(t, segmentWait, "409s whose record hash matches count as archived, so the replay acks everything", func() (bool, error) { return drained(replay.cons) })
 
-		// Same site, lane, hour and sequence range give the same key, so the
-		// second segment is a second stored version of it (Object Lock retains
-		// both); across an hour boundary it is a second key. Either way: two.
+		// The random suffix gives the replay its own key: two objects, each one
+		// version, and the documents still resolve to the original.
 		assert.Equal(t, 2, countLaneVersions(t, e, "events"), "the redelivery must write a second segment")
+		keys := listLaneKeys(t, e, "events")
+		require.Len(t, keys, 2, "a replay never overwrites an earlier key")
+		assert.NotEqual(t, keys[0], keys[1])
+		assert.Equal(t, original[0], getEventDoc(t, e, eventsIndex, evSeqs[0]).SegmentKey, "documents keep pointing at the object they were written against")
 		assert.Equal(t, 3, countDocs(t, e.engine, e.esURL, eventsIndex), "no new event documents")
 		replay.stop()
 	})
@@ -736,8 +828,8 @@ func TestArchiveWorker_EndToEnd(t *testing.T) {
 
 func TestArchiveWorker_BucketOutage(t *testing.T) {
 	at := time.Date(2026, 3, 14, 11, 0, 0, 0, time.UTC)
-	e := setupArchive(t, at)
-	eventsIndex := auditarchive.EventsIndex(e.site, at)
+	e := setupArchive(t)
+	eventsIndex := auditarchive.EventsIndex(e.site, e.archiveDay)
 
 	bucket := newFailingThen(e.sink, 100)
 	seq := publishJSON(t, e.js, subject.MsgCanonicalCreated(e.site), canonicalEvent(e.site, model.EventCreated, "msg-outage", at, nil))
@@ -770,4 +862,87 @@ func TestArchiveWorker_BucketOutage(t *testing.T) {
 	doc := getEventDoc(t, e, eventsIndex, seq)
 	rec, _ := openFrame(t, e, doc.SegmentKey, doc.FrameOffset, seq, doc.ContentHash)
 	assert.Equal(t, seq, rec.Seq)
+}
+
+// readEscrow reads one escrowed KeyDoc from the bucket.
+func readEscrow(t *testing.T, e *archiveEnv, key string) auditarchive.KeyDoc {
+	t.Helper()
+	ok, err := e.sink.Stat(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, ok, "escrow object %s", key)
+	rc, err := e.sink.Get(context.Background(), key)
+	require.NoError(t, err)
+	defer rc.Close()
+	var d auditarchive.KeyDoc
+	require.NoError(t, json.NewDecoder(rc).Decode(&d))
+	return d
+}
+
+func TestArchiveWorker_AttachmentLane(t *testing.T) {
+	e := setupArchive(t)
+	plain := bytes.Repeat([]byte("audit attachment bytes "), 2000)
+	signer := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		id := r.PathValue("fileId")
+		if id == "att-gone" {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no such file"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"url": "http://" + r.Host + "/download/" + id})
+	}
+	download := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write(plain)
+	}
+	src, host := driveFixture(t, signer, download)
+	attachment := func(id string) []byte {
+		raw, err := json.Marshal(cassandra.Attachment{
+			ID: id, Title: id + ".pdf", Type: "file", FileType: "application/pdf",
+			TitleLink: "api/v1/file/rooms/room-1/file/" + id + "?drive_host=" + host,
+		})
+		require.NoError(t, err)
+		return raw
+	}
+	at := time.Date(2026, 3, 14, 10, 0, 0, 0, time.UTC)
+	publishJSON(t, e.js, subject.MsgCanonicalCreated(e.site), canonicalEvent(e.site, model.EventCreated, "msg-a", at, func(ev *model.MessageEvent) {
+		ev.Message.Attachments = [][]byte{attachment("att-ok")}
+	}))
+	publishJSON(t, e.js, subject.MsgCanonicalCreated(e.site), canonicalEvent(e.site, model.EventCreated, "msg-b", at.Add(time.Second), func(ev *model.MessageEvent) {
+		ev.Message.Attachments = [][]byte{attachment("att-gone")}
+	}))
+	lane := e.startBlobLane(t, src)
+
+	waitFor(t, segmentWait, "both attachments must be documented", func() (bool, error) {
+		n, err := docCount(e.engine, e.esURL, auditarchive.BlobsIndex(e.site))
+		return n == 2, err
+	})
+	waitFor(t, segmentWait, "both messages must be acked", func() (bool, error) { return drained(lane.cons) })
+
+	t.Run("archived attachment decrypts to the source bytes under the keyed digest", func(t *testing.T) {
+		doc := getBlobDoc(t, e, "att-ok")
+		assert.Empty(t, doc.Skipped)
+		assert.Equal(t, auditarchive.BlobKey(e.site, "att-ok"), doc.BlobKey)
+		assert.Equal(t, int64(len(plain)), doc.SizeBytes)
+		assert.Equal(t, "msg-a", doc.MessageID)
+		assert.Equal(t, e.cipher.Digest(plain), doc.PlainDigest, "plainDigest is keyed by the site DEK")
+
+		obj, err := e.mc.GetObject(context.Background(), e.bucket, doc.BlobKey, minio.GetObjectOptions{})
+		require.NoError(t, err)
+		defer obj.Close()
+		var out bytes.Buffer
+		digest, n, keyID, err := auditarchive.DecryptBlob(&out, obj, e.cipher, "att-ok")
+		require.NoError(t, err)
+		assert.Equal(t, plain, out.Bytes())
+		assert.Equal(t, int64(len(plain)), n)
+		assert.Equal(t, doc.PlainDigest, digest, "the digest recomputed on decrypt matches the document")
+		assert.Equal(t, e.keyID, keyID, "the blob header names the DEK")
+	})
+	t.Run("an attachment gone from the source is documented as missing and not uploaded", func(t *testing.T) {
+		doc := getBlobDoc(t, e, "att-gone")
+		assert.Equal(t, "missing", doc.Skipped)
+		assert.Empty(t, doc.BlobKey)
+		assert.Empty(t, doc.PlainDigest)
+		assert.Equal(t, []string{auditarchive.BlobKey(e.site, "att-ok")}, listKeys(t, e.mc, e.bucket, e.site+"/blobs/"))
+	})
 }
