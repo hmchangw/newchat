@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
@@ -17,6 +18,7 @@ func validConfig() config {
 		PutTimeout: 10 * time.Second, BulkTimeout: 10 * time.Second, WriteAttempts: 2, FetchBatch: 100,
 		Replicas: 1, BlobMaxBytes: 100 << 20, BlobAckWait: 10 * time.Minute, BlobWorkers: 4,
 		Consumer:       stream.ConsumerSettings{AckWait: 60 * time.Second, MaxAckPending: 12000},
+		Vault:          atrest.VaultConfig{Address: "https://vault.test:8200"},
 		IndexRetention: "2555d",
 	}
 }
@@ -30,6 +32,7 @@ func TestConfig_Validate(t *testing.T) {
 		mutate func(*config)
 		want   string
 	}{
+		{"missing vault address", func(c *config) { c.Vault.Address = "" }, "VAULT_ADDR"},
 		{"batch time exceeds ack wait", func(c *config) { c.Consumer.AckWait = 40 * time.Second }, "ACK_WAIT"},
 		{"zero batch events", func(c *config) { c.BatchEvents = 0 }, "ARCHIVE_BATCH_EVENTS"},
 		{"zero batch bytes", func(c *config) { c.BatchBytes = 0 }, "ARCHIVE_BATCH_BYTES"},
@@ -68,6 +71,7 @@ func TestConfig_ConsumerSettingsMustBeSet(t *testing.T) {
 	t.Setenv("ARCHIVE_S3_ACCESS_KEY", "ak")
 	t.Setenv("ARCHIVE_S3_SECRET_KEY", "sk")
 	t.Setenv("ARCHIVE_BUCKET", "archive-site-a")
+	t.Setenv("VAULT_ADDR", "https://vault.test:8200")
 
 	t.Run("required vars only is rejected naming CONSUMER_ACK_WAIT", func(t *testing.T) {
 		cfg, err := env.ParseAs[config]()

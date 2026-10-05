@@ -179,6 +179,7 @@ func (l *blobLane) pause(ctx context.Context, stopCh <-chan struct{}) {
 // once: Ack when all are done, Nak with backoff on the first retryable
 // failure, Term for a message that can never be processed.
 func (l *blobLane) handle(ctx context.Context, msg jetstream.Msg) {
+	noteRedelivery(l.metrics, msg)
 	data, err := natsutil.DecodePayload(msg)
 	if err != nil {
 		slog.ErrorContext(ctx, "undecodable payload, terminating", "lane", "blobs", "subject", msg.Subject(), "error", err)

@@ -93,6 +93,7 @@ type laneConfig struct {
 	fetchBatch   int
 	fillInterval time.Duration
 	now          func() time.Time
+	metrics      *metrics // optional: nil records nothing
 }
 
 type lane struct {
@@ -214,6 +215,7 @@ func (l *lane) flushIfDue(flushCtx context.Context) {
 // or byte bound trips.
 func (l *lane) handle(ctx, flushCtx context.Context, msg jetstream.Msg) {
 	jobguard.Guard("archive build "+l.cfg.name, func() {
+		noteRedelivery(l.cfg.metrics, msg)
 		data, err := natsutil.DecodePayload(msg)
 		if err != nil {
 			slog.ErrorContext(ctx, "undecodable payload, terminating", "lane", l.cfg.name, "subject", msg.Subject(), "error", err)

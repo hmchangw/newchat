@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -86,6 +87,9 @@ func (c config) validate() error { //nolint:gocritic // hugeParam: value receive
 	worst := c.FillInterval + time.Duration(c.WriteAttempts)*(c.PutTimeout+c.BulkTimeout)
 	if worst >= c.Consumer.AckWait {
 		return fmt.Errorf("CONSUMER_ACK_WAIT (%s) must exceed ARCHIVE_FILL_INTERVAL + ARCHIVE_WRITE_ATTEMPTS x (ARCHIVE_PUT_TIMEOUT + ARCHIVE_BULK_TIMEOUT) = %s", c.Consumer.AckWait, worst)
+	}
+	if c.Vault.Address == "" {
+		return errors.New("VAULT_ADDR is required: the archive DEK is wrapped by Vault transit")
 	}
 	return nil
 }

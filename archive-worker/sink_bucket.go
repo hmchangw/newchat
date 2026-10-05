@@ -49,7 +49,7 @@ type bucketSink struct {
 	bucket string
 }
 
-func newBucketSink(client minioutil.ObjectStore, bucket string) *bucketSink { //nolint:unused // first caller is main's wiring, a later task
+func newBucketSink(client minioutil.ObjectStore, bucket string) *bucketSink {
 	return &bucketSink{client: client, bucket: bucket}
 }
 
