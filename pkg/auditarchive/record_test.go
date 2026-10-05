@@ -8,35 +8,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRecord_Hash(t *testing.T) {
+func TestRecord_Marshal(t *testing.T) {
 	r := Record{Site: "site-a", Stream: "MESSAGES-CANONICAL-site-a", Seq: 42, Subject: "chat.msg.canonical.site-a.created", EventAt: 1700000000000, Payload: json.RawMessage(`{ "event": "created" , "x":1}`)}
-	h1, err := r.Hash()
+	b1, err := r.Marshal()
 	require.NoError(t, err)
-	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, h1)
 
-	t.Run("whitespace in payload does not change the hash", func(t *testing.T) {
+	t.Run("whitespace in payload does not change the canonical form", func(t *testing.T) {
 		r2 := r
 		r2.Payload = json.RawMessage(`{"event":"created","x":1}`)
-		h2, err := r2.Hash()
+		b2, err := r2.Marshal()
 		require.NoError(t, err)
-		assert.Equal(t, h1, h2)
+		assert.Equal(t, b1, b2)
 	})
-	t.Run("a different seq changes the hash", func(t *testing.T) {
+	t.Run("a different seq changes the canonical form", func(t *testing.T) {
 		r3 := r
 		r3.Seq = 43
-		h3, err := r3.Hash()
+		b3, err := r3.Marshal()
 		require.NoError(t, err)
-		assert.NotEqual(t, h1, h3)
+		assert.NotEqual(t, b1, b3)
 	})
 	t.Run("invalid payload is an error", func(t *testing.T) {
 		r4 := r
 		r4.Payload = json.RawMessage(`{not json`)
-		_, err := r4.Hash()
+		_, err := r4.Marshal()
 		assert.Error(t, err)
-	})
-	t.Run("HashBytes matches Hash", func(t *testing.T) {
-		b, err := r.Marshal()
-		require.NoError(t, err)
-		assert.Equal(t, h1, HashBytes(b))
 	})
 }

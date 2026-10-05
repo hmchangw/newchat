@@ -69,9 +69,10 @@ func TestBuildMemberItem(t *testing.T) {
 		assert.True(t, errors.Is(err, errPoison))
 	})
 	t.Run("empty payload is poison", func(t *testing.T) {
-		outer, _ := json.Marshal(model.InboxEvent{Type: model.InboxMemberAdded, Timestamp: 1})
+		outer, err := json.Marshal(model.InboxEvent{Type: model.InboxMemberAdded, Timestamp: 1})
+		require.NoError(t, err)
 		msg := &fakeMsg{subject: "x", data: outer, seq: 904, stream: "INBOX-site-a"}
-		_, err := buildMemberItem(context.Background(), "site-a", msg, outer, c, now)
+		_, err = buildMemberItem(context.Background(), "site-a", msg, outer, c, now)
 		assert.True(t, errors.Is(err, errPoison))
 	})
 }

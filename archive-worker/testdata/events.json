@@ -42,6 +42,22 @@
     "timestamp": 1759672800000
   },
   {
+    "event": "pinned",
+    "message": {
+      "id": "m1",
+      "roomId": "r1",
+      "userId": "u-ortiz",
+      "userAccount": "p.ortiz",
+      "createdAt": "2025-10-05T13:50:00Z",
+      "pinnedBy": {
+        "account": "h.brandt",
+        "userId": "u-brandt"
+      }
+    },
+    "siteId": "site-a",
+    "timestamp": 1759672800000
+  },
+  {
     "event": "reacted",
     "message": {
       "id": "m1",

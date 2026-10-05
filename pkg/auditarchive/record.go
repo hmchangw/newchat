@@ -1,8 +1,6 @@
 package auditarchive
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 )
@@ -27,19 +25,4 @@ func (r Record) Marshal() ([]byte, error) { //nolint:gocritic // hugeParam: valu
 		return nil, fmt.Errorf("marshal archive record: %w", err)
 	}
 	return b, nil
-}
-
-// Hash returns "sha256:<hex>" over Marshal().
-func (r Record) Hash() (string, error) { //nolint:gocritic // hugeParam: value receiver is the package API; Record is read-only here
-	b, err := r.Marshal()
-	if err != nil {
-		return "", err
-	}
-	return HashBytes(b), nil
-}
-
-// HashBytes is the hash form used everywhere in the archive: "sha256:<hex>".
-func HashBytes(b []byte) string {
-	sum := sha256.Sum256(b)
-	return "sha256:" + hex.EncodeToString(sum[:])
 }

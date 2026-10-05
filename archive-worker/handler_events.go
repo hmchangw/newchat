@@ -52,7 +52,7 @@ func eventAt(ts int64, now time.Time) time.Time {
 }
 
 // sealRecord encrypts the canonical record into a frame and returns the
-// frame plus the record hash the document carries for later verification.
+// frame plus the keyed record digest the document carries for later verification.
 func sealRecord(site string, meta msgMeta, at time.Time, data []byte, c *auditarchive.Cipher) ([]byte, string, error) {
 	rec := auditarchive.Record{Site: site, Stream: meta.Stream, Seq: meta.Seq, Subject: meta.Subject, EventAt: at.UnixMilli(), Payload: json.RawMessage(data)}
 	plain, err := rec.Marshal()
@@ -63,7 +63,7 @@ func sealRecord(site string, meta msgMeta, at time.Time, data []byte, c *auditar
 	if err != nil {
 		return nil, "", fmt.Errorf("seal record: %w", err)
 	}
-	return frame, auditarchive.HashBytes(plain), nil
+	return frame, c.Digest(plain), nil
 }
 
 func buildEventItem(ctx context.Context, site string, msg jetstream.Msg, data []byte, c *auditarchive.Cipher, now time.Time) (item, error) {
@@ -115,6 +115,11 @@ func buildEventItem(ctx context.Context, site string, msg jetstream.Msg, data []
 	case model.EventReacted:
 		if ev.ReactionDelta != nil {
 			doc.ActorAccount = ev.ReactionDelta.Actor.Account
+		}
+	case model.EventPinned, model.EventUnpinned:
+		doc.ActorAccount = ev.Message.UserAccount
+		if ev.Message.PinnedBy != nil {
+			doc.ActorAccount = ev.Message.PinnedBy.Account
 		}
 	default:
 		doc.ActorAccount = ev.Message.UserAccount

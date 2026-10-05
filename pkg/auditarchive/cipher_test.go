@@ -2,6 +2,8 @@ package auditarchive
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -53,4 +55,29 @@ func TestAADs(t *testing.T) {
 	assert.Equal(t, "body|site-a|7", string(BodyAAD("site-a", 7)))
 	assert.Equal(t, "chunk|f1|3|0", string(ChunkAAD("f1", 3, false)))
 	assert.Equal(t, "chunk|f1|3|1", string(ChunkAAD("f1", 3, true)))
+}
+
+func TestCipher_Digest(t *testing.T) {
+	c, err := NewCipher(testDEK())
+	require.NoError(t, err)
+	d := c.Digest([]byte("record"))
+	assert.Regexp(t, `^hmac-sha256:[0-9a-f]{64}$`, d)
+
+	t.Run("deterministic for the same input and DEK", func(t *testing.T) {
+		c2, err := NewCipher(testDEK())
+		require.NoError(t, err)
+		assert.Equal(t, d, c2.Digest([]byte("record")))
+	})
+	t.Run("differs across DEKs", func(t *testing.T) {
+		c2, err := NewCipher(bytes.Repeat([]byte{0x4c}, DEKSize))
+		require.NoError(t, err)
+		assert.NotEqual(t, d, c2.Digest([]byte("record")))
+	})
+	t.Run("differs across inputs", func(t *testing.T) {
+		assert.NotEqual(t, d, c.Digest([]byte("record2")))
+	})
+	t.Run("is not the unkeyed sha256", func(t *testing.T) {
+		sum := sha256.Sum256([]byte("record"))
+		assert.NotContains(t, d, hex.EncodeToString(sum[:]))
+	})
 }

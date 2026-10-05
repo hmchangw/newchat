@@ -34,7 +34,8 @@ func TestBuildEventItem(t *testing.T) {
 	events := loadEvents(t)
 	now := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
 	mk := func(ev model.MessageEvent, seq uint64) (*fakeMsg, []byte) {
-		data, _ := json.Marshal(ev)
+		data, err := json.Marshal(ev)
+		require.NoError(t, err)
 		return &fakeMsg{subject: "chat.msg.canonical.site-a." + string(ev.Event), data: data, seq: seq, stream: "MESSAGES-CANONICAL-site-a"}, data
 	}
 
@@ -53,7 +54,7 @@ func TestBuildEventItem(t *testing.T) {
 		assert.Equal(t, 1, d.AttachmentCount)
 		assert.Equal(t, []string{"image/png"}, d.AttachmentTypes)
 		assert.NotEmpty(t, d.EncBody)
-		assert.Regexp(t, `^sha256:`, d.ContentHash)
+		assert.Regexp(t, `^hmac-sha256:`, d.ContentHash)
 
 		plain, err := c.Open(it.frame, auditarchive.FrameAAD("site-a", 41))
 		require.NoError(t, err)
@@ -61,7 +62,7 @@ func TestBuildEventItem(t *testing.T) {
 		require.NoError(t, json.Unmarshal(plain, &rec))
 		assert.Equal(t, uint64(41), rec.Seq)
 		assert.JSONEq(t, string(data), string(rec.Payload))
-		assert.Equal(t, auditarchive.HashBytes(plain), d.ContentHash)
+		assert.Equal(t, c.Digest(plain), d.ContentHash)
 
 		body, err := c.Open(d.EncBody, auditarchive.BodyAAD("site-a", 41))
 		require.NoError(t, err)
@@ -76,6 +77,31 @@ func TestBuildEventItem(t *testing.T) {
 		d := it.docs[0].Doc.(*auditarchive.EventDoc)
 		assert.Empty(t, d.EncBody)
 		assert.Equal(t, "p.ortiz", d.ActorAccount)
+	})
+	t.Run("pinned names the pinner, not the author", func(t *testing.T) {
+		msg, data := mk(events["pinned"], 48)
+		it, err := buildEventItem(context.Background(), "site-a", msg, data, c, now)
+		require.NoError(t, err)
+		d := it.docs[0].Doc.(*auditarchive.EventDoc)
+		assert.Equal(t, "h.brandt", d.ActorAccount)
+		assert.Equal(t, "p.ortiz", d.SenderAccount)
+		assert.Empty(t, d.EncBody)
+	})
+	t.Run("pinned without pinnedBy falls back to the author", func(t *testing.T) {
+		ev := events["pinned"]
+		ev.Message.PinnedBy = nil
+		msg, data := mk(ev, 49)
+		it, err := buildEventItem(context.Background(), "site-a", msg, data, c, now)
+		require.NoError(t, err)
+		assert.Equal(t, "p.ortiz", it.docs[0].Doc.(*auditarchive.EventDoc).ActorAccount)
+	})
+	t.Run("unpinned names the pinner", func(t *testing.T) {
+		ev := events["pinned"]
+		ev.Event = model.EventUnpinned
+		msg, data := mk(ev, 50)
+		it, err := buildEventItem(context.Background(), "site-a", msg, data, c, now)
+		require.NoError(t, err)
+		assert.Equal(t, "h.brandt", it.docs[0].Doc.(*auditarchive.EventDoc).ActorAccount)
 	})
 	t.Run("reacted names the reactor", func(t *testing.T) {
 		msg, data := mk(events["reacted"], 43)
