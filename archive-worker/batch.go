@@ -26,7 +26,7 @@ type docSpec struct {
 
 type item struct {
 	ctx   context.Context
-	msg   jetstream.Msg //nolint:unused // acked by the flush loop, a later task
+	msg   jetstream.Msg
 	seq   uint64
 	frame []byte
 	docs  []docSpec

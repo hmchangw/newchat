@@ -1,0 +1,64 @@
+[
+  {
+    "event": "created",
+    "message": {
+      "id": "m1",
+      "roomId": "r1",
+      "userId": "u-ortiz",
+      "userAccount": "p.ortiz",
+      "createdAt": "2025-10-05T13:50:00Z",
+      "content": "quarterly numbers attached",
+      "attachments": [
+        "eyJpZCI6ImYxIiwidGl0bGUiOiJtb2NrLnBuZyIsImZpbGVUeXBlIjoiaW1hZ2UvcG5nIiwidGl0bGVMaW5rIjoiYXBpL3YxL2ZpbGUvcm9vbXMvcjEvZmlsZS9mMT9kcml2ZV9ob3N0PWh0dHBzOi8vZHJpdmUuZXhhbXBsZSJ9"
+      ]
+    },
+    "siteId": "site-a",
+    "timestamp": 1759672800000
+  },
+  {
+    "event": "updated",
+    "message": {
+      "id": "m1",
+      "roomId": "r1",
+      "userId": "u-ortiz",
+      "userAccount": "p.ortiz",
+      "createdAt": "2025-10-05T13:50:00Z",
+      "content": "quarterly numbers attached (corrected)",
+      "editedAt": "2025-10-05T14:00:00Z"
+    },
+    "siteId": "site-a",
+    "timestamp": 1759672800000
+  },
+  {
+    "event": "deleted",
+    "message": {
+      "id": "m1",
+      "roomId": "r1",
+      "userId": "u-ortiz",
+      "userAccount": "p.ortiz",
+      "createdAt": "2025-10-05T13:50:00Z"
+    },
+    "siteId": "site-a",
+    "timestamp": 1759672800000
+  },
+  {
+    "event": "reacted",
+    "message": {
+      "id": "m1",
+      "roomId": "r1",
+      "userId": "u-ortiz",
+      "userAccount": "p.ortiz",
+      "createdAt": "2025-10-05T13:50:00Z"
+    },
+    "siteId": "site-a",
+    "timestamp": 1759672800000,
+    "reactionDelta": {
+      "shortcode": ":+1:",
+      "action": "added",
+      "actor": {
+        "account": "h.brandt",
+        "userId": "u-brandt"
+      }
+    }
+  }
+]
