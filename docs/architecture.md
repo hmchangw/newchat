@@ -91,6 +91,7 @@ flowchart TB
         RoomWorker["room-worker<br/>apply invites, sub events"]
         Inbox["inbox-worker<br/>consume remote OUTBOX"]
         SearchSync["search-sync-worker<br/>index canonical msgs"]
+        ArchiveWorker["archive-worker<br/>audit archive: Object Lock bucket + ES"]
     end
 
     %% Data stores

@@ -127,7 +127,7 @@ sequenceDiagram
         JS->>W: deliver canonical message and member events
         W->>W: fill batch, keep every message un-acked
         W->>W: seal segment: header, per-event encrypted frames, SHA-256 trailer
-        W->>B: PUT {A}/{yyyy}/{mm}/{dd}/{hh}/{firstSeq}-{lastSeq}.seg
+        W->>B: PUT {A}/{yyyy}/{mm}/{dd}/{hh}/{lane}-{firstSeq}-{lastSeq}.seg
         alt PUT succeeds
             B-->>W: 200
             W->>ES: bulk create (op_type create) audit-events-A-* and audit-members-A-* (segmentKey, frameOffset, encBody)
@@ -226,7 +226,7 @@ sequenceDiagram
     S->>K: PUT ops entry
     S->>BB: GET segmentKey (range at frameOffset)
     BB-->>S: encrypted frame
-    S->>S: decrypt frame with site B DEK, recompute SHA-256, compare with contentHash
+    S->>S: decrypt frame with site B DEK, recompute the keyed record MAC, compare with contentHash
     S->>M: append audit_ops message.verify (phase outcome, match)
     S->>K: PUT ops entry
     S-->>FE: match / mismatch
@@ -358,10 +358,10 @@ two feed the segment batches; the third is the attachment lane described below.
   deleted, pinned, unpinned, reacted. The canonical event carries the full plaintext
   message, so no Cassandra read and no chat-side decrypt is needed.
 - **INBOX**, filter on `subject.InboxMemberEventSubjects(siteID)`: member added, member
-  removed, joined-at refreshed, room renamed, on both lanes. A local user joining a
-  remote-site room arrives on the external lane, so a site's members index knows
-  every room its own users are in, including rooms whose messages are archived
-  elsewhere.
+  removed, joined-at refreshed, room renamed, on both lanes. Joined-at refreshed is
+  acknowledged without being archived. A local user joining a remote-site room
+  arrives on the external lane, so a site's members index knows every room its own
+  users are in, including rooms whose messages are archived elsewhere.
 
 ### Batching
 
@@ -390,8 +390,10 @@ are logged, counted, and terminated.
 
 ### Segment format
 
-Key: `{site}/{yyyy}/{mm}/{dd}/{hh}/{firstSeq}-{lastSeq}.seg`. Time-ordered by
-construction; room is not in the key because the index answers by-room questions.
+Key: `{site}/{yyyy}/{mm}/{dd}/{hh}/{lane}-{firstSeq}-{lastSeq}.seg`. Time-ordered by
+construction; room is not in the key because the index answers by-room questions. The
+lane (`events` or `members`) is in the key because the two lanes read different streams
+with independent sequence spaces.
 
 Body:
 
@@ -400,8 +402,12 @@ Body:
    individually with the site's archive DEK and a fresh nonce.
 3. Trailer: SHA-256 over everything before it.
 
-An archive record is the canonical event plus stream name, stream sequence, and a
-SHA-256 of its canonical JSON. The manifest of which messages a segment holds is inside
+An archive record is the canonical event plus site, stream name, stream sequence,
+subject, and event time. Its `contentHash` is `hmac-sha256:` plus
+hex(HMAC-SHA256(k, record canonical JSON)), with `k = HKDF-SHA256(DEK, info
+"chat-audit-record-mac")` derived from the site's DEK. An unkeyed hash would let a
+reader of the index confirm a guessed short body offline, so verification requires the
+DEK. The manifest of which messages a segment holds is inside
 the encrypted frames, so the bucket exposes only site and time.
 
 ### Encryption
@@ -444,6 +450,12 @@ conflict on the same id. The bucket gains a duplicate frame, the index is unchan
 and a rebuild dedups by stream sequence. Duplicates cost storage, never correctness.
 The worker never issues an update or a delete against any index.
 
+A replay that re-seals the same stream sequences within the same clock hour produces the
+same segment key, so the versioned, locked bucket gains a second object version under it
+(the frames carry fresh nonces, so the bytes differ). Documents carry no version id, so a
+reader verifies the frame by `contentHash`, which it already does; the audit-service PR
+should consider recording the object version id.
+
 ### Behaviour when the bucket is unavailable
 
 In plain terms: the pod tries the upload twice over about twenty seconds while
@@ -484,16 +496,15 @@ The index is append-only and event-sourced: one immutable document per archived 
 never a document per message that gets updated. Two Elasticsearch controls enforce it.
 The worker's role holds only the `create_doc` privilege on the audit indices, which
 allows new documents and refuses updates, deletes, and overwrites, so a stolen worker
-credential cannot change history. The lifecycle policy sets `index.blocks.write` on
-each daily index at rollover, after which even creates are refused. Altering the index
+credential cannot change history. The lifecycle policy sets each daily index
+read-only at `min_age: 1d`, after which even creates are refused. Altering the index
 then takes cluster-admin rights, which is why the bucket remains the evidence copy:
 Elasticsearch has no equivalent of Object Lock.
 
 Three indices on each site's archive cluster, templates pushed by the worker's
 `bootstrap.go` when `BOOTSTRAP_STREAMS=true`, following the repo convention. Event
-indices are daily under an index lifecycle policy: read-only at rollover, then hot,
-warm, cold, then searchable snapshots on the same S3 service. Retention is a lifecycle
-policy.
+indices are daily under an index lifecycle policy: hot, read-only at `min_age: 1d`,
+deleted at `ARCHIVE_INDEX_RETENTION`.
 
 **`audit-events-{site}-{yyyy.mm.dd}`**, one document per message event, id
 `{site}-{streamSeq}`:
@@ -503,32 +514,33 @@ policy.
 | `seq` | long | Stream sequence; the fold order |
 | `eventType` | keyword | `created`, `updated`, `deleted`, `pinned`, `unpinned`, `reacted` |
 | `eventAt` | date | Event timestamp |
-| `messageId`, `roomId`, `siteId`, `roomType` | keyword | |
+| `messageId`, `roomId`, `siteId` | keyword | No `roomType`: the canonical message event does not carry it, so the fold takes it from the members index |
 | `senderAccount`, `senderId` | keyword | Author of the message, on every event |
 | `createdAt` | date | Message creation time, on every event, for range clamping and sort |
 | `threadParentId` | keyword | |
 | `attachmentCount`, `attachmentTypes` | integer, keyword | On `created` and `updated` |
-| `actorAccount` | keyword | On `pinned`, `unpinned`, `reacted`, `deleted` |
-| `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | Pointer to the sealed record |
+| `actorAccount` | keyword | On `pinned`, `unpinned`, `reacted`, `deleted`; for `pinned` and `unpinned` the pinner (`message.pinnedBy.account`), falling back to the author |
+| `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | Pointer to the sealed record; `contentHash` is the keyed `hmac-sha256:` digest of the record |
 | `encBody` | binary, not indexed | Ciphertext of body, cards, quoted parent; only on `created` and `updated` |
 
-**`audit-members-{site}-{yyyy.mm.dd}`**, one document per membership event, id
-`{site}-{streamSeq}`:
+**`audit-members-{site}-{yyyy.mm.dd}`**, one document per affected account of a
+membership event, id `{site}-{streamSeq}-{i}` with `i` the account's position in the
+event (one document with empty `account` for `room_renamed`):
 
 | Field | ES type | Notes |
 |---|---|---|
 | `seq`, `eventType`, `eventAt` | long, keyword, date | `member_added`, `member_removed`, `room_renamed` |
 | `roomId`, `roomSiteId`, `account`, `roomType`, `roomName` | keyword | `roomSiteId` is the site that archives the room's messages, which for a remote room differs from the index's site; `account` empty on `room_renamed` |
-| `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | |
+| `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | `contentHash` as for events; every document of one event shares the event's record |
 
 **`audit-blobs-{site}`**, one document per attachment, id `{site}-{fileId}`:
 
 | Field | ES type | Notes |
 |---|---|---|
 | `fileId`, `messageId`, `roomId`, `siteId` | keyword | |
-| `fileName`, `contentType`, `sizeBytes` | keyword, keyword, long | From the attachment metadata |
+| `fileName`, `contentType`, `sizeBytes` | keyword, keyword, long | From the attachment metadata; `sizeBytes` of `-1` means over the size cap, size unknown at source |
 | `blobKey`, `plainSha256`, `chunkBytes` | keyword, keyword, integer | Empty when skipped |
-| `skipped` | keyword | Absent, `size`, or `missing` |
+| `skipped` | keyword | Absent, `size`, `missing`, or `legacy` |
 | `archivedAt` | date | |
 
 **`audit-keys-{site}`**, exactly one document, id `current`, written once with
@@ -540,10 +552,11 @@ policy.
 | `wrappedDek` | binary, not indexed | Output of the transit `datakey/wrapped` call |
 | `createdAt` | date | |
 
-`encBody` is kept for `ARCHIVE_INDEX_BODY_RETENTION` (default 180d). Because documents
-are immutable, stripping it is done by the lifecycle policy reindexing the day into a
-body-less index and swapping the alias, not by updating documents. Older messages are
-read from the segment by ranged GET at the stored offset.
+`encBody` is meant to be kept for 180d. Because documents are immutable, stripping is a
+scheduled reindex job owned by the audit-service PR; ILM has no reindex action. The
+policy sets each daily index read-only at `min_age: 1d` and deletes it at
+`ARCHIVE_INDEX_RETENTION` (default `2555d`). Older messages are read from the segment by
+ranged GET at the stored offset.
 
 ### Attachment lane
 
@@ -559,13 +572,19 @@ unlike the segment lane, does honest long work per message. Per attachment it:
 
 1. Skips the blob when its declared size exceeds `ARCHIVE_BLOB_MAX_BYTES` (default the
    upload cap, 100 MiB) and records a metadata-only document with `skipped: size`.
-2. Downloads the blob the way `upload-service` does: `pkg/drive` with the site's Drive
-   credential for Drive-hosted files, the S3 client for MinIO-hosted ones.
+2. Downloads the blob through `pkg/drive` with the site's Drive credential, from the
+   `drive_host` in the link `upload-service` wrote (`api/v1/file/rooms/...?drive_host=`).
+   Legacy MinIO-hosted attachments (`api/v1/file-upload/...`) are recorded as
+   `skipped: legacy`, because resolving them needs the upload MongoDB lookup this worker
+   deliberately does not have. `upload-service` only writes the relative Drive form;
+   absolute legacy URLs are normalised to the relative `file-upload` form before the
+   worker sees them (`pkg/model/cassandra/attachment_legacy.go`).
 3. Streams it through chunked AES-GCM with the site's archive DEK, 4 MiB chunks, a
    fresh nonce per chunk, and the chunk index and file id as authenticated data, while
    computing the plaintext SHA-256.
 4. PUTs the result once to `{site}/blobs/{fileId}` in the archive bucket, under the
-   bucket's Object Lock rule.
+   bucket's Object Lock rule. The encrypted blob is buffered in memory before the PUT,
+   bounded by `ARCHIVE_BLOB_MAX_BYTES` x `ARCHIVE_BLOB_WORKERS` per pod.
 5. Creates one `audit-blobs-{site}` document (below) with `op_type: create`. A
    redelivery conflicts on the id and is done. Acks the message.
 
@@ -573,6 +592,11 @@ A download that fails after the in-process attempts NAKs through `jsretry`; a bl
 no longer exists at the source is recorded as `skipped: missing` and acked, since
 retrying cannot bring it back. Blobs are archived once per file id even when the same
 file is referenced by several messages.
+
+The lane reserves a worker slot (`ARCHIVE_BLOB_WORKERS`) before each fetch and asks for
+no more messages than it has free slots, so no delivered message waits for a worker with
+its ack wait running and no heartbeat. A message that exhausts the delivery budget is
+Termed with a logged `disposition=drop` and gets no `BlobDoc`.
 
 ### Cross-cluster search
 
@@ -641,7 +665,8 @@ it is logged as a download rather than a read.
 
 **Verify** takes grant, site, and message ID, fetches the segment from that site's
 bucket with that site's read credential, decrypts the frame at the offset with that
-site's DEK, recomputes the record hash, and reports whether it matches `contentHash`.
+site's DEK, recomputes the keyed record MAC (the key is derived from that DEK), and
+reports whether it matches `contentHash`.
 
 Plaintext exists only inside the `audit-service` process and the auditor's browser.
 Responses set `Cache-Control: no-store`.
@@ -727,8 +752,7 @@ given sequence and reports the first break.
   reviewer walk the hash chain from the bucket alone, with no Vault and no running
   service.
 - **Credentials.** Worker: NATS user limited to its three consumers, its site's bucket
-  `PutObject` only, a read-only Drive API credential and a `GetObject`-only credential
-  on the upload MinIO bucket for the attachment lane, its site's Elasticsearch role with `create_doc` only on the three
+  `PutObject` only, a read-only Drive API credential for the attachment lane, its site's Elasticsearch role with `create_doc` only on the three
   index patterns plus the template and lifecycle privileges `bootstrap.go` needs.
   Service:
   one `GetObject`-only credential per site's bucket, a read role on the hub, the audit
@@ -739,6 +763,9 @@ given sequence and reports the first break.
   issuer container with group claims on test users.
 - **Buckets.** Object Lock compliance mode with a default retention rule. Bucket admin
   credentials stay with ops. Versioning is on, as Object Lock requires.
+- **Disabling the attachment lane.** Turning `ARCHIVE_BLOBS_ENABLED` off after it was on
+  leaves the `archive-worker-blobs` durable on the server, and its backlog
+  grows with every created message. Ops must delete the durable.
 - **Replicas.** `audit-service` exactly one. `archive-worker` three per site, scaling
   with the ack-pending formula in §4.
 
@@ -775,9 +802,10 @@ there is no body filter.
 `archive-worker`: the §4 batching table plus `NATS_URL`, `NATS_CREDS_FILE`, `SITE_ID`,
 `ARCHIVE_SEARCH_URL`, `ARCHIVE_SEARCH_USERNAME`, `ARCHIVE_SEARCH_PASSWORD`,
 `ARCHIVE_BUCKET`, `ARCHIVE_S3_*`, `VAULT_*`, `ATREST_VAULT_TRANSIT_KEY`,
-`ARCHIVE_INDEX_BODY_RETENTION`, `ARCHIVE_BLOB_MAX_BYTES`, `ARCHIVE_BLOB_ACK_WAIT`,
-`DRIVE_*` (as `upload-service`), `UPLOAD_S3_*` (read-only), `CONSUMER_*`,
-`BOOTSTRAP_STREAMS`, `MAX_WORKERS`.
+`ARCHIVE_INDEX_RETENTION`, `ARCHIVE_REQUIRE_OBJECT_LOCK`, `ARCHIVE_REPLICAS`,
+`ARCHIVE_FETCH_BATCH`, `ARCHIVE_BLOBS_ENABLED`, `ARCHIVE_BLOB_WORKERS`,
+`ARCHIVE_BLOB_MAX_BYTES`, `ARCHIVE_BLOB_ACK_WAIT`, `DRIVE_*` (as `upload-service`),
+`CONSUMER_*`, `BOOTSTRAP_STREAMS`.
 
 Both services follow the repo layout: `main.go`, `handler.go`, `routes.go` (service
 only), `store.go` with mockgen, `store_mongo.go` (service only), `store_search.go`,
