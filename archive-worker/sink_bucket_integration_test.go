@@ -53,8 +53,17 @@ func TestBucketSink_LockedBucket(t *testing.T) {
 	assert.Equal(t, body, got)
 
 	t.Run("retained object cannot be deleted", func(t *testing.T) {
-		err := c.RemoveObject(ctx, bucket, "site-a/2026/10/05/14/events-1-3.seg", minio.RemoveObjectOptions{})
-		assert.Error(t, err, "compliance retention must refuse the delete")
+		// A locked bucket is versioned: a delete without a version id only adds a
+		// delete marker, so target the stored version.
+		info, err := c.StatObject(ctx, bucket, "site-a/2026/10/05/14/events-1-3.seg", minio.StatObjectOptions{})
+		require.NoError(t, err)
+		require.NotEmpty(t, info.VersionID)
+		err = c.RemoveObject(ctx, bucket, "site-a/2026/10/05/14/events-1-3.seg", minio.RemoveObjectOptions{VersionID: info.VersionID})
+		assert.Error(t, err, "compliance retention must refuse the versioned delete")
+		retMode, _, err := c.GetObjectRetention(ctx, bucket, "site-a/2026/10/05/14/events-1-3.seg", info.VersionID)
+		require.NoError(t, err)
+		require.NotNil(t, retMode)
+		assert.Equal(t, minio.Compliance, *retMode)
 	})
 	t.Run("unlocked bucket is refused", func(t *testing.T) {
 		plain, unlocked := testutil.MinIO(t, "archive-unlocked")

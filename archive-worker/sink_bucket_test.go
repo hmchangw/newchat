@@ -21,6 +21,7 @@ func (f fakeLock) GetObjectLockConfig(context.Context, string) (string, *minio.R
 
 func TestCheckObjectLock(t *testing.T) {
 	compliance, governance := minio.Compliance, minio.Governance
+	notFound := minio.ErrorResponse{Code: "ObjectLockConfigurationNotFoundError", StatusCode: 404}
 	cases := []struct {
 		name    string
 		lock    fakeLock
@@ -31,6 +32,8 @@ func TestCheckObjectLock(t *testing.T) {
 		{"governance fails", fakeLock{lock: "Enabled", mode: &governance}, true, errObjectLockRequired},
 		{"no lock fails", fakeLock{lock: "", mode: nil}, true, errObjectLockRequired},
 		{"no lock allowed when not required", fakeLock{lock: ""}, false, nil},
+		{"lock config not found is absent and fails when required", fakeLock{err: notFound}, true, errObjectLockRequired},
+		{"lock config not found is absent and warns when not required", fakeLock{err: notFound}, false, nil},
 		{"lookup error fails even when not required", fakeLock{err: errors.New("403")}, false, errors.New("403")},
 	}
 	for _, tc := range cases {

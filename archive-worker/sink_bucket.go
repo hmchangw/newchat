@@ -22,6 +22,11 @@ type lockConfigReader interface {
 
 func checkObjectLock(ctx context.Context, r lockConfigReader, bucket string, require bool) error {
 	lock, mode, _, _, err := r.GetObjectLockConfig(ctx, bucket)
+	if err != nil && minio.ToErrorResponse(err).Code == "ObjectLockConfigurationNotFoundError" {
+		// A bucket created without Object Lock answers 404 here; that is "lock
+		// absent", not a failed lookup.
+		lock, mode, err = "", nil, nil
+	}
 	if err != nil {
 		return fmt.Errorf("read object lock config for %q: %w", bucket, err)
 	}
