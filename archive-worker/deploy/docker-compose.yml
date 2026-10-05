@@ -20,7 +20,8 @@ services:
       - ARCHIVE_BUCKET=${ARCHIVE_BUCKET:-archive-${SITE_ID:-site-local}}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
-      - ATREST_VAULT_TRANSIT_KEY=chat-audit-kek
+      # One audit transit key per site: a worker can unwrap only its own site's DEK.
+      - ATREST_VAULT_TRANSIT_KEY=chat-audit-kek-${SITE_ID:-site-local}
       # Off locally: no Drive stub exists (DRIVE_URL points at a nonexistent drive-stub), so the blob lane would NAK-loop.
       - ARCHIVE_BLOBS_ENABLED=${ARCHIVE_BLOBS_ENABLED:-false}
       - DRIVE_URL=${DRIVE_URL:-http://drive-stub:8080}

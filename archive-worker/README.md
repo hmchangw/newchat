@@ -109,10 +109,14 @@ escrow.
 
 ## Vault
 
-Transit key `chat-audit-kek` (`ATREST_VAULT_TRANSIT_KEY`), shared by every site's
-worker and the central audit service. The worker's role needs `datakey` and `encrypt`
-on it and uses Vault only to create or unwrap its site's DEK. `chat-kek` is never
-involved.
+One transit key per site, `chat-audit-kek-{site}` (`ATREST_VAULT_TRANSIT_KEY`). The
+worker's role holds `datakey/wrapped` and `decrypt` on its own site's key only, and no
+`encrypt`: it mints its DEK through `transit/datakey/wrapped` and unwraps it with
+`decrypt`, and uses Vault for nothing else. The central audit service holds `decrypt`
+on every site's key. One shared key would let any site's worker unwrap every site's
+DEK, since each site's wrapped DEK is readable through the archive index and the
+bucket escrow; a key per site confines a stolen worker role to its own site.
+`chat-kek` is never involved.
 
 ## NATS permissions
 
@@ -152,14 +156,16 @@ security API and bind the worker's `ARCHIVE_SEARCH_USERNAME` user to it:
 
 ```
 PUT /_security/role/audit-writer
-{"indices":[{"names":["audit-*"],"privileges":["create_doc","auto_configure"]}]}
+{"indices":[{"names":["audit-*"],"privileges":["create_doc","read","auto_configure"]}]}
 ```
 
 `create_doc` permits `op_type=create` (every bulk action the worker sends) and refuses
-index-over-existing and delete. Startup also upserts index templates and the lifecycle
-policy and reads the key document, which need `manage_index_templates`, `manage_ilm`
-and `read` on `audit-keys-*`; grant those to a separate bootstrap identity or add them
-to the role if one identity is used. The integration suite exercises the `create_doc`
+index-over-existing and delete. `read` is for the documents the worker looks up while
+running: a create conflict is read back to compare its `contentHash`, and an
+attachment's `audit-blobs` document is looked up before any download; it grants no
+write. Startup also upserts index templates and the lifecycle policy and reads the key
+document, which need `manage_index_templates` and `manage_ilm`; grant those to a
+separate bootstrap identity or add them to the role if one identity is used. The integration suite exercises the `create_doc`
 refusal only when the test cluster has security enabled, which it does not today, so it
 skips that case.
 

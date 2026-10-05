@@ -673,13 +673,17 @@ docker compose -f docker-local/compose.deps.yaml --profile dek-reset run --rm va
 
 `archive-worker` copies canonical message and membership events into a MinIO
 bucket and `audit-*` Elasticsearch indices. The init profile (`vault-init`,
-`minio-init`) also creates the Vault transit key `chat-audit-kek` and the
+`minio-init`) also creates the per-site Vault transit keys
+`chat-audit-kek-site-local` and `chat-audit-kek-site-remote` (the worker uses
+`chat-audit-kek-<SITE_ID>`) and the
 Object-Lock buckets `archive-site-local` and `archive-site-remote`, each with
 versioning on and a 1-day COMPLIANCE default retention. Locked objects cannot
 be deleted for a day, so `docker compose down -v` is the way to reset the
 archive locally. Vault dev mode is in-memory, so a Vault restart replaces
-`chat-audit-kek` and the wrapped archive DEK kept in `audit-keys-<site>` can no
-longer be unwrapped; reset the Elasticsearch volume with `down -v` as well.
+the site's audit key and the wrapped archive DEK kept in `audit-keys-<site>` (and
+escrowed in the bucket under `<site>/keys/`) can no longer be unwrapped; reset the
+Elasticsearch and MinIO volumes with `down -v` as well, since the worker refuses
+to mint a new key while the bucket still holds the old escrow.
 
 `minio-init` runs `mc` from the same `pgsty/minio` image as the server (it ships
 `mc`), so no separate client image is pulled.

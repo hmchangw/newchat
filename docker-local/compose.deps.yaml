@@ -347,6 +347,9 @@ services:
         vault secrets enable -path=transit transit || true
         vault write -f transit/keys/chat-kek
         vault write -f transit/keys/chat-audit-kek
+        # Per-site audit keys: archive-worker uses chat-audit-kek-<SITE_ID>.
+        vault write -f transit/keys/chat-audit-kek-site-local
+        vault write -f transit/keys/chat-audit-kek-site-remote
     networks:
       - chat-local
 

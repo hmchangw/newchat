@@ -113,7 +113,7 @@ sequenceDiagram
     autonumber
     participant JS as NATS JetStream (site A)
     participant W as archive-worker (site A)
-    participant V as Vault (chat-audit-kek)
+    participant V as Vault (chat-audit-kek-A)
     participant B as Archive bucket (A)
     participant ES as Archive ES (A)
 
@@ -161,7 +161,7 @@ sequenceDiagram
     participant H as CCS hub
     participant EA as Archive ES (A)
     participant EB as Archive ES (B)
-    participant V as Vault (chat-audit-kek)
+    participant V as Vault (chat-audit-kek-B)
     participant BB as Archive bucket (B)
 
     Req->>FE: open console
@@ -372,12 +372,17 @@ bounds trips.
 |---|---|---|
 | `ARCHIVE_FILL_INTERVAL` | `10s` | Time since the first event in the batch |
 | `ARCHIVE_BATCH_EVENTS` | `2000` | Event count |
-| `ARCHIVE_BATCH_BYTES` | `8MiB` | Encrypted size |
+| `ARCHIVE_BATCH_BYTES` | `8388608` | Encrypted size |
 | `ARCHIVE_PUT_TIMEOUT` | `10s` | One upload attempt |
 | `ARCHIVE_BULK_TIMEOUT` | `10s` | One index attempt |
 | `ARCHIVE_WRITE_ATTEMPTS` | `2` | Upload and index attempts before a NAK |
-| `CONSUMER_ACK_WAIT` | `120s` | Must exceed fill + 2 × (attempts × (put + bulk) + bulk + Σ retry waits); 10 + 2 × (40 + 10 + 1.5) = 113s at defaults |
-| `CONSUMER_MAX_ACK_PENDING` | `12000` | Must be ≥ replicas × 2 × `ARCHIVE_BATCH_EVENTS` |
+| `CONSUMER_ACK_WAIT` | none, must be set | Must exceed fill + 2 × (attempts × (put + bulk) + bulk + Σ retry waits); 10 + 2 × (40 + 10 + 1.5) = 113s at defaults |
+| `CONSUMER_MAX_ACK_PENDING` | none, must be set | Should be ≥ replicas × 2 × `ARCHIVE_BATCH_EVENTS` (`ARCHIVE_REPLICAS` feeds this check) |
+
+`CONSUMER_ACK_WAIT` and `CONSUMER_MAX_ACK_PENDING` have no worker-specific defaults. The
+shared `CONSUMER_*` defaults (30s and 1000) are below what the worker needs, so a
+deployment that leaves them unset fails the ack-wait check at startup and warns on the
+ack-pending ceiling. Production sets `120s` and `12000` with `ARCHIVE_REPLICAS=3`.
 
 At the projected 200 events a second the count bound trips every 10 seconds, giving
 about 8,600 objects a day of roughly 4 MiB each. The worst-case batch time is one fill
@@ -421,10 +426,13 @@ the encrypted frames, so the bucket exposes only site and time.
 
 ### Encryption
 
-One transit key, `chat-audit-kek`, on one Vault that every site's worker and the central
-service can reach. This is the one cross-site dependency the workers have, and they use
-it only when creating or unwrapping their site's DEK, which is rare and cached, so it is
-never on the write path.
+One transit key per site, `chat-audit-kek-{site}`, on one Vault that every site's worker
+and the central service can reach. This is the one cross-site dependency the workers
+have, and they use it only when creating or unwrapping their site's DEK, which is rare
+and cached, so it is never on the write path. The key is per site because each site's
+wrapped DEK is readable by design (through the index, CCS and the bucket escrow): with
+one shared key, any site's worker role could unwrap every site's DEK, so a stolen
+worker credential would expose the whole archive rather than its own site.
 
 Each site has one archive DEK. The worker generates it through
 `atrest.KeyWrapper.GenerateDataKey` on first start, writes the wrapped form to the
@@ -442,9 +450,10 @@ the same CCS path it uses for everything else, with no cross-site MongoDB or sec
 distribution. A wrapped DEK is safe to expose; only the Vault decrypt policy turns it
 into plaintext.
 
-`chat-kek` is never involved. The worker's Vault role has `datakey` and `encrypt` on the
-audit key; the service's role has `decrypt` only. No chat-side role has any policy on
-the audit key.
+`chat-kek` is never involved. Each site's worker role has `datakey/wrapped` and
+`decrypt` on its own site's key only, and no `encrypt`: it mints its DEK wrapped and
+unwraps it, nothing else. The service's role has `decrypt` on every site's key. No
+chat-side role has any policy on an audit key.
 
 ### Write order and acknowledgement
 
@@ -470,6 +479,15 @@ index is unchanged, and a rebuild dedups by stream sequence. Duplicates cost sto
 never correctness. The worker never issues an update or a delete against any index.
 `eventAt` falls back to the stream's store time, never the pod clock, when an event
 carries no timestamp, so a redelivery rebuilds the identical record and hash.
+
+Document ids carry the stream sequence and nothing that identifies the stream's
+lifetime. A stream that is deleted and recreated restarts its sequences at 1, so its
+events collide with the documents of the old stream's events. The read-back sees a
+different `contentHash`, so they are never mistaken for archived: each is terminated,
+logged at error and counted as a conflict, which is the alert. Their frames are in the
+bucket (the segment is written before the bulk) but they are not indexed. A stream
+epoch in document ids and segment keys is a follow-up; until then, recreating an
+archived stream is an operation that needs the archive indices rotated first.
 
 A replay that re-seals the same stream sequences always produces a new segment key,
 because of the random suffix, so it never adds an object version under a key an earlier
@@ -514,7 +532,7 @@ backup, for fast restore rather than evidence.
 
 The index is append-only and event-sourced: one immutable document per archived event,
 never a document per message that gets updated. Two Elasticsearch controls enforce it.
-The worker's role holds only the `create_doc` privilege on the audit indices, which
+The worker's role holds only `create_doc` and `read` on the audit indices, which
 allows new documents and refuses updates, deletes, and overwrites, so a stolen worker
 credential cannot change history. The lifecycle policy sets each daily index
 read-only at `min_age: 1d`, after which even creates are refused. Altering the index
@@ -639,7 +657,8 @@ Termed with a logged `disposition=drop` and gets no `BlobDoc`.
 
 Each site's archive cluster is registered as a remote on the central CCS hub under its
 site ID as the cluster alias, with a cross-cluster API key granting read on
-`audit-events-*`, `audit-members-*`, and `audit-keys-*` and nothing else. Every
+`audit-events-*`, `audit-members-*`, `audit-blobs-*` and `audit-keys-*` and nothing else
+(`audit-blobs-*` so the console can show an attachment's archive state and skip reason). Every
 remote is marked `skip_unavailable: true`, so one site being down degrades a query to
 the sites that answered rather than failing it. `audit-service` queries
 `*:audit-events-*` and `*:audit-members-*` through the hub, exactly as
@@ -779,9 +798,11 @@ given sequence and reports the first break.
   (`{site}/keys/current.json`, `{site}/keys/{keyId}.json`); the index copy is the fast
   path. Restoring a lost `audit-keys-{site}` document is an ops step from the bucket
   copy; the worker refuses to start rather than mint over it.
-- **Vault.** One key, two roles. Workers, one role per site bound to that site's
-  ServiceAccount: `datakey`, `encrypt` on `chat-audit-kek`. Service: `decrypt` on
-  `chat-audit-kek`. Neither has any policy on `chat-kek`.
+- **Vault.** One key per site (`chat-audit-kek-{site}`). Workers, one role per site
+  bound to that site's ServiceAccount: `datakey/wrapped` and `decrypt` on that site's
+  key only, no `encrypt`. Service: `decrypt` on every site's key. Neither has any policy
+  on `chat-kek`. A single shared key would let any site's worker unwrap every site's
+  DEK, because the wrapped DEKs are readable through CCS and the bucket escrow.
 - **Storage encryption.** Every audit bucket also has server-side encryption on by
   default, bucket-managed (SSE-S3 or MinIO's KMS-backed default), with a KMS key
   separate from anything the chat services use. It is defence in depth for disks and
@@ -793,12 +814,14 @@ given sequence and reports the first break.
   reviewer walk the hash chain from the bucket alone, with no Vault and no running
   service.
 - **Credentials.** Worker: NATS user limited to its three consumers, its site's bucket
-  `PutObject`, plus `GetObject` on `{site}/keys/*` for the key escrow, a read-only Drive API credential for the attachment lane, its site's Elasticsearch role with `create_doc` only on the three
-  index patterns plus the template and lifecycle privileges `bootstrap.go` needs.
+  `PutObject`, plus `GetObject` on `{site}/keys/*` for the key escrow, a read-only Drive API credential for the attachment lane, its site's Elasticsearch role with `create_doc` and `read` (for conflict
+  read-back and the attachment lookup), and no other write, on the four index patterns
+  (`audit-events-*`, `audit-members-*`, `audit-blobs-*`, `audit-keys-*`) plus the
+  template and lifecycle privileges `bootstrap.go` needs.
   Service:
   one `GetObject`-only credential per site's bucket, a read role on the hub, the audit
   MongoDB user, sink `PutObject` only. CCS: one cross-cluster API key per site,
-  installed on the hub, read-only on the three index patterns. All from secrets in the
+  installed on the hub, read-only on the four index patterns. All from secrets in the
   audit namespaces.
 - **No dev bypass.** `audit-service` has no dev mode. Local docker-compose runs an OIDC
   issuer container with group claims on test users.
@@ -835,7 +858,7 @@ there is no body filter.
 | `AUDIT_SITE_IDS` | required | Sites registered on the hub, e.g. `site-a,site-b` |
 | `AUDIT_SITE_{ID}_S3_ENDPOINT`, `_S3_BUCKET`, `_S3_ACCESS_KEY`, `_S3_SECRET_KEY` | required per site | Verification reads; `{ID}` is the site ID upper-cased with `-` as `_` |
 | `AUDIT_SINK_BUCKET`, `AUDIT_SINK_S3_ENDPOINT`, credentials | required | Ops log sink |
-| `VAULT_*`, `ATREST_VAULT_TRANSIT_KEY=chat-audit-kek` | required | Decrypt |
+| `VAULT_*` | required | Decrypt; the transit key for a site is `chat-audit-kek-{site}`, one per entry of `AUDIT_SITE_IDS` |
 | `AUDIT_MAX_TARGETS`, `AUDIT_DEFAULT_VALIDITY`, `AUDIT_MAX_VALIDITY` | 20, 7d, 30d | |
 | `AUDIT_PAGE_SIZE_DEFAULT`, `AUDIT_PAGE_SIZE_MAX` | 100, 500 | |
 | `AUDIT_CHECKPOINT_EVERY` | 1000 | |
@@ -921,6 +944,8 @@ Coverage floor 80%, target 90% on handlers and stores, per the repo rule.
 - Legal hold on live deletes.
 - A write-ahead-log variant of the worker that acks per message, if the NATS team
   rules out batch acknowledgement. Not designed here.
+- A stream epoch in archive document ids and segment keys, so a recreated stream
+  (sequences restarting at 1) archives instead of conflicting (§4).
 - Per-site secondary logging of CCS reads through the archive cluster's own audit
   trail, if a site must hold a local record of reads of its data.
 
@@ -941,8 +966,9 @@ Coverage floor 80%, target 90% on handlers and stores, per the repo rule.
   is the archive cluster's isolation and read credentials, plus server-side encryption
   on the snapshot repository; snapshots need no further encryption because bodies are
   already ciphertext.
-- **The archive DEK is one key per site.** Compromise of the audit Vault role exposes
-  every site's archive. Rotation follows the same re-wrap procedure as `chat-kek`.
+- **The archive DEK is one key per site, under a transit key per site.** Compromise of
+  one worker's Vault role exposes that site's archive only; compromise of the service's
+  role exposes every site's. Rotation follows the same re-wrap procedure as `chat-kek`.
 - **Partial results are silent unless shown.** `skip_unavailable` returns what answered.
   The `sitesSkipped` field, the console indicator, and the metric exist so an auditor
   never mistakes a site outage for "nothing there".
