@@ -27,7 +27,9 @@ services:
       - DRIVE_API_TOKEN=${DRIVE_API_TOKEN:-dev-only}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - DEV_MODE=true
-      - CONSUMER_ACK_WAIT=${CONSUMER_ACK_WAIT:-60s}
+      # Must exceed fill + 2 x (attempts x (put + bulk) + bulk + retry waits) = 113s at
+      # the defaults; startup refuses anything at or below it.
+      - CONSUMER_ACK_WAIT=${CONSUMER_ACK_WAIT:-120s}
       - CONSUMER_MAX_ACK_PENDING=${CONSUMER_MAX_ACK_PENDING:-4000}
       - ARCHIVE_REPLICAS=${ARCHIVE_REPLICAS:-1}
       - PPROF_ENABLED=${PPROF_ENABLED:-false}

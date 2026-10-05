@@ -42,7 +42,9 @@ func TestBuildMemberItem(t *testing.T) {
 		assert.Equal(t, "site-b", d.RoomSiteID, "room is archived at its own site")
 		assert.Equal(t, "r9", d.RoomID)
 		assert.Equal(t, "member_added", d.EventType)
-		assert.Equal(t, "audit-members-site-a-2025.10.05", it.docs[1].Index)
+		assert.Equal(t, "audit-members-site-a-2026.10.05", it.docs[1].Index, "index follows the archive clock (now), not the 2025 event time")
+		assert.Equal(t, time.UnixMilli(1759672800000).UTC(), d.EventAt)
+		assert.Equal(t, d.ContentHash, it.hash)
 		assert.NotEmpty(t, it.frame)
 		assert.Equal(t, it.docs[0].Doc.(*auditarchive.MemberDoc).ContentHash, d.ContentHash, "one frame, one hash")
 	})
@@ -74,5 +76,17 @@ func TestBuildMemberItem(t *testing.T) {
 		msg := &fakeMsg{subject: "x", data: outer, seq: 904, stream: "INBOX-site-a"}
 		_, err = buildMemberItem(context.Background(), "site-a", msg, outer, c, now)
 		assert.True(t, errors.Is(err, errPoison))
+	})
+	t.Run("missing timestamp falls back to the stream store time", func(t *testing.T) {
+		payload, err := json.Marshal(inner)
+		require.NoError(t, err)
+		data, err := json.Marshal(model.InboxEvent{Type: model.InboxMemberAdded, Payload: payload})
+		require.NoError(t, err)
+		stored := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+		msg := &fakeMsg{subject: "chat.inbox.site-a.external.member_added", data: data, seq: 905, stream: "INBOX-site-a", storedAt: stored}
+		it, err := buildMemberItem(context.Background(), "site-a", msg, data, c, now)
+		require.NoError(t, err)
+		assert.Equal(t, stored, it.docs[0].Doc.(*auditarchive.MemberDoc).EventAt)
+		assert.Equal(t, auditarchive.MembersIndex("site-a", now), it.docs[0].Index)
 	})
 }

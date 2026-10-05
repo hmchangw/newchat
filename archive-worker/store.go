@@ -19,6 +19,10 @@ type indexStore interface {
 // objectStore is the slice of the archive bucket the worker uses.
 type objectStore interface {
 	Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
+	// Stat reports whether key exists; a missing key is (false, nil).
+	Stat(ctx context.Context, key string) (bool, error)
+	// Get opens key for reading; the caller closes it.
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 }
 
 //go:generate mockgen -source=store.go -destination=mock_store_test.go -package=main

@@ -10,8 +10,6 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/hmchangw/chat/pkg/minioutil"
 )
 
 type fakeLock struct {
@@ -56,14 +54,27 @@ func TestCheckObjectLock(t *testing.T) {
 	}
 }
 
-// fakeObjectStore implements only the PutObject call bucketSink makes; the
-// embedded nil interface panics if anything else is used.
+// fakeObjectStore implements the bucketClient calls bucketSink makes.
 type fakeObjectStore struct {
-	minioutil.ObjectStore
 	bucket, key, contentType string
 	size                     int64
 	body                     string
 	err                      error
+	statErr                  error
+	getErr                   error
+}
+
+func (f *fakeObjectStore) StatObject(_ context.Context, bucket, key string, _ minio.StatObjectOptions) (minio.ObjectInfo, error) { //nolint:gocritic // hugeParam: signature fixed by minio-go
+	f.bucket, f.key = bucket, key
+	return minio.ObjectInfo{Key: key}, f.statErr
+}
+
+func (f *fakeObjectStore) GetObject(_ context.Context, bucket, key string, _ minio.GetObjectOptions) (*minio.Object, error) { //nolint:gocritic // hugeParam: signature fixed by minio-go
+	f.bucket, f.key = bucket, key
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return &minio.Object{}, nil
 }
 
 func (f *fakeObjectStore) PutObject(_ context.Context, bucket, key string, r io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) { //nolint:gocritic // hugeParam: signature fixed by minioutil.ObjectStore
@@ -90,5 +101,51 @@ func TestBucketSink_Put(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, cause)
 		assert.Contains(t, err.Error(), "archive-site-a/site-a/seg-1")
+	})
+}
+
+func TestBucketSink_Stat(t *testing.T) {
+	tests := []struct {
+		name    string
+		statErr error
+		want    bool
+		wantErr bool
+	}{
+		{"present", nil, true, false},
+		{"absent is not an error", minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}, false, false},
+		{"lookup failure is an error", errors.New("connection refused"), false, true},
+		{"access denied is an error", minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeObjectStore{statErr: tc.statErr}
+			got, err := newBucketSink(fake, "archive-site-a").Stat(context.Background(), "site-a/keys/current.json")
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, "archive-site-a", fake.bucket)
+			assert.Equal(t, "site-a/keys/current.json", fake.key)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, tc.statErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestBucketSink_Get(t *testing.T) {
+	t.Run("opens the object", func(t *testing.T) {
+		fake := &fakeObjectStore{}
+		rc, err := newBucketSink(fake, "archive-site-a").Get(context.Background(), "site-a/keys/current.json")
+		require.NoError(t, err)
+		assert.NotNil(t, rc)
+		assert.Equal(t, "site-a/keys/current.json", fake.key)
+	})
+	t.Run("wraps a failure with bucket and key", func(t *testing.T) {
+		cause := errors.New("connection refused")
+		_, err := newBucketSink(&fakeObjectStore{getErr: cause}, "archive-site-a").Get(context.Background(), "k")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, cause)
+		assert.Contains(t, err.Error(), "archive-site-a/k")
 	})
 }

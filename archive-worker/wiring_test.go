@@ -52,7 +52,8 @@ func TestNewBlobLaneConfig(t *testing.T) {
 	settings := blobConsumerSettings(&cfg)
 	cc := consumerConfig(blobsDurable, nil, settings)
 
-	got := newBlobLaneConfig(&cfg, &cc)
+	got := newBlobLaneConfig(&cfg, &cc, "kid-1")
+	assert.Equal(t, "kid-1", got.keyID)
 	assert.Equal(t, cc.MaxDeliver, got.maxDeliver, "wired from the consumer that was created")
 	assert.Equal(t, cc.BackOff[0], got.ackWait, "heartbeat paces off the deadline the server enforces")
 	assert.Equal(t, cfg.BlobAckWait, got.ackWait)
@@ -118,8 +119,9 @@ func TestNewLaneConfig(t *testing.T) {
 	m := &metrics{}
 	for _, name := range []string{"events", "members"} {
 		t.Run(name, func(t *testing.T) {
-			got := newLaneConfig(&cfg, name, m)
+			got := newLaneConfig(&cfg, name, "kid-1", m)
 			assert.Equal(t, cfg.SiteID, got.site)
+			assert.Equal(t, "kid-1", got.keyID)
 			assert.Equal(t, name, got.name)
 			assert.Equal(t, cfg.FetchBatch, got.fetchBatch)
 			assert.Equal(t, cfg.FillInterval, got.fillInterval)
@@ -133,12 +135,23 @@ func TestNewBlobLaneConfig_AckWait(t *testing.T) {
 	cfg := validConfig()
 	t.Run("backoff head wins over ack wait", func(t *testing.T) {
 		cc := jetstream.ConsumerConfig{AckWait: time.Minute, BackOff: []time.Duration{3 * time.Minute, 6 * time.Minute}, MaxDeliver: 17}
-		got := newBlobLaneConfig(&cfg, &cc)
+		got := newBlobLaneConfig(&cfg, &cc, "kid-1")
 		assert.Equal(t, 3*time.Minute, got.ackWait)
 		assert.Equal(t, 17, got.maxDeliver)
 	})
 	t.Run("no backoff falls back to ack wait", func(t *testing.T) {
 		cc := jetstream.ConsumerConfig{AckWait: time.Minute}
-		assert.Equal(t, time.Minute, newBlobLaneConfig(&cfg, &cc).ackWait)
+		assert.Equal(t, time.Minute, newBlobLaneConfig(&cfg, &cc, "kid-1").ackWait)
 	})
+}
+
+func TestNewFlushConfig(t *testing.T) {
+	cfg := validConfig()
+	got := newFlushConfig(&cfg, sourceMembers)
+	assert.Equal(t, sourceMembers, got.source)
+	assert.Equal(t, cfg.PutTimeout, got.putTimeout)
+	assert.Equal(t, cfg.BulkTimeout, got.bulkTimeout)
+	assert.Equal(t, cfg.WriteAttempts, got.attempts)
+	assert.Equal(t, defaultRetryWait(1), got.retryWait(1), "the schedule config.validate sums")
+	assert.NotNil(t, got.now)
 }

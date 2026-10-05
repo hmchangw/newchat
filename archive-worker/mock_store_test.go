@@ -127,6 +127,21 @@ func (m *MockobjectStore) EXPECT() *MockobjectStoreMockRecorder {
 	return m.recorder
 }
 
+// Get mocks base method.
+func (m *MockobjectStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Get", ctx, key)
+	ret0, _ := ret[0].(io.ReadCloser)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Get indicates an expected call of Get.
+func (mr *MockobjectStoreMockRecorder) Get(ctx, key any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockobjectStore)(nil).Get), ctx, key)
+}
+
 // Put mocks base method.
 func (m *MockobjectStore) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
 	m.ctrl.T.Helper()
@@ -139,4 +154,19 @@ func (m *MockobjectStore) Put(ctx context.Context, key string, body io.Reader, s
 func (mr *MockobjectStoreMockRecorder) Put(ctx, key, body, size, contentType any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Put", reflect.TypeOf((*MockobjectStore)(nil).Put), ctx, key, body, size, contentType)
+}
+
+// Stat mocks base method.
+func (m *MockobjectStore) Stat(ctx context.Context, key string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Stat", ctx, key)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Stat indicates an expected call of Stat.
+func (mr *MockobjectStoreMockRecorder) Stat(ctx, key any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stat", reflect.TypeOf((*MockobjectStore)(nil).Stat), ctx, key)
 }

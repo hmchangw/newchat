@@ -91,13 +91,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("connect archive bucket: %w", err)
 	}
-	objects := newBucketSink(objClient, cfg.Bucket)
+	bucket, ok := objClient.(bucketClient)
+	if !ok {
+		return fmt.Errorf("archive bucket client %T cannot stat objects", objClient)
+	}
+	objects := newBucketSink(bucket, cfg.Bucket)
 
 	wrapper, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
 	if err != nil {
 		return fmt.Errorf("create vault key wrapper: %w", err)
 	}
-	dek, err := loadOrCreateDEK(ctx, engine, wrapper, cfg.SiteID, time.Now)
+	dek, keyID, err := loadOrCreateDEK(ctx, engine, objects, wrapper, cfg.SiteID, time.Now)
 	if err != nil {
 		return fmt.Errorf("load archive DEK: %w", err)
 	}
@@ -147,11 +151,10 @@ func run() error {
 		return err
 	}
 
-	flushCfg := flushConfig{putTimeout: cfg.PutTimeout, bulkTimeout: cfg.BulkTimeout, attempts: cfg.WriteAttempts}
-	events := newLane(newLaneConfig(&cfg, "events", m), eventsFetcher, buildEventItem, cipher,
-		newBatcher(cfg.BatchEvents, cfg.BatchBytes, cfg.FillInterval), newFlusher(objects, engine, flushCfg, m), eventsGuard)
-	members := newLane(newLaneConfig(&cfg, "members", m), membersFetcher, buildMemberItem, cipher,
-		newBatcher(cfg.BatchEvents, cfg.BatchBytes, cfg.FillInterval), newFlusher(objects, engine, flushCfg, m), membersGuard)
+	events := newLane(newLaneConfig(&cfg, sourceEvents, keyID, m), eventsFetcher, buildEventItem, cipher,
+		newBatcher(cfg.BatchEvents, cfg.BatchBytes, cfg.FillInterval), newFlusher(objects, engine, newFlushConfig(&cfg, sourceEvents), m), eventsGuard)
+	members := newLane(newLaneConfig(&cfg, sourceMembers, keyID, m), membersFetcher, buildMemberItem, cipher,
+		newBatcher(cfg.BatchEvents, cfg.BatchBytes, cfg.FillInterval), newFlusher(objects, engine, newFlushConfig(&cfg, sourceMembers), m), membersGuard)
 
 	// Everything that can fail is created before any lane starts, so a failed
 	// consumer or health server never leaves running lanes behind.
@@ -165,7 +168,7 @@ func run() error {
 			return err
 		}
 		cfg.Drive.LoadBaseURLs()
-		blobs := newBlobLane(newBlobLaneConfig(&cfg, &blobCC), blobsFetcher, &driveSource{client: drive.NewClient(&cfg.Drive)}, objects, engine, cipher, blobsGuard, m)
+		blobs := newBlobLane(newBlobLaneConfig(&cfg, &blobCC, keyID), blobsFetcher, &driveSource{client: drive.NewClient(&cfg.Drive)}, objects, engine, cipher, blobsGuard, m)
 		runs = append(runs, blobs.run)
 		checks = append(checks, blobsGuard.Check())
 		guards = append(guards, blobsGuard)
@@ -179,7 +182,7 @@ func run() error {
 	for _, r := range runs {
 		lanes.start(ctx, r)
 	}
-	slog.Info("archive-worker started", "site", cfg.SiteID, "bucket", cfg.Bucket, "blobs", cfg.BlobsEnabled)
+	slog.Info("archive-worker started", "site", cfg.SiteID, "bucket", cfg.Bucket, "blobs", cfg.BlobsEnabled, "keyId", keyID)
 
 	shutdown.WaitOn(ctx, sig, 25*time.Second,
 		// First: the deliberate stop below must not read as a lane death.
@@ -226,20 +229,27 @@ func laneConsumerSettings(cfg *config) stream.ConsumerSettings {
 	return stream.WithUnlimitedRedelivery(cfg.Consumer)
 }
 
-func newLaneConfig(cfg *config, name string, m *metrics) laneConfig {
-	return laneConfig{site: cfg.SiteID, name: name, fetchBatch: cfg.FetchBatch, fillInterval: cfg.FillInterval, now: time.Now, metrics: m}
+func newLaneConfig(cfg *config, name, keyID string, m *metrics) laneConfig {
+	return laneConfig{site: cfg.SiteID, name: name, keyID: keyID, fetchBatch: cfg.FetchBatch, fillInterval: cfg.FillInterval, now: time.Now, metrics: m}
+}
+
+// newFlushConfig is one lane's flusher: its source label and the write budget
+// config.validate sizes the ack wait against.
+func newFlushConfig(cfg *config, source string) flushConfig {
+	return flushConfig{source: source, putTimeout: cfg.PutTimeout, bulkTimeout: cfg.BulkTimeout, attempts: cfg.WriteAttempts, retryWait: defaultRetryWait, now: time.Now}
 }
 
 // newBlobLaneConfig wires the blob lane from the consumer actually created:
 // MaxDeliver is the applied value, and the heartbeat paces off the deadline
 // the server enforces (BackOff[0] overwrites AckWait), not the configured field.
-func newBlobLaneConfig(cfg *config, cc *jetstream.ConsumerConfig) blobLaneConfig {
+func newBlobLaneConfig(cfg *config, cc *jetstream.ConsumerConfig, keyID string) blobLaneConfig {
 	ackWait := cc.AckWait
 	if len(cc.BackOff) > 0 {
 		ackWait = cc.BackOff[0]
 	}
 	return blobLaneConfig{
 		site:         cfg.SiteID,
+		keyID:        keyID,
 		maxBytes:     cfg.BlobMaxBytes,
 		chunkBytes:   auditarchive.DefaultChunkBytes,
 		workers:      cfg.BlobWorkers,

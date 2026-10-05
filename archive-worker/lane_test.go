@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,14 @@ type scriptedFetcher struct {
 	// message channel closes the way nats.go reports a failed pull.
 	firstErr error
 	calls    atomic.Int32
+	// infoErr is what Info reports: the consumer's state on the server.
+	infoErr   error
+	infoCalls atomic.Int32
+}
+
+func (f *scriptedFetcher) Info(context.Context) error {
+	f.infoCalls.Add(1)
+	return f.infoErr
 }
 
 // scripted builds a fetcher over batches; its idle channel closes on the first
@@ -98,12 +107,16 @@ func (e errFetcher) Fetch(context.Context, int, ...jetstream.FetchOpt) (msgBatch
 	return nil, e.err
 }
 
+func (e errFetcher) Info(context.Context) error { return nil }
+
 // flakyFetcher fails with err for the first n calls, then delegates.
 type flakyFetcher struct {
 	next  msgFetcher
 	err   error
 	fails int
 }
+
+func (f *flakyFetcher) Info(ctx context.Context) error { return f.next.Info(ctx) }
 
 func (f *flakyFetcher) Fetch(ctx context.Context, n int, o ...jetstream.FetchOpt) (msgBatch, error) {
 	if f.fails > 0 {
@@ -379,7 +392,107 @@ func TestLane_UnknownBatchErrorPausesBeforeRefetch(t *testing.T) {
 	close(stop)
 	<-done
 	assert.Equal(t, int32(1), sf.calls.Load())
+	assert.Equal(t, int32(1), sf.infoCalls.Load(), "the consumer is checked before pausing")
 	assert.NoError(t, guard.Check().Probe(context.Background()), "no responders is retried, not a loop death")
+}
+
+func TestLane_ConsumerLossIsTerminal(t *testing.T) {
+	tests := []struct {
+		name     string
+		infoErr  error
+		terminal bool
+	}{
+		{"consumer gone after no responders stops the lane", jetstream.ErrConsumerNotFound, true},
+		{"stream gone after no responders stops the lane", jetstream.ErrStreamNotFound, true},
+		{"a failed lookup is not a verdict, the lane pauses", errors.New("timeout"), false},
+		{"a live consumer means the lane pauses", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			events := loadEvents(t)
+			only := eventMsg(t, 1, events["created"])
+			obj := &fakeObjects{}
+			fired := make(chan struct{}, 1)
+			guard := loopguard.New("test-lane", func() { fired <- struct{}{} })
+			sf := scriptedErr(nats.ErrNoResponders, []jetstream.Msg{only})
+			sf.infoErr = tc.infoErr
+			l := newLane(laneCfg(), sf, buildEventItem, testCipher(t), newBatcher(100, 1<<20, time.Hour),
+				newFlusher(obj, &fakeIndex{}, cfgFast(), &metrics{}), guard)
+			paused := make(chan struct{}, 1)
+			l.newTimer = func(time.Duration) *time.Timer {
+				paused <- struct{}{}
+				return time.NewTimer(time.Hour)
+			}
+			stop, done := make(chan struct{}), make(chan struct{})
+			go l.run(context.Background(), stop, done)
+			if tc.terminal {
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Fatal("lane kept running on a deleted consumer")
+				}
+				assert.ErrorIs(t, guard.Check().Probe(context.Background()), tc.infoErr, "readiness names the lost consumer")
+				select {
+				case <-fired:
+				default:
+					t.Error("unexpected-stop hook did not run")
+				}
+				assert.Empty(t, paused, "no pause once the consumer is known gone")
+				assert.Equal(t, 1, obj.putCount(), "buffered messages are drained first")
+				assert.True(t, only.acked)
+				return
+			}
+			select {
+			case <-paused:
+			case <-time.After(2 * time.Second):
+				t.Fatal("lane did not pause")
+			}
+			close(stop)
+			<-done
+			assert.NoError(t, guard.Check().Probe(context.Background()))
+		})
+	}
+}
+
+func TestLane_CountsPoisonAndSkipBySource(t *testing.T) {
+	m, reader := testMetrics(t)
+	events := loadEvents(t)
+	skip := eventMsg(t, 3, func() model.MessageEvent { e := events["created"]; e.Event = model.EventThreadReplyAdded; return e }())
+	poison := &fakeMsg{subject: "x", data: []byte("{"), seq: 4, stream: "MESSAGES-CANONICAL-site-a"}
+	cfg := laneCfg()
+	cfg.name = sourceMembers
+	cfg.metrics = m
+	sf := scripted([]jetstream.Msg{skip, poison})
+	l := newLane(cfg, sf, buildEventItem, testCipher(t), newBatcher(100, 1<<20, time.Hour),
+		newFlusher(&fakeObjects{}, &fakeIndex{}, cfgFast(), m), loopguard.New("test-lane", func() {}))
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+	sf.waitIdle(t)
+	close(stop)
+	<-done
+	assert.Equal(t, int64(1), eventCount(t, reader, sourceMembers, outcomeSkip))
+	assert.Equal(t, int64(1), eventCount(t, reader, sourceMembers, outcomePoison))
+}
+
+func TestLane_SealStampsKeyID(t *testing.T) {
+	events := loadEvents(t)
+	only := eventMsg(t, 1, events["created"])
+	var stored bytes.Buffer
+	obj := &captureObjects{buf: &stored}
+	cfg := laneCfg()
+	cfg.keyID = "0123456789abcdef"
+	sf := scripted([]jetstream.Msg{only})
+	l := newLane(cfg, sf, buildEventItem, testCipher(t), newBatcher(1, 1<<20, time.Hour),
+		newFlusher(obj, &fakeIndex{}, cfgFast(), &metrics{}), loopguard.New("test-lane", func() {}))
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+	sf.waitIdle(t)
+	close(stop)
+	<-done // the drain waits for the in-flight flush
+	assert.True(t, only.acked)
+	h, _, err := auditarchive.ReadSegment(bytes.NewReader(stored.Bytes()))
+	require.NoError(t, err)
+	assert.Equal(t, "0123456789abcdef", h.KeyID)
 }
 
 func TestLane_TerminalFetchErrorDrainsBuffered(t *testing.T) {
@@ -401,6 +514,8 @@ type sequencedFetcher struct {
 	first, then msgFetcher
 	n           int
 }
+
+func (s *sequencedFetcher) Info(ctx context.Context) error { return s.then.Info(ctx) }
 
 func (s *sequencedFetcher) Fetch(ctx context.Context, n int, o ...jetstream.FetchOpt) (msgBatch, error) {
 	s.n++
@@ -446,8 +561,13 @@ func (f fakeO11yBatch) Stop()        {}
 
 type fakeO11yConsumer struct {
 	o11ynats.Consumer
-	batch o11ynats.MessageBatch
-	err   error
+	batch   o11ynats.MessageBatch
+	err     error
+	infoErr error
+}
+
+func (f fakeO11yConsumer) Info(context.Context) (*jetstream.ConsumerInfo, error) {
+	return &jetstream.ConsumerInfo{}, f.infoErr
 }
 
 func (f fakeO11yConsumer) Fetch(context.Context, int, ...jetstream.FetchOpt) (o11ynats.MessageBatch, error) {
@@ -471,8 +591,13 @@ func (f fakeRawBatch) Error() error { return f.err }
 
 type fakeRawConsumer struct {
 	jetstream.Consumer
-	batch jetstream.MessageBatch
-	err   error
+	batch   jetstream.MessageBatch
+	err     error
+	infoErr error
+}
+
+func (f fakeRawConsumer) Info(context.Context) (*jetstream.ConsumerInfo, error) {
+	return &jetstream.ConsumerInfo{}, f.infoErr
 }
 
 func (f fakeRawConsumer) Fetch(int, ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
@@ -513,6 +638,12 @@ func TestConsumerAdapters(t *testing.T) {
 		require.NoError(t, err)
 		drain(b)
 		assert.ErrorIs(t, b.Error(), jetstream.ErrBadRequest)
+	})
+	t.Run("both adapters report a lost consumer through Info", func(t *testing.T) {
+		assert.NoError(t, o11yConsumerAdapter{c: fakeO11yConsumer{}}.Info(ctx))
+		assert.NoError(t, rawConsumerAdapter{c: fakeRawConsumer{}}.Info(ctx))
+		assert.ErrorIs(t, o11yConsumerAdapter{c: fakeO11yConsumer{infoErr: jetstream.ErrConsumerNotFound}}.Info(ctx), jetstream.ErrConsumerNotFound)
+		assert.ErrorIs(t, rawConsumerAdapter{c: fakeRawConsumer{infoErr: jetstream.ErrConsumerNotFound}}.Info(ctx), jetstream.ErrConsumerNotFound)
 	})
 	t.Run("wrapped fetch errors still classify as terminal", func(t *testing.T) {
 		_, err := o11yConsumerAdapter{c: fakeO11yConsumer{err: jetstream.ErrConsumerNotFound}}.Fetch(ctx, 10)

@@ -376,12 +376,15 @@ bounds trips.
 | `ARCHIVE_PUT_TIMEOUT` | `10s` | One upload attempt |
 | `ARCHIVE_BULK_TIMEOUT` | `10s` | One index attempt |
 | `ARCHIVE_WRITE_ATTEMPTS` | `2` | Upload and index attempts before a NAK |
-| `CONSUMER_ACK_WAIT` | `60s` | Must exceed fill + attempts × (put + bulk timeouts); 10 + 2 × 20 = 50s at defaults |
+| `CONSUMER_ACK_WAIT` | `120s` | Must exceed fill + 2 × (attempts × (put + bulk) + bulk + Σ retry waits); 10 + 2 × (40 + 10 + 1.5) = 113s at defaults |
 | `CONSUMER_MAX_ACK_PENDING` | `12000` | Must be ≥ replicas × 2 × `ARCHIVE_BATCH_EVENTS` |
 
 At the projected 200 events a second the count bound trips every 10 seconds, giving
-about 8,600 objects a day of roughly 4 MiB each. Startup refuses a configuration where
-the worst-case batch time exceeds the ack wait, and warns when the ack-pending ceiling
+about 8,600 objects a day of roughly 4 MiB each. The worst-case batch time is one fill
+interval plus two flushes back to back (the one in flight when a batch seals, then its
+own), and one flush is every put and bulk attempt, one bulk timeout for reading back
+create conflicts, and the in-process retry waits (0.5s, 1s, …). Startup refuses a
+configuration where the worst-case batch time reaches the ack wait, printing it, and warns when the ack-pending ceiling
 is below the formula, using the same shape of check as `search-sync-worker`. Production
 runs three replicas per site.
 
@@ -424,9 +427,16 @@ it only when creating or unwrapping their site's DEK, which is rare and cached, 
 never on the write path.
 
 Each site has one archive DEK. The worker generates it through
-`atrest.KeyWrapper.GenerateDataKey` on first start, stores the wrapped form as the single
-document of the site's `audit-keys-{site}` index (§Index shape), and caches the
-unwrapped form in process. On later starts it reads the index and unwraps. Publishing
+`atrest.KeyWrapper.GenerateDataKey` on first start, writes the wrapped form to the
+bucket as `{site}/keys/{keyId}.json` and `{site}/keys/current.json`, then stores it as
+the single document of the site's `audit-keys-{site}` index (§Index shape), and caches
+the unwrapped form in process. On later starts it reads the index and unwraps, writing
+the bucket copies if `current.json` is missing. The bucket holds the wrapped DEK beside
+the data it protects; the index copy is the fast path. If the index document is missing
+while `current.json` exists, the worker refuses to start rather than mint a key that
+would orphan the archive, and names the restore step: recreate the index document from
+`current.json`. `keyId` (the first 16 hex characters of SHA-256 over the wrapped DEK)
+is in every segment and blob header. Publishing
 the wrapped DEK in the index means the central service obtains every site's key through
 the same CCS path it uses for everything else, with no cross-site MongoDB or secret
 distribution. A wrapped DEK is safe to expose; only the Vault decrypt policy turns it
@@ -444,17 +454,22 @@ the audit key.
 3. Bulk-index the batch with `op_type: create`, one document per event with id
    `{site}-{streamSeq}`, each pointing at `segmentKey` and `frameOffset`. Retry the
    same way. This order means the index never points at a missing segment.
-4. Ack every message whose bulk item succeeded or returned a version conflict, since a
-   conflict means that event is already archived. NAK any item the bulk rejected as
-   retryable, through `jsretry` with the default jittered backoff.
+4. Ack every message whose bulk item succeeded. A version conflict is read back: the
+   existing document's `contentHash` equal to the record just built means the event is
+   already archived, and the message is acked; different means the id belongs to
+   another record, so the message is terminated, logged at error and counted as
+   `archive_events_total{outcome="conflict"}`; a failed read-back NAKs. NAK any item the
+   bulk rejected as retryable, through `jsretry` with the default jittered backoff.
 5. If the PUT fails after all attempts, nothing has been written anywhere: NAK the whole
    batch through `jsretry` and drop it from memory. The batch is rebuilt from
    redelivery, never from memory.
 
 A redelivered event lands in a later segment and its index create is refused as a
-conflict on the same id. The bucket gains a duplicate frame, the index is unchanged,
-and a rebuild dedups by stream sequence. Duplicates cost storage, never correctness.
-The worker never issues an update or a delete against any index.
+conflict on the same id, verified as above. The bucket gains a duplicate frame, the
+index is unchanged, and a rebuild dedups by stream sequence. Duplicates cost storage,
+never correctness. The worker never issues an update or a delete against any index.
+`eventAt` falls back to the stream's store time, never the pod clock, when an event
+carries no timestamp, so a redelivery rebuilds the identical record and hash.
 
 A replay that re-seals the same stream sequences always produces a new segment key,
 because of the random suffix, so it never adds an object version under a key an earlier
@@ -510,7 +525,12 @@ Four indices on each site's archive cluster (events, members, blobs, keys). The
 worker's `bootstrap.go` pushes the templates and the lifecycle policy on every start,
 not only under `BOOTSTRAP_STREAMS`. Event
 indices are daily under an index lifecycle policy: hot, read-only at `min_age: 1d`,
-deleted at `ARCHIVE_INDEX_RETENTION`.
+deleted at `ARCHIVE_INDEX_RETENTION`. A document's daily index is named for the day it
+is archived, not for `eventAt`: an index for an event's own day may already be
+read-only when a late event arrives, and a write refused there would never succeed.
+Late events self-heal, because a NAK re-runs the builder into the current day's index.
+A redelivery that crosses midnight leaves one document per day for the same event, so
+readers dedup by `seq`.
 
 **`audit-events-{site}-{yyyy.mm.dd}`**, one document per message event, id
 `{site}-{streamSeq}`:
@@ -546,7 +566,7 @@ event (one document with empty `account` for `room_renamed`):
 | `fileId`, `messageId`, `roomId`, `siteId` | keyword | |
 | `fileName`, `contentType`, `sizeBytes` | keyword, keyword, long | From the attachment metadata; `fileName` and `contentType` carry `ignore_above: 8191`; `sizeBytes` of `-1` means over the size cap, size unknown at source |
 | `blobKey`, `plainDigest`, `chunkBytes` | keyword, keyword, integer | Empty when skipped; `plainDigest` is the keyed `hmac-sha256:` digest of the plaintext, under the same derived key as `contentHash` |
-| `skipped` | keyword | Absent, `size`, `missing`, or `legacy` |
+| `skipped` | keyword | Absent, `size`, `missing`, `legacy`, or `host` (the link's Drive host is not configured) |
 | `archivedAt` | date | |
 
 **`audit-keys-{site}`**, exactly one document, id `current`, written once with
@@ -600,6 +620,10 @@ unlike the segment lane, does honest long work per message. Per attachment it:
    bounded by `ARCHIVE_BLOB_MAX_BYTES` x `ARCHIVE_BLOB_WORKERS` per pod.
 5. Creates one `audit-blobs-{site}` document (below) with `op_type: create`. A
    redelivery conflicts on the id and is done. Acks the message.
+
+Before any of this the lane looks the document up; an existing one means the file is
+done, with no Drive call and no upload. Outcomes are counted only once the document
+exists.
 
 A download that fails after the in-process attempts NAKs through `jsretry`; a blob that
 no longer exists at the source is recorded as `skipped: missing` and acked, since
@@ -751,6 +775,10 @@ given sequence and reports the first break.
   policy allows each archive cluster to accept CCS connections only from the hub, and
   the hub only from `audit-service`. The deployment pipelines for these namespaces have
   a non-developer approver.
+- **Key escrow.** The bucket holds the wrapped DEK beside the data it protects
+  (`{site}/keys/current.json`, `{site}/keys/{keyId}.json`); the index copy is the fast
+  path. Restoring a lost `audit-keys-{site}` document is an ops step from the bucket
+  copy; the worker refuses to start rather than mint over it.
 - **Vault.** One key, two roles. Workers, one role per site bound to that site's
   ServiceAccount: `datakey`, `encrypt` on `chat-audit-kek`. Service: `decrypt` on
   `chat-audit-kek`. Neither has any policy on `chat-kek`.
@@ -765,7 +793,7 @@ given sequence and reports the first break.
   reviewer walk the hash chain from the bucket alone, with no Vault and no running
   service.
 - **Credentials.** Worker: NATS user limited to its three consumers, its site's bucket
-  `PutObject` only, a read-only Drive API credential for the attachment lane, its site's Elasticsearch role with `create_doc` only on the three
+  `PutObject`, plus `GetObject` on `{site}/keys/*` for the key escrow, a read-only Drive API credential for the attachment lane, its site's Elasticsearch role with `create_doc` only on the three
   index patterns plus the template and lifecycle privileges `bootstrap.go` needs.
   Service:
   one `GetObject`-only credential per site's bucket, a read role on the hub, the audit
@@ -834,7 +862,7 @@ Metrics: `audit_ops_total{action,outcome}`, `audit_ops_sink_backlog`,
 `audit_chain_verify_total{result}`, `audit_sites_skipped_total{site}`,
 `archive_events_total{source,outcome}`, `archive_segments_total`,
 `archive_segment_bytes`, `archive_write_failures_total{store}`,
-`archive_lag_seconds` (event timestamp to ack), `archive_redeliveries_total`,
+`archive_lag_seconds{source}` (event timestamp to ack), `archive_redeliveries_total`,
 `audit_decrypt_failures_total{site}`, `archive_blobs_total{outcome}`,
 `archive_blob_bytes_total`, `archive_blob_lag_seconds`.
 

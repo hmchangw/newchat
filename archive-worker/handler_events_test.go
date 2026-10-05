@@ -46,7 +46,8 @@ func TestBuildEventItem(t *testing.T) {
 		assert.Equal(t, uint64(41), it.seq)
 		require.Len(t, it.docs, 1)
 		d := it.docs[0].Doc.(*auditarchive.EventDoc)
-		assert.Equal(t, "audit-events-site-a-2025.10.05", it.docs[0].Index)
+		assert.Equal(t, "audit-events-site-a-2026.10.05", it.docs[0].Index, "index follows the archive clock (now), not the 2025 event time")
+		assert.Equal(t, time.UnixMilli(events["created"].Timestamp).UTC(), d.EventAt, "eventAt stays the event's own time")
 		assert.Equal(t, "site-a-41", it.docs[0].ID)
 		assert.Equal(t, "created", d.EventType)
 		assert.Equal(t, "m1", d.MessageID)
@@ -135,5 +136,29 @@ func TestBuildEventItem(t *testing.T) {
 		it, err := buildEventItem(context.Background(), "site-a", msg, data, c, now)
 		require.NoError(t, err)
 		assert.Equal(t, "created", it.docs[0].Doc.(*auditarchive.EventDoc).EventType)
+	})
+	t.Run("index is named for the archive day even for a late event", func(t *testing.T) {
+		late := now.Add(30 * 24 * time.Hour)
+		msg, data := mk(events["created"], 51)
+		it, err := buildEventItem(context.Background(), "site-a", msg, data, c, late)
+		require.NoError(t, err)
+		assert.Equal(t, auditarchive.EventsIndex("site-a", late), it.docs[0].Index)
+	})
+	t.Run("missing timestamp falls back to the stream store time, never the clock", func(t *testing.T) {
+		ev := events["created"]
+		ev.Timestamp = 0
+		msg, data := mk(ev, 52)
+		stored := time.Date(2026, 10, 4, 23, 59, 58, 123_000_000, time.UTC)
+		msg.storedAt = stored
+		first, err := buildEventItem(context.Background(), "site-a", msg, data, c, now)
+		require.NoError(t, err)
+		again, err := buildEventItem(context.Background(), "site-a", msg, data, c, now.Add(time.Hour))
+		require.NoError(t, err)
+		d1, d2 := first.docs[0].Doc.(*auditarchive.EventDoc), again.docs[0].Doc.(*auditarchive.EventDoc)
+		assert.Equal(t, stored, d1.EventAt)
+		assert.Equal(t, d1.EventAt, d2.EventAt, "a redelivery builds the same eventAt")
+		assert.Equal(t, d1.ContentHash, d2.ContentHash, "and so the same record hash")
+		assert.Equal(t, d1.ContentHash, first.hash, "the item carries the record hash for conflict checks")
+		assert.Equal(t, stored, first.eventAt)
 	})
 }

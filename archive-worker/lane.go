@@ -27,11 +27,18 @@ const maxFetchWait = time.Second
 // connection that fails instantly does not turn the loop into a hot spin.
 const defaultFetchRetry = time.Second
 
+// infoTimeout bounds the consumer lookup a lane makes after a fetch error.
+const infoTimeout = 5 * time.Second
+
 // msgFetcher is the subset of a JetStream pull consumer the lane needs,
 // normalized so a raw jetstream.Consumer (tests) and the o11y consumer
 // (production) both fit.
 type msgFetcher interface {
 	Fetch(ctx context.Context, n int, opts ...jetstream.FetchOpt) (msgBatch, error)
+	// Info asks the server for the consumer, so a lane can tell a deleted
+	// durable (which a pull can surface as a generic error such as "no
+	// responders") from a transient fault.
+	Info(ctx context.Context) error
 }
 
 // msgBatch yields already-unwrapped messages for one Fetch.
@@ -46,6 +53,13 @@ type msgBatch interface {
 // rawConsumerAdapter wraps a raw jetstream.Consumer; each delivered message
 // carries the Fetch caller's context.
 type rawConsumerAdapter struct{ c jetstream.Consumer }
+
+func (a rawConsumerAdapter) Info(ctx context.Context) error {
+	if _, err := a.c.Info(ctx); err != nil {
+		return fmt.Errorf("consumer info: %w", err)
+	}
+	return nil
+}
 
 func (a rawConsumerAdapter) Fetch(ctx context.Context, n int, opts ...jetstream.FetchOpt) (msgBatch, error) {
 	b, err := a.c.Fetch(n, opts...)
@@ -77,6 +91,13 @@ func (r rawBatch) Messages() <-chan o11ynats.FetchedMessage {
 // per-message receive-span context.
 type o11yConsumerAdapter struct{ c o11ynats.Consumer }
 
+func (a o11yConsumerAdapter) Info(ctx context.Context) error {
+	if _, err := a.c.Info(ctx); err != nil {
+		return fmt.Errorf("o11y consumer info: %w", err)
+	}
+	return nil
+}
+
 func (a o11yConsumerAdapter) Fetch(ctx context.Context, n int, opts ...jetstream.FetchOpt) (msgBatch, error) {
 	b, err := a.c.Fetch(ctx, n, opts...)
 	if err != nil {
@@ -90,6 +111,7 @@ type builder func(ctx context.Context, site string, msg jetstream.Msg, data []by
 type laneConfig struct {
 	site         string
 	name         string
+	keyID        string // names the DEK in every segment header
 	fetchBatch   int
 	fillInterval time.Duration
 	now          func() time.Time
@@ -110,7 +132,7 @@ type lane struct {
 	slot       chan struct{} // one background flush at a time
 }
 
-func newLane(cfg laneConfig, fetcher msgFetcher, build builder, cipher *auditarchive.Cipher, b *batcher, f *flusher, guard *loopguard.Guard) *lane {
+func newLane(cfg laneConfig, fetcher msgFetcher, build builder, cipher *auditarchive.Cipher, b *batcher, f *flusher, guard *loopguard.Guard) *lane { //nolint:gocritic // hugeParam: the constructor copies the config once
 	return &lane{
 		cfg: cfg, fetcher: fetcher, build: build, cipher: cipher, batcher: b, flusher: f, guard: guard,
 		fetchRetry: defaultFetchRetry, newTimer: time.NewTimer, slot: make(chan struct{}, 1),
@@ -124,6 +146,19 @@ func terminalFetchErr(err error) bool {
 		errors.Is(err, jetstream.ErrStreamNotFound) || errors.Is(err, jetstream.ErrBadRequest)
 }
 
+// consumerLost asks the server whether the consumer behind a failing fetch
+// still exists, and returns the lookup error when it is gone. A failed lookup
+// is not a verdict: it returns nil and the caller pauses and retries.
+func consumerLost(ctx context.Context, f msgFetcher) error {
+	ictx, cancel := context.WithTimeout(ctx, infoTimeout)
+	defer cancel()
+	err := f.Info(ictx)
+	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrStreamNotFound) {
+		return err
+	}
+	return nil
+}
+
 // benignBatchErr reports batch errors that just mean "nothing arrived this
 // round"; the next Fetch resumes on an intact consumer.
 func benignBatchErr(err error) bool {
@@ -134,8 +169,9 @@ func benignBatchErr(err error) bool {
 // is Termed, skip is Acked), add it to the batcher, and seal+flush when a
 // bound trips or the fill interval is due. One flush runs in the background
 // while the next batch fills. On stop or context cancel it drains; a terminal
-// fetch error (consumer deleted/not found) drains, reports guard.Stopped(err)
-// and returns.
+// fetch error (consumer deleted/not found), or any other fetch error after
+// which the server reports the consumer gone, drains, reports
+// guard.Stopped(err) and returns.
 func (l *lane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<- struct{}) {
 	defer close(doneCh)
 	// Flushes outlive a cancelled ctx: the drain must still write and settle
@@ -186,6 +222,12 @@ func (l *lane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<- st
 			l.guard.Stopped(err)
 			return
 		}
+		if lost := consumerLost(ctx, l.fetcher); lost != nil {
+			slog.ErrorContext(ctx, "consumer lost after a fetch error", "lane", l.cfg.name, "fetchError", err, "error", lost)
+			drain()
+			l.guard.Stopped(lost)
+			return
+		}
 		slog.WarnContext(ctx, "fetch failed, retrying", "lane", l.cfg.name, "error", err)
 		l.flushIfDue(flushCtx)
 		l.pause(ctx, stopCh)
@@ -219,15 +261,18 @@ func (l *lane) handle(ctx, flushCtx context.Context, msg jetstream.Msg) {
 		data, err := natsutil.DecodePayload(msg)
 		if err != nil {
 			slog.ErrorContext(ctx, "undecodable payload, terminating", "lane", l.cfg.name, "subject", msg.Subject(), "error", err)
+			l.cfg.metrics.events(l.cfg.name, outcomePoison, 1)
 			l.term(ctx, msg)
 			return
 		}
 		it, err := l.build(ctx, l.cfg.site, msg, data, l.cipher, l.cfg.now())
 		switch {
 		case errors.Is(err, errSkip):
+			l.cfg.metrics.events(l.cfg.name, outcomeSkip, 1)
 			natsutil.Ack(msg, "not archived: "+err.Error())
 		case errors.Is(err, errPoison):
 			slog.ErrorContext(ctx, "poison event, terminating", "lane", l.cfg.name, "subject", msg.Subject(), "error", err)
+			l.cfg.metrics.events(l.cfg.name, outcomePoison, 1)
 			l.term(ctx, msg)
 		case err != nil:
 			slog.ErrorContext(ctx, "build failed, will redeliver", "lane", l.cfg.name, "subject", msg.Subject(), "error", err)
@@ -254,7 +299,7 @@ func (l *lane) flushTaken(ctx context.Context) {
 	if items == nil {
 		return
 	}
-	s, err := seal(l.cfg.site, l.cfg.name, items, l.cfg.now())
+	s, err := seal(l.cfg.site, l.cfg.name, l.cfg.keyID, items, l.cfg.now())
 	if err != nil {
 		slog.ErrorContext(ctx, "seal failed, releasing batch", "lane", l.cfg.name, "error", err)
 		l.flusher.nakAll(ctx, items, "seal failed")

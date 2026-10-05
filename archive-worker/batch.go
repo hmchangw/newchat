@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -25,11 +26,13 @@ type docSpec struct {
 }
 
 type item struct {
-	ctx   context.Context
-	msg   jetstream.Msg
-	seq   uint64
-	frame []byte
-	docs  []docSpec
+	ctx     context.Context
+	msg     jetstream.Msg
+	seq     uint64
+	frame   []byte
+	hash    string    // keyed record digest every doc of the item carries as contentHash
+	eventAt time.Time // the record's event time, for the lag metric
+	docs    []docSpec
 }
 
 type batcher struct {
@@ -88,28 +91,34 @@ type sealed struct {
 	items   []item
 }
 
-// seal writes the segment for items in delivery order, points every document
-// at its frame, and returns the create actions in the same order as the
-// documents so flush can map results back to items.
-func seal(site, lane string, items []item, now time.Time) (*sealed, error) {
+// seal writes the segment for items in delivery order, stamped with the key
+// id of the DEK that sealed the frames, points every document at its frame,
+// and returns the create actions in the same order as the documents so flush
+// can map results back to items.
+func seal(site, lane, keyID string, items []item, now time.Time) (*sealed, error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("seal: no items")
 	}
+	if uint64(len(items)) > math.MaxUint32 {
+		return nil, fmt.Errorf("seal: %d items exceed the segment count field", len(items))
+	}
 	first, last := items[0].seq, items[0].seq
 	frames := make([][]byte, len(items))
-	for i, it := range items {
-		frames[i] = it.frame
-		first, last = min(first, it.seq), max(last, it.seq)
+	for i := range items {
+		frames[i] = items[i].frame
+		first, last = min(first, items[i].seq), max(last, items[i].seq)
 	}
 	key := auditarchive.SegmentKey(site, lane, now, first, last)
+	// #nosec G115 -- len(frames) == len(items) <= math.MaxUint32, checked above
+	count := uint32(len(frames))
 	var buf bytes.Buffer
-	offsets, _, err := auditarchive.WriteSegment(&buf, auditarchive.Header{Site: site, Lane: lane, FirstSeq: first, LastSeq: last, Count: uint32(len(frames))}, frames)
+	offsets, _, err := auditarchive.WriteSegment(&buf, auditarchive.Header{Site: site, Lane: lane, KeyID: keyID, FirstSeq: first, LastSeq: last, Count: count}, frames)
 	if err != nil {
 		return nil, fmt.Errorf("seal: %w", err)
 	}
 	var actions []searchengine.BulkAction
-	for i, it := range items {
-		for _, d := range it.docs {
+	for i := range items {
+		for _, d := range items[i].docs {
 			d.Doc.SetLocation(key, offsets[i])
 			body, err := json.Marshal(d.Doc)
 			if err != nil {

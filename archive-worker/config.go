@@ -65,7 +65,42 @@ type config struct {
 
 var retentionRe = regexp.MustCompile(`^[1-9][0-9]*(d|h|ms|s|m)$`)
 
+// siteIDRe keeps SITE_ID usable inside Elasticsearch index names, which must
+// be lowercase and cannot hold spaces, commas, colons or wildcards.
+var siteIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// worstCaseBatchTime is how long a message can wait between delivery and its
+// ack: one fill interval, then up to two flushes back to back (the one in
+// flight when its batch sealed, then its own). One flush is every put and
+// bulk attempt, one bulk timeout of conflict read-back, and the flusher's
+// retry waits (defaultRetryWait, summed over i < attempts).
+func (c config) worstCaseBatchTime() time.Duration { //nolint:gocritic // hugeParam: value receiver, as validate
+	flush := time.Duration(c.WriteAttempts)*(c.PutTimeout+c.BulkTimeout) + c.BulkTimeout
+	for i := 0; i < c.WriteAttempts; i++ {
+		flush += defaultRetryWait(i)
+	}
+	return c.FillInterval + 2*flush
+}
+
 func (c config) validate() error { //nolint:gocritic // hugeParam: value receiver so validConfig().validate() compiles on a non-addressable result
+	if !siteIDRe.MatchString(c.SiteID) {
+		return fmt.Errorf("SITE_ID must be lowercase letters, digits, '-' or '_' (it names Elasticsearch indices), got %q", c.SiteID)
+	}
+	if c.FillInterval <= 0 {
+		return fmt.Errorf("ARCHIVE_FILL_INTERVAL must be > 0, got %s", c.FillInterval)
+	}
+	if c.PutTimeout <= 0 {
+		return fmt.Errorf("ARCHIVE_PUT_TIMEOUT must be > 0, got %s", c.PutTimeout)
+	}
+	if c.BulkTimeout <= 0 {
+		return fmt.Errorf("ARCHIVE_BULK_TIMEOUT must be > 0, got %s", c.BulkTimeout)
+	}
+	if c.BlobMaxBytes <= 0 {
+		return fmt.Errorf("ARCHIVE_BLOB_MAX_BYTES must be > 0, got %d", c.BlobMaxBytes)
+	}
+	if c.Replicas < 1 {
+		return fmt.Errorf("ARCHIVE_REPLICAS must be >= 1, got %d", c.Replicas)
+	}
 	if c.BatchEvents <= 0 {
 		return fmt.Errorf("ARCHIVE_BATCH_EVENTS must be > 0, got %d", c.BatchEvents)
 	}
@@ -84,9 +119,8 @@ func (c config) validate() error { //nolint:gocritic // hugeParam: value receive
 	if !retentionRe.MatchString(c.IndexRetention) {
 		return fmt.Errorf("ARCHIVE_INDEX_RETENTION must be an ES duration such as 2555d, got %q", c.IndexRetention)
 	}
-	worst := c.FillInterval + time.Duration(c.WriteAttempts)*(c.PutTimeout+c.BulkTimeout)
-	if worst >= c.Consumer.AckWait {
-		return fmt.Errorf("CONSUMER_ACK_WAIT (%s) must exceed ARCHIVE_FILL_INTERVAL + ARCHIVE_WRITE_ATTEMPTS x (ARCHIVE_PUT_TIMEOUT + ARCHIVE_BULK_TIMEOUT) = %s", c.Consumer.AckWait, worst)
+	if worst := c.worstCaseBatchTime(); worst >= c.Consumer.AckWait {
+		return fmt.Errorf("CONSUMER_ACK_WAIT (%s) must exceed the worst-case batch time ARCHIVE_FILL_INTERVAL + 2 x (ARCHIVE_WRITE_ATTEMPTS x (ARCHIVE_PUT_TIMEOUT + ARCHIVE_BULK_TIMEOUT) + ARCHIVE_BULK_TIMEOUT + retry waits) = %s", c.Consumer.AckWait, worst)
 	}
 	if c.Vault.Address == "" {
 		return errors.New("VAULT_ADDR is required: the archive DEK is wrapped by Vault transit")

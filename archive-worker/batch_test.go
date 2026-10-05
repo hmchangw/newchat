@@ -45,7 +45,7 @@ func TestBatcher_Bounds(t *testing.T) {
 func TestSeal(t *testing.T) {
 	now := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
 	items := []item{mkItem(7, 3), mkItem(5, 4), mkItem(9, 5)}
-	s, err := seal("site-a", "events", items, now)
+	s, err := seal("site-a", "events", "kid-1", items, now)
 	require.NoError(t, err)
 	assert.Regexp(t, `^site-a/2026/10/05/14/events-5-9-[0-9a-f]{8}\.seg$`, s.key, "key uses min and max seq plus a random suffix")
 
@@ -53,6 +53,7 @@ func TestSeal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(3), h.Count)
 	assert.Equal(t, "events", h.Lane)
+	assert.Equal(t, "kid-1", h.KeyID, "the header names the DEK that sealed the frames")
 	assert.Equal(t, [][]byte{items[0].frame, items[1].frame, items[2].frame}, frames, "frames keep delivery order")
 
 	require.Len(t, s.actions, 3)
@@ -67,7 +68,7 @@ func TestSeal(t *testing.T) {
 		assert.Equal(t, items[i].frame, f, "offset %d points at its own frame", i)
 	}
 	t.Run("empty is an error", func(t *testing.T) {
-		_, err := seal("site-a", "events", nil, now)
+		_, err := seal("site-a", "events", "kid-1", nil, now)
 		assert.Error(t, err)
 	})
 }

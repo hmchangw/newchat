@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,12 +159,21 @@ func TestDriveSource_Open(t *testing.T) {
 		_, _, _, err := src.Open(context.Background(), "r1", a)
 		assert.ErrorIs(t, err, errBlobMissing)
 	})
-	t.Run("host outside the allow-list is missing", func(t *testing.T) {
+	t.Run("host outside the allow-list is its own skip and is logged", func(t *testing.T) {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
 		src, _ := driveFixture(t, signerOK, downloadOK)
 		a := att
-		a.TitleLink = "api/v1/file/rooms/r1/file/f1?drive_host=https://elsewhere.example"
+		a.TitleLink = "api/v1/file/rooms/r1/file/f1?drive_host=https://elsewhere.example/some/path?q=1"
 		_, _, _, err := src.Open(context.Background(), "r1", a)
-		assert.ErrorIs(t, err, errBlobMissing)
+		assert.ErrorIs(t, err, errBlobHost)
+		assert.NotErrorIs(t, err, errBlobMissing)
+		assert.Equal(t, 1, strings.Count(buf.String(), `"level":"WARN"`), "logged once")
+		assert.Contains(t, buf.String(), `"host":"elsewhere.example"`)
+		assert.Contains(t, buf.String(), `"fileId":"f1"`)
+		assert.NotContains(t, buf.String(), "q=1")
 	})
 	t.Run("deleted at the signer is missing", func(t *testing.T) {
 		src, host := driveFixture(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -205,8 +217,90 @@ func TestDriveSource_Open(t *testing.T) {
 
 func newTestBlobLane(src blobSource, obj objectStore, idx indexStore, c *auditarchive.Cipher, maxBytes int64) *blobLane {
 	now := func() time.Time { return time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC) }
-	return newBlobLane(blobLaneConfig{site: "site-a", maxBytes: maxBytes, chunkBytes: 4096, workers: 1, ackWait: time.Minute, heartbeatMax: time.Minute, now: now},
+	return newBlobLane(blobLaneConfig{site: "site-a", keyID: "kid-1", maxBytes: maxBytes, chunkBytes: 4096, workers: 1, ackWait: time.Minute, heartbeatMax: time.Minute, now: now},
 		nil, src, obj, idx, c, loopguard.New("b", func() {}), &metrics{})
+}
+
+// countingSource counts Open calls.
+type countingSource struct {
+	fakeSource
+	opens atomic.Int32
+}
+
+func (s *countingSource) Open(ctx context.Context, roomID string, att cassandra.Attachment) (io.ReadCloser, int64, string, error) { //nolint:gocritic // hugeParam: signature fixed by the blobSource interface
+	s.opens.Add(1)
+	return s.fakeSource.Open(ctx, roomID, att)
+}
+
+func TestBlobLane_ArchivesEachFileOnce(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	att := driveAtt("f1")
+	t.Run("an existing doc means done: no Drive call, no PUT, counted as exists", func(t *testing.T) {
+		m, reader := testMetrics(t)
+		src := &countingSource{fakeSource: fakeSource{data: map[string][]byte{"f1": []byte("x")}}}
+		obj := &fakeObjects{}
+		idx := &recordingIndex{fakeIndex: fakeIndex{stored: map[string]string{"site-a-f1": `{"fileId":"f1"}`}}}
+		l := newTestBlobLane(src, obj, idx, c, 1<<20)
+		l.metrics = m
+		require.NoError(t, l.archiveAttachment(context.Background(), "m2", "r1", att))
+		assert.Zero(t, src.opens.Load())
+		assert.Empty(t, obj.puts)
+		assert.Empty(t, idx.docs)
+		assert.Equal(t, []string{"audit-blobs-site-a/site-a-f1"}, idx.gets)
+		assert.Equal(t, int64(1), blobCount(t, reader, "exists"))
+		assert.Zero(t, blobCount(t, reader, "archived"))
+	})
+	t.Run("a failed lookup is retried before any Drive call", func(t *testing.T) {
+		src := &countingSource{fakeSource: fakeSource{data: map[string][]byte{"f1": []byte("x")}}}
+		idx := &recordingIndex{fakeIndex: fakeIndex{getErr: errors.New("es down")}}
+		l := newTestBlobLane(src, &fakeObjects{}, idx, c, 1<<20)
+		assert.Error(t, l.archiveAttachment(context.Background(), "m1", "r1", att))
+		assert.Zero(t, src.opens.Load())
+	})
+}
+
+func TestBlobLane_MetricsCountOnlyCreatedDocs(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	tests := []struct {
+		name    string
+		source  *fakeSource
+		results []searchengine.BulkResult
+		bulkErr error
+		want    map[string]int64
+		wantErr bool
+	}{
+		{name: "archived after the doc is created", source: &fakeSource{data: map[string][]byte{"f1": []byte("abc")}},
+			want: map[string]int64{"archived": 1}},
+		{name: "a create conflict counts as exists", source: &fakeSource{data: map[string][]byte{"f1": []byte("abc")}},
+			results: []searchengine.BulkResult{{Status: 409}}, want: map[string]int64{"exists": 1}},
+		{name: "a skip is counted after its doc is created", source: &fakeSource{data: map[string][]byte{}},
+			want: map[string]int64{"skipped_missing": 1}},
+		{name: "a skip whose doc fails counts nothing", source: &fakeSource{data: map[string][]byte{}},
+			bulkErr: errors.New("es down"), wantErr: true, want: map[string]int64{}},
+		{name: "an upload whose doc fails counts nothing", source: &fakeSource{data: map[string][]byte{"f1": []byte("abc")}},
+			results: []searchengine.BulkResult{{Status: 500}}, wantErr: true, want: map[string]int64{}},
+		{name: "a host outside the allow-list is a host skip", source: &fakeSource{err: errBlobHost},
+			want: map[string]int64{"skipped_host": 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, reader := testMetrics(t)
+			idx := &recordingIndex{fakeIndex: fakeIndex{results: tc.results, err: tc.bulkErr}}
+			l := newTestBlobLane(tc.source, &fakeObjects{}, idx, c, 1<<20)
+			l.metrics = m
+			err := l.archiveAttachment(context.Background(), "m1", "r1", driveAtt("f1"))
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			for _, o := range []string{"archived", "exists", "skipped_missing", "skipped_host"} {
+				assert.Equal(t, tc.want[o], blobCount(t, reader, o), o)
+			}
+		})
+	}
 }
 
 func TestBlobLane_ArchiveAttachment(t *testing.T) {
@@ -241,9 +335,10 @@ func TestBlobLane_ArchiveAttachment(t *testing.T) {
 		l := newTestBlobLane(&fakeSource{data: map[string][]byte{"f1": plain}}, obj, &recordingIndex{}, c, 1<<20)
 		require.NoError(t, l.archiveAttachment(context.Background(), "m1", "r1", att))
 		var out bytes.Buffer
-		_, n, _, err := auditarchive.DecryptBlob(&out, &stored, c, "f1")
+		_, n, keyID, err := auditarchive.DecryptBlob(&out, &stored, c, "f1")
 		require.NoError(t, err)
 		assert.Equal(t, int64(len(plain)), n)
+		assert.Equal(t, "kid-1", keyID, "the blob header names the DEK")
 		assert.Equal(t, plain, out.Bytes())
 	})
 	t.Run("over the cap is recorded as skipped size, not uploaded", func(t *testing.T) {
@@ -278,6 +373,13 @@ func TestBlobLane_ArchiveAttachment(t *testing.T) {
 		require.NoError(t, l.archiveAttachment(context.Background(), "m1", "r1", att))
 		assert.Empty(t, obj.puts)
 		assert.Equal(t, "missing", idx.docAt(t, 0).Skipped)
+	})
+	t.Run("host outside the allow-list is recorded as skipped host", func(t *testing.T) {
+		obj, idx := &fakeObjects{}, &recordingIndex{}
+		l := newTestBlobLane(&fakeSource{err: errBlobHost}, obj, idx, c, 1<<20)
+		require.NoError(t, l.archiveAttachment(context.Background(), "m1", "r1", att))
+		assert.Empty(t, obj.puts)
+		assert.Equal(t, "host", idx.docAt(t, 0).Skipped)
 	})
 	t.Run("legacy minio link is recorded as skipped legacy", func(t *testing.T) {
 		obj, idx := &fakeObjects{}, &recordingIndex{}
@@ -323,7 +425,10 @@ func TestBlobLane_ArchiveAttachment(t *testing.T) {
 }
 
 // captureObjects keeps the last uploaded object so a test can decrypt it.
-type captureObjects struct{ buf *bytes.Buffer }
+type captureObjects struct {
+	fakeObjects
+	buf *bytes.Buffer
+}
 
 func (c *captureObjects) Put(_ context.Context, _ string, body io.Reader, _ int64, _ string) error {
 	_, err := io.Copy(c.buf, body)
@@ -604,6 +709,8 @@ type notifyFetcher struct {
 	calls chan int
 }
 
+func (f *notifyFetcher) Info(ctx context.Context) error { return f.inner.Info(ctx) }
+
 func (f *notifyFetcher) Fetch(ctx context.Context, n int, o ...jetstream.FetchOpt) (msgBatch, error) {
 	select {
 	case f.calls <- n:
@@ -765,4 +872,50 @@ func TestBlobLane_Run_LastDeliveryIsTermedAndLogged(t *testing.T) {
 			assert.False(t, msg.acked)
 		})
 	}
+}
+
+func TestBlobLane_ConsumerLossIsTerminal(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	msg := attMsg(t, 1, model.EventCreated, driveAtt("a"))
+	fired := make(chan struct{}, 1)
+	guard := loopguard.New("b", func() { fired <- struct{}{} })
+	sf := scriptedErr(nats.ErrNoResponders, []jetstream.Msg{msg})
+	sf.infoErr = jetstream.ErrConsumerNotFound
+	l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 1, now: time.Now}, sf,
+		&fakeSource{data: map[string][]byte{"a": []byte("aa")}}, &fakeObjects{}, &recordingIndex{}, c, guard, &metrics{})
+	paused := make(chan struct{}, 1)
+	l.newTimer = func(time.Duration) *time.Timer {
+		paused <- struct{}{}
+		return time.NewTimer(time.Hour)
+	}
+	done := make(chan struct{})
+	go l.run(context.Background(), make(chan struct{}), done)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blob lane kept running on a deleted consumer")
+	}
+	assert.Equal(t, int32(1), sf.infoCalls.Load())
+	assert.Empty(t, paused, "no pause once the consumer is known gone")
+	assert.True(t, msg.acked, "in-flight work is settled first")
+	assert.ErrorIs(t, guard.Check().Probe(context.Background()), jetstream.ErrConsumerNotFound)
+	select {
+	case <-fired:
+	default:
+		t.Error("unexpected-stop hook did not run")
+	}
+}
+
+func TestBlobLane_RecordsLagOnAck(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	m, reader := testMetrics(t)
+	msg := attMsg(t, 1, model.EventCreated, driveAtt("a")) // event time 1759672800000
+	l := newTestBlobLane(&fakeSource{data: map[string][]byte{"a": []byte("aa")}}, &fakeObjects{}, &recordingIndex{}, c, 1<<20)
+	l.metrics = m
+	l.cfg.now = func() time.Time { return time.UnixMilli(1759672800000).Add(90 * time.Second) }
+	l.handle(context.Background(), msg)
+	require.True(t, msg.acked)
+	assert.InDelta(t, 90.0, lagSum(t, reader, "archive_blob_lag_seconds", ""), 1e-9)
 }

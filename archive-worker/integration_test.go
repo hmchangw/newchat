@@ -63,6 +63,7 @@ type archiveEnv struct {
 	bucket string
 	sink   *bucketSink
 	cipher *auditarchive.Cipher
+	keyID  string
 	cfg    config
 }
 
@@ -127,7 +128,8 @@ func setupArchive(t *testing.T, eventTimes ...time.Time) *archiveEnv {
 	wrapper, err := atrest.NewVaultKeyWrapper(ctx, atrest.VaultConfig{Address: v.Address, TransitMount: v.TransitMount, TransitKey: v.TransitKey, Token: v.Token})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = wrapper.Close() }) // Close only releases the Vault token renewer; a failure leaves nothing to recover
-	dek, err := loadOrCreateDEK(ctx, engine, wrapper, site, time.Now)
+	sink := newBucketSink(mc, bucket)
+	dek, keyID, err := loadOrCreateDEK(ctx, engine, sink, wrapper, site, time.Now)
 	require.NoError(t, err)
 	cipher, err := auditarchive.NewCipher(dek)
 	require.NoError(t, err)
@@ -139,12 +141,13 @@ func setupArchive(t *testing.T, eventTimes ...time.Time) *archiveEnv {
 	require.NoError(t, err)
 	cfg := config{
 		SiteID: site, FillInterval: time.Second, BatchEvents: 2000, BatchBytes: 8 << 20, FetchBatch: 100,
-		// 5s timeouts keep fill + attempts x (put + bulk) under AckWait, as validate requires.
-		PutTimeout: 5 * time.Second, BulkTimeout: 5 * time.Second, WriteAttempts: 2, Consumer: consumer,
-		IndexRetention: "30d", BlobWorkers: 1, Vault: atrest.VaultConfig{Address: v.Address},
+		// 2s timeouts keep the worst-case batch time, 1 + 2 x (2 x (2+2) + 2 + 1.5)
+		// = 24s, under the default 30s AckWait, as validate requires.
+		PutTimeout: 2 * time.Second, BulkTimeout: 2 * time.Second, WriteAttempts: 2, Consumer: consumer,
+		IndexRetention: "30d", BlobWorkers: 1, BlobMaxBytes: 1 << 20, Replicas: 1, Vault: atrest.VaultConfig{Address: v.Address},
 	}
 	require.NoError(t, cfg.validate(), "the test config must be one the service accepts")
-	return &archiveEnv{site: site, esURL: esURL, js: js, engine: engine, mc: mc, bucket: bucket, sink: newBucketSink(mc, bucket), cipher: cipher, cfg: cfg}
+	return &archiveEnv{site: site, esURL: esURL, js: js, engine: engine, mc: mc, bucket: bucket, sink: sink, cipher: cipher, keyID: keyID, cfg: cfg}
 }
 
 type laneSpec struct {
@@ -177,9 +180,8 @@ func (e *archiveEnv) startLane(t *testing.T, s *laneSpec) *runningLane {
 
 	unexpected := &atomic.Bool{}
 	guard := loopguard.New(s.name+"-lane", func() { unexpected.Store(true) })
-	flushCfg := flushConfig{putTimeout: e.cfg.PutTimeout, bulkTimeout: e.cfg.BulkTimeout, attempts: e.cfg.WriteAttempts}
-	l := newLane(newLaneConfig(&e.cfg, s.name, nil), rawConsumerAdapter{c: cons}, s.build, e.cipher,
-		newBatcher(e.cfg.BatchEvents, e.cfg.BatchBytes, e.cfg.FillInterval), newFlusher(s.objects, s.index, flushCfg, nil), guard)
+	l := newLane(newLaneConfig(&e.cfg, s.name, e.keyID, nil), rawConsumerAdapter{c: cons}, s.build, e.cipher,
+		newBatcher(e.cfg.BatchEvents, e.cfg.BatchBytes, e.cfg.FillInterval), newFlusher(s.objects, s.index, newFlushConfig(&e.cfg, s.name), nil), guard)
 
 	g := newLaneGroup()
 	g.start(ctx, l.run)
@@ -256,6 +258,14 @@ func newFailingThen(next objectStore, failFirst int64) *failingThen {
 
 // heal makes every later Put reach the real sink.
 func (f *failingThen) heal() { f.remaining.Store(0) }
+
+func (f *failingThen) Stat(ctx context.Context, key string) (bool, error) {
+	return f.next.Stat(ctx, key)
+}
+
+func (f *failingThen) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	return f.next.Get(ctx, key)
+}
 
 func (f *failingThen) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
 	for {

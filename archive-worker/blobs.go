@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -28,10 +29,12 @@ const (
 	skipSize    = "size"
 	skipMissing = "missing"
 	skipLegacy  = "legacy"
+	skipHost    = "host"
 )
 
 type blobLaneConfig struct {
 	site         string
+	keyID        string // names the DEK in every blob header
 	maxBytes     int64
 	chunkBytes   int
 	workers      int
@@ -60,7 +63,7 @@ type blobLane struct {
 	newTimer   func(time.Duration) *time.Timer // swapped in tests to observe the pause
 }
 
-func newBlobLane(cfg blobLaneConfig, fetcher msgFetcher, src blobSource, objects objectStore, index indexStore, c *auditarchive.Cipher, guard *loopguard.Guard, m *metrics) *blobLane {
+func newBlobLane(cfg blobLaneConfig, fetcher msgFetcher, src blobSource, objects objectStore, index indexStore, c *auditarchive.Cipher, guard *loopguard.Guard, m *metrics) *blobLane { //nolint:gocritic // hugeParam: the constructor copies the config once, as newLane does
 	if cfg.chunkBytes <= 0 {
 		cfg.chunkBytes = auditarchive.DefaultChunkBytes
 	}
@@ -80,7 +83,8 @@ func newBlobLane(cfg blobLaneConfig, fetcher msgFetcher, src blobSource, objects
 // the Fetch asks for exactly as many messages as there are free slots, so a
 // delivered message never waits for a worker with its AckWait running and no
 // heartbeat. On stop or context cancel it waits for in-flight work; a terminal
-// fetch error (consumer deleted/not found) does the same, reports
+// fetch error (consumer deleted/not found), or any other fetch error after
+// which the server reports the consumer gone, does the same, reports
 // guard.Stopped(err) and returns.
 func (l *blobLane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<- struct{}) {
 	defer close(doneCh)
@@ -158,6 +162,12 @@ func (l *blobLane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<
 			l.guard.Stopped(err)
 			return
 		}
+		if lost := consumerLost(ctx, l.fetcher); lost != nil {
+			slog.ErrorContext(ctx, "consumer lost after a fetch error", "lane", "blobs", "fetchError", err, "error", lost)
+			wg.Wait()
+			l.guard.Stopped(lost)
+			return
+		}
 		slog.WarnContext(ctx, "fetch failed, retrying", "lane", "blobs", "error", err)
 		l.pause(ctx, stopCh)
 	}
@@ -194,7 +204,7 @@ func (l *blobLane) handle(ctx context.Context, msg jetstream.Msg) {
 	}
 	var ev model.MessageEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
-		slog.ErrorContext(ctx, "poison event, terminating", "lane", "blobs", "stream", meta.Stream, "seq", meta.Seq, "error", fmt.Errorf("%w: unmarshal message event: %w", errPoison, err))
+		slog.ErrorContext(ctx, "poison event, terminating", "lane", "blobs", "stream", meta.Stream, "seq", meta.Seq, "error", fmt.Errorf("%w: unmarshal message event: %v", errPoison, err))
 		l.term(ctx, msg)
 		return
 	}
@@ -223,6 +233,7 @@ func (l *blobLane) handle(ctx context.Context, msg jetstream.Msg) {
 		}
 	}
 	natsutil.Ack(msg, "attachments archived")
+	l.metrics.blobLag(l.cfg.now().Sub(eventAt(ev.Timestamp, meta.StoredAt)))
 }
 
 // archiveWithHeartbeat holds the message's ack deadline open while one
@@ -253,16 +264,28 @@ func (l *blobLane) term(ctx context.Context, msg jetstream.Msg) {
 	}
 }
 
-// archiveAttachment copies one attachment once. A skip (size, missing,
-// legacy) still writes a document so the console can show why; any other
-// error is retryable and writes nothing, so the document appears only after
-// the blob is durably stored.
+// archiveAttachment copies one attachment once. A file that already has a
+// document is done without touching Drive or the bucket. A skip (size,
+// missing, legacy, host) still writes a document so the console can show
+// why; any other error is retryable and writes nothing, so the document
+// appears only after the blob is durably stored. Outcomes are counted only
+// once the document exists.
 func (l *blobLane) archiveAttachment(ctx context.Context, msgID, roomID string, att cassandra.Attachment) error { //nolint:gocritic // hugeParam: signature fixed by the lane contract
+	_, exists, err := l.index.GetDoc(ctx, auditarchive.BlobsIndex(l.cfg.site), auditarchive.BlobDocID(l.cfg.site, att.ID))
+	if err != nil {
+		return fmt.Errorf("look up blob doc %s: %w", att.ID, err)
+	}
+	if exists {
+		l.metrics.blobs("exists", 0)
+		return nil
+	}
 	doc := auditarchive.BlobDoc{FileID: att.ID, MessageID: msgID, RoomID: roomID, SiteID: l.cfg.site, FileName: att.Title, ContentType: att.FileType, ArchivedAt: l.cfg.now().UTC()}
 	body, size, ctype, err := l.source.Open(ctx, roomID, att)
 	switch {
 	case errors.Is(err, errBlobLegacy):
 		doc.Skipped = skipLegacy
+	case errors.Is(err, errBlobHost):
+		doc.Skipped = skipHost
 	case errors.Is(err, errBlobMissing):
 		doc.Skipped = skipMissing
 	case err != nil:
@@ -276,10 +299,19 @@ func (l *blobLane) archiveAttachment(ctx context.Context, msgID, roomID string, 
 			return err
 		}
 	}
-	if doc.Skipped != "" {
-		l.metrics.blobs("skipped_"+doc.Skipped, 0)
+	created, err := l.createDoc(ctx, &doc)
+	if err != nil {
+		return err
 	}
-	return l.createDoc(ctx, &doc)
+	switch {
+	case !created:
+		l.metrics.blobs("exists", 0)
+	case doc.Skipped != "":
+		l.metrics.blobs("skipped_"+doc.Skipped, 0)
+	default:
+		l.metrics.blobs("archived", doc.SizeBytes)
+	}
+	return nil
 }
 
 // store encrypts and uploads the attachment unless it exceeds the cap, in
@@ -295,7 +327,7 @@ func (l *blobLane) store(ctx context.Context, doc *auditarchive.BlobDoc, body io
 	// minio-go needs the object size up front for a single-part PUT, so the
 	// encrypted blob is buffered; the cap and worker count bound the memory.
 	var enc bytes.Buffer
-	sum, n, err := auditarchive.EncryptBlob(&enc, limited, l.cipher, doc.FileID, "", l.cfg.chunkBytes)
+	sum, n, err := auditarchive.EncryptBlob(&enc, limited, l.cipher, doc.FileID, l.cfg.keyID, l.cfg.chunkBytes)
 	if err != nil {
 		return fmt.Errorf("encrypt attachment %s: %w", doc.FileID, err)
 	}
@@ -310,16 +342,16 @@ func (l *blobLane) store(ctx context.Context, doc *auditarchive.BlobDoc, body io
 		return fmt.Errorf("put attachment %s: %w", doc.FileID, err)
 	}
 	doc.BlobKey, doc.PlainDigest, doc.SizeBytes, doc.ChunkBytes = key, sum, n, l.cfg.chunkBytes
-	l.metrics.blobs("archived", n)
 	return nil
 }
 
-// createDoc writes the BlobDoc with create semantics; a conflict means an
-// earlier delivery already recorded this file, which is done.
-func (l *blobLane) createDoc(ctx context.Context, doc *auditarchive.BlobDoc) error {
+// createDoc writes the BlobDoc with create semantics and reports whether
+// this call created it; a conflict means an earlier delivery already
+// recorded this file, which is done.
+func (l *blobLane) createDoc(ctx context.Context, doc *auditarchive.BlobDoc) (bool, error) {
 	raw, err := json.Marshal(doc)
 	if err != nil {
-		return fmt.Errorf("marshal blob doc %s: %w", doc.FileID, err)
+		return false, fmt.Errorf("marshal blob doc %s: %w", doc.FileID, err)
 	}
 	results, err := l.index.Bulk(ctx, []searchengine.BulkAction{{
 		Action: searchengine.ActionCreate,
@@ -328,13 +360,16 @@ func (l *blobLane) createDoc(ctx context.Context, doc *auditarchive.BlobDoc) err
 		Doc:    raw,
 	}})
 	if err != nil {
-		return fmt.Errorf("create blob doc %s: %w", doc.FileID, err)
+		return false, fmt.Errorf("create blob doc %s: %w", doc.FileID, err)
 	}
 	if len(results) != 1 {
-		return fmt.Errorf("create blob doc %s: got %d bulk results, want 1", doc.FileID, len(results))
+		return false, fmt.Errorf("create blob doc %s: got %d bulk results, want 1", doc.FileID, len(results))
+	}
+	if results[0].Status == http.StatusConflict {
+		return false, nil
 	}
 	if !searchengine.IsBulkItemSuccess(searchengine.ActionCreate, results[0]) {
-		return fmt.Errorf("create blob doc %s: status %d %s", doc.FileID, results[0].Status, results[0].ErrorType)
+		return false, fmt.Errorf("create blob doc %s: status %d %s", doc.FileID, results[0].Status, results[0].ErrorType)
 	}
-	return nil
+	return true, nil
 }

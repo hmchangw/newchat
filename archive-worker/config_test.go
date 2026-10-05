@@ -17,7 +17,7 @@ func validConfig() config {
 		SiteID: "site-a", FillInterval: 10 * time.Second, BatchEvents: 2000, BatchBytes: 8 << 20,
 		PutTimeout: 10 * time.Second, BulkTimeout: 10 * time.Second, WriteAttempts: 2, FetchBatch: 100,
 		Replicas: 1, BlobMaxBytes: 100 << 20, BlobAckWait: 10 * time.Minute, BlobWorkers: 4,
-		Consumer:       stream.ConsumerSettings{AckWait: 60 * time.Second, MaxAckPending: 12000},
+		Consumer:       stream.ConsumerSettings{AckWait: 120 * time.Second, MaxAckPending: 12000},
 		Vault:          atrest.VaultConfig{Address: "https://vault.test:8200"},
 		IndexRetention: "2555d",
 	}
@@ -33,7 +33,16 @@ func TestConfig_Validate(t *testing.T) {
 		want   string
 	}{
 		{"missing vault address", func(c *config) { c.Vault.Address = "" }, "VAULT_ADDR"},
-		{"batch time exceeds ack wait", func(c *config) { c.Consumer.AckWait = 40 * time.Second }, "ACK_WAIT"},
+		{"batch time exceeds ack wait", func(c *config) { c.Consumer.AckWait = 60 * time.Second }, "CONSUMER_ACK_WAIT (1m0s) must exceed"},
+		{"ack wait equal to the worst case", func(c *config) { c.Consumer.AckWait = 113 * time.Second }, "= 1m53s"},
+		{"zero put timeout", func(c *config) { c.PutTimeout = 0 }, "ARCHIVE_PUT_TIMEOUT"},
+		{"zero bulk timeout", func(c *config) { c.BulkTimeout = 0 }, "ARCHIVE_BULK_TIMEOUT"},
+		{"negative fill interval", func(c *config) { c.FillInterval = -time.Second }, "ARCHIVE_FILL_INTERVAL"},
+		{"zero fill interval", func(c *config) { c.FillInterval = 0 }, "ARCHIVE_FILL_INTERVAL"},
+		{"zero blob cap", func(c *config) { c.BlobMaxBytes = 0 }, "ARCHIVE_BLOB_MAX_BYTES"},
+		{"zero replicas", func(c *config) { c.Replicas = 0 }, "ARCHIVE_REPLICAS"},
+		{"upper-case site id", func(c *config) { c.SiteID = "Site-A" }, "SITE_ID"},
+		{"site id with an index-name separator", func(c *config) { c.SiteID = "site a" }, "SITE_ID"},
 		{"zero batch events", func(c *config) { c.BatchEvents = 0 }, "ARCHIVE_BATCH_EVENTS"},
 		{"zero batch bytes", func(c *config) { c.BatchBytes = 0 }, "ARCHIVE_BATCH_BYTES"},
 		{"zero attempts", func(c *config) { c.WriteAttempts = 0 }, "ARCHIVE_WRITE_ATTEMPTS"},
@@ -49,6 +58,30 @@ func TestConfig_Validate(t *testing.T) {
 			err := c.validate()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestWorstCaseBatchTime(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config)
+		want   time.Duration
+	}{
+		// 10 + 2 x (2 x (10+10) + 10 verify + 0.5 + 1)
+		{"defaults", func(*config) {}, 113 * time.Second},
+		// 10 + 2 x (1 x (10+10) + 10 + 0.5)
+		{"one attempt", func(c *config) { c.WriteAttempts = 1 }, 71 * time.Second},
+		// 5 + 2 x (3 x (2+3) + 3 + 0.5 + 1 + 1.5)
+		{"short timeouts, three attempts", func(c *config) {
+			c.FillInterval, c.PutTimeout, c.BulkTimeout, c.WriteAttempts = 5*time.Second, 2*time.Second, 3*time.Second, 3
+		}, 47 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig()
+			tc.mutate(&c)
+			assert.Equal(t, tc.want, c.worstCaseBatchTime())
 		})
 	}
 }
@@ -84,7 +117,7 @@ func TestConfig_ConsumerSettingsMustBeSet(t *testing.T) {
 	})
 
 	t.Run("documented production values are accepted", func(t *testing.T) {
-		t.Setenv("CONSUMER_ACK_WAIT", "60s")
+		t.Setenv("CONSUMER_ACK_WAIT", "120s")
 		t.Setenv("CONSUMER_MAX_ACK_PENDING", "12000")
 		t.Setenv("ARCHIVE_REPLICAS", "3")
 		cfg, err := env.ParseAs[config]()
@@ -94,7 +127,7 @@ func TestConfig_ConsumerSettingsMustBeSet(t *testing.T) {
 	})
 
 	t.Run("local compose values are accepted", func(t *testing.T) {
-		t.Setenv("CONSUMER_ACK_WAIT", "60s")
+		t.Setenv("CONSUMER_ACK_WAIT", "120s")
 		t.Setenv("CONSUMER_MAX_ACK_PENDING", "4000")
 		t.Setenv("ARCHIVE_REPLICAS", "1")
 		cfg, err := env.ParseAs[config]()

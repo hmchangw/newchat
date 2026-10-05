@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"strings"
 
@@ -15,6 +16,7 @@ import (
 var (
 	errBlobMissing = errors.New("attachment no longer at source")
 	errBlobLegacy  = errors.New("legacy MinIO attachment is not archived")
+	errBlobHost    = errors.New("attachment host is not an allowed Drive host")
 )
 
 // blobSource opens an attachment's bytes. size is -1 when unknown.
@@ -47,20 +49,33 @@ func driveHostOf(titleLink string) (host string, legacy bool, err error) {
 // checks against its configured base URLs before it attaches the api-token.
 type driveSource struct{ client *drive.Client }
 
-func (s *driveSource) Open(_ context.Context, roomID string, att cassandra.Attachment) (io.ReadCloser, int64, string, error) { //nolint:gocritic // hugeParam: signature fixed by the blobSource interface
+func (s *driveSource) Open(ctx context.Context, roomID string, att cassandra.Attachment) (io.ReadCloser, int64, string, error) { //nolint:gocritic // hugeParam: signature fixed by the blobSource interface
 	host, legacy, err := driveHostOf(att.TitleLink)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("%w: %w", errBlobMissing, err)
+		return nil, 0, "", fmt.Errorf("%w: %v", errBlobMissing, err)
 	}
 	if legacy {
 		return nil, 0, "", errBlobLegacy
 	}
 	resp, err := s.client.GetGroupImage(host, roomID, att.ID)
-	if err != nil {
-		if errors.Is(err, drive.ErrHostNotAllowed) || errors.Is(err, drive.ErrNotFound) {
-			return nil, 0, "", fmt.Errorf("%w: %w", errBlobMissing, err)
-		}
+	switch {
+	case errors.Is(err, drive.ErrHostNotAllowed):
+		// Recorded as a skip, so this logs once per attachment, not per retry.
+		slog.WarnContext(ctx, "attachment host is not an allowed Drive host, skipping", "host", hostOnly(host), "fileId", att.ID)
+		return nil, 0, "", fmt.Errorf("%w: %v", errBlobHost, err)
+	case errors.Is(err, drive.ErrNotFound):
+		return nil, 0, "", fmt.Errorf("%w: %v", errBlobMissing, err)
+	case err != nil:
 		return nil, 0, "", fmt.Errorf("fetch attachment %s from drive: %w", att.ID, err)
 	}
 	return resp.Reader, resp.ContentLength, resp.ContentType, nil
+}
+
+// hostOnly reduces a client-written drive_host to its host for logging, so a
+// path or query in the link never reaches the log.
+func hostOnly(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "[unparsed]"
 }
