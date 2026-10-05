@@ -24,8 +24,11 @@ func (f *fakeEngine) Bulk(context.Context, []searchengine.BulkAction) ([]searche
 	return nil, nil
 }
 func (f *fakeEngine) UpsertTemplate(context.Context, string, json.RawMessage) error { return nil }
-func (f *fakeEngine) PutScript(context.Context, string, json.RawMessage) error      { return nil }
-func (f *fakeEngine) UpdateByQuery(context.Context, string, json.RawMessage) error  { return nil }
+func (f *fakeEngine) EnsureLifecyclePolicy(context.Context, string, json.RawMessage) (bool, error) {
+	return false, nil
+}
+func (f *fakeEngine) PutScript(context.Context, string, json.RawMessage) error     { return nil }
+func (f *fakeEngine) UpdateByQuery(context.Context, string, json.RawMessage) error { return nil }
 func (f *fakeEngine) UpdateMapping(_ context.Context, pattern string, _ json.RawMessage) error {
 	f.mappingPatterns = append(f.mappingPatterns, pattern)
 	return f.mappingErr

@@ -75,3 +75,23 @@ func TestIsBulkItemPermanent(t *testing.T) {
 		})
 	}
 }
+
+func TestIsBulkItemSuccess_Create(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   bool
+	}{
+		{"201 created", 201, true},
+		{"409 conflict is already archived", 409, true},
+		{"400 is a failure", 400, false},
+		{"404 is a failure", 404, false},
+		{"429 is a failure", 429, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := searchengine.IsBulkItemSuccess(searchengine.ActionCreate, searchengine.BulkResult{Status: tc.status})
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

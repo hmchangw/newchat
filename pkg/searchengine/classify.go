@@ -14,7 +14,8 @@ const ErrDocumentMissing = "document_missing_exception"
 //
 //   - 2xx is always success.
 //   - 409 is success for ActionIndex/ActionDelete (external-versioning
-//     rejected a stale write — the desired state is already there) but a
+//     rejected a stale write — the desired state is already there) and for
+//     ActionCreate (the id already exists, i.e. already archived) but a
 //     real failure for ActionUpdate (the LWW guard runs inside the script,
 //     not via ES versioning, so a 409 on update means the script itself
 //     never ran).
@@ -29,7 +30,7 @@ func IsBulkItemSuccess(action ActionType, result BulkResult) bool {
 	}
 	if result.Status == 409 {
 		switch action {
-		case ActionIndex, ActionDelete:
+		case ActionIndex, ActionDelete, ActionCreate:
 			return true
 		case ActionUpdate:
 			return false
@@ -41,7 +42,7 @@ func IsBulkItemSuccess(action ActionType, result BulkResult) bool {
 			return result.ErrorType == ""
 		case ActionUpdate:
 			return result.ErrorType == ErrDocumentMissing
-		case ActionIndex:
+		case ActionIndex, ActionCreate:
 			return false
 		}
 	}

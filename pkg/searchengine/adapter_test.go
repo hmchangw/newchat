@@ -3,6 +3,7 @@ package searchengine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -449,5 +450,115 @@ func TestAdapter_UpdateByQuery(t *testing.T) {
 		}})
 		err := a.UpdateByQuery(context.Background(), "", json.RawMessage(okBody))
 		assert.Error(t, err)
+	})
+}
+
+func TestAdapter_Bulk_CreateActionOmitsVersion(t *testing.T) {
+	var capturedBody string
+	ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		capturedBody = string(body)
+		return jsonResponse(200, `{"items":[{"create":{"status":201}}]}`), nil
+	}}
+	a := newAdapter(ft)
+	_, err := a.Bulk(context.Background(), []BulkAction{{
+		Action: ActionCreate, Index: "audit-events-a-2026.10.05", DocID: "a-7", Version: 99, Doc: json.RawMessage(`{"seq":7}`),
+	}})
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(capturedBody), "\n")
+	require.Len(t, lines, 2)
+	assert.JSONEq(t, `{"create":{"_index":"audit-events-a-2026.10.05","_id":"a-7"}}`, lines[0])
+	assert.JSONEq(t, `{"seq":7}`, lines[1])
+}
+
+type scriptedResponse struct {
+	status int
+	body   string
+}
+
+// scriptedTransport replays responses in order and records every request.
+type scriptedTransport struct {
+	responses []scriptedResponse
+	requests  []*http.Request
+}
+
+func (s *scriptedTransport) Perform(req *http.Request) (*http.Response, error) {
+	s.requests = append(s.requests, req)
+	if len(s.requests) > len(s.responses) {
+		return nil, errors.New("scriptedTransport: no response scripted")
+	}
+	r := s.responses[len(s.requests)-1]
+	return jsonResponse(r.status, r.body), nil
+}
+
+func TestAdapter_EnsureLifecyclePolicy(t *testing.T) {
+	policy := json.RawMessage(`{"policy":{}}`)
+
+	t.Run("absent policy is created", func(t *testing.T) {
+		tr := &scriptedTransport{responses: []scriptedResponse{{404, `{}`}, {200, `{"acknowledged":true}`}}}
+		a := newAdapter(tr)
+		created, err := a.EnsureLifecyclePolicy(context.Background(), "audit-archive", policy)
+		require.NoError(t, err)
+		assert.True(t, created)
+		require.Len(t, tr.requests, 2)
+		assert.Equal(t, http.MethodGet, tr.requests[0].Method)
+		assert.Equal(t, "/_ilm/policy/audit-archive", tr.requests[0].URL.Path)
+		assert.Equal(t, http.MethodPut, tr.requests[1].Method)
+		assert.Equal(t, "/_ilm/policy/audit-archive", tr.requests[1].URL.Path)
+		assert.Equal(t, "application/json", tr.requests[1].Header.Get("Content-Type"))
+	})
+
+	t.Run("existing policy is left alone", func(t *testing.T) {
+		tr := &scriptedTransport{responses: []scriptedResponse{{200, `{"audit-archive":{}}`}}}
+		a := newAdapter(tr)
+		created, err := a.EnsureLifecyclePolicy(context.Background(), "audit-archive", json.RawMessage(`{}`))
+		require.NoError(t, err)
+		assert.False(t, created)
+		assert.Len(t, tr.requests, 1)
+	})
+
+	t.Run("get with unexpected status fails without writing", func(t *testing.T) {
+		tr := &scriptedTransport{responses: []scriptedResponse{{503, `{}`}}}
+		a := newAdapter(tr)
+		created, err := a.EnsureLifecyclePolicy(context.Background(), "audit-archive", policy)
+		require.Error(t, err)
+		assert.False(t, created)
+		assert.Contains(t, err.Error(), "503")
+		assert.Len(t, tr.requests, 1)
+	})
+
+	t.Run("get transport error is wrapped", func(t *testing.T) {
+		ft := &fakeTransport{handler: func(*http.Request) (*http.Response, error) { return nil, errors.New("boom") }}
+		a := newAdapter(ft)
+		created, err := a.EnsureLifecyclePolicy(context.Background(), "audit-archive", policy)
+		require.Error(t, err)
+		assert.False(t, created)
+		assert.Contains(t, err.Error(), "get lifecycle policy")
+	})
+
+	t.Run("put with unexpected status fails", func(t *testing.T) {
+		tr := &scriptedTransport{responses: []scriptedResponse{{404, `{}`}, {400, `{"error":"bad policy"}`}}}
+		a := newAdapter(tr)
+		created, err := a.EnsureLifecyclePolicy(context.Background(), "audit-archive", policy)
+		require.Error(t, err)
+		assert.False(t, created)
+		assert.Contains(t, err.Error(), "400")
+		assert.Contains(t, err.Error(), "bad policy")
+	})
+
+	t.Run("put transport error is wrapped", func(t *testing.T) {
+		calls := 0
+		ft := &fakeTransport{handler: func(*http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return jsonResponse(404, `{}`), nil
+			}
+			return nil, errors.New("boom")
+		}}
+		a := newAdapter(ft)
+		created, err := a.EnsureLifecyclePolicy(context.Background(), "audit-archive", policy)
+		require.Error(t, err)
+		assert.False(t, created)
+		assert.Contains(t, err.Error(), "put lifecycle policy")
 	})
 }

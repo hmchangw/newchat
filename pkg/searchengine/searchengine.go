@@ -19,6 +19,9 @@ const (
 	ActionIndex  ActionType = "index"
 	ActionDelete ActionType = "delete"
 	ActionUpdate ActionType = "update"
+	// ActionCreate is `op_type: create`: the item fails with 409 when the id
+	// already exists. It never carries a version; ES rejects a version on create.
+	ActionCreate ActionType = "create"
 )
 
 // BulkAction represents a single action in a bulk request.
@@ -57,6 +60,9 @@ type SearchEngine interface {
 	Ping(ctx context.Context) error
 	Bulk(ctx context.Context, actions []BulkAction) ([]BulkResult, error)
 	UpsertTemplate(ctx context.Context, name string, body json.RawMessage) error
+
+	// EnsureLifecyclePolicy creates the ILM policy if absent; never overwrites.
+	EnsureLifecyclePolicy(ctx context.Context, name string, body json.RawMessage) (created bool, err error)
 
 	// PutScript registers (creates or updates) an Elasticsearch stored
 	// script under the given id via `PUT /_scripts/{id}`. Stored scripts let

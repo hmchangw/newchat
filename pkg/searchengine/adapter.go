@@ -20,6 +20,13 @@ type bulkActionMeta struct {
 	VersionType string `json:"version_type,omitempty"`
 }
 
+// createActionMeta is the op_type=create header: no version fields, because
+// Elasticsearch rejects external versioning on create.
+type createActionMeta struct {
+	Index string `json:"_index"`
+	ID    string `json:"_id"`
+}
+
 type bulkResponse struct {
 	Items []map[string]bulkItemResult `json:"items"`
 }
@@ -131,6 +138,12 @@ func (a *httpAdapter) Bulk(ctx context.Context, actions []BulkAction) ([]BulkRes
 		case ActionDelete:
 			line, _ := json.Marshal(map[string]bulkActionMeta{"delete": meta})
 			buf.Write(line)
+			buf.WriteByte('\n')
+		case ActionCreate:
+			line, _ := json.Marshal(map[string]createActionMeta{"create": {Index: action.Index, ID: action.DocID}})
+			buf.Write(line)
+			buf.WriteByte('\n')
+			buf.Write(action.Doc)
 			buf.WriteByte('\n')
 		case ActionUpdate:
 			// ES 8.x / OpenSearch 2.x bulk _update DOES accept version +
@@ -417,4 +430,42 @@ func (a *httpAdapter) GetDoc(ctx context.Context, index, docID string) (json.Raw
 		return nil, false, fmt.Errorf("read get-doc response: %w", err)
 	}
 	return data, true, nil
+}
+
+// EnsureLifecyclePolicy creates the ILM policy only when it does not exist, so
+// an operator's later edits to the policy are never overwritten by a restart.
+// Returns created=true when this call wrote it.
+func (a *httpAdapter) EnsureLifecyclePolicy(ctx context.Context, name string, body json.RawMessage) (bool, error) {
+	path := "/_ilm/policy/" + name
+	getResp, err := a.do(ctx, "ilm.get_lifecycle", "", func(ctx context.Context) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	})
+	if err != nil {
+		return false, fmt.Errorf("get lifecycle policy: %w", err)
+	}
+	_, _ = io.Copy(io.Discard, getResp.Body) // drain so the connection can be reused
+	getResp.Body.Close()
+	switch {
+	case getResp.StatusCode == http.StatusOK:
+		return false, nil
+	case getResp.StatusCode != http.StatusNotFound:
+		return false, fmt.Errorf("get lifecycle policy: status %d", getResp.StatusCode)
+	}
+	putResp, err := a.do(ctx, "ilm.put_lifecycle", "", func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, path, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("put lifecycle policy: %w", err)
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(putResp.Body)
+		return false, fmt.Errorf("put lifecycle policy: status %d, body: %s", putResp.StatusCode, respBody)
+	}
+	return true, nil
 }
