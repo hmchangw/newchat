@@ -2,8 +2,11 @@
 package restyutil
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -82,7 +85,10 @@ func logError(req *resty.Request, err error) {
 
 func logFields(req *resty.Request, status int, dur time.Duration, err error) []any {
 	// Strip RawQuery from URL — query strings can carry tokens (CLAUDE.md: never log tokens).
-	host, path := "", req.URL
+	host, path := "", redactedURLPlaceholder
+	if u, perr := url.Parse(req.URL); perr == nil {
+		host, path = u.Host, u.Path
+	}
 	if rr := req.RawRequest; rr != nil && rr.URL != nil {
 		host = rr.URL.Host
 		path = rr.URL.Path
@@ -102,7 +108,30 @@ func logFields(req *resty.Request, status int, dur time.Duration, err error) []a
 		fields = append(fields, "status", status)
 	}
 	if err != nil {
-		fields = append(fields, "error", err.Error())
+		fields = append(fields, "error", redactedError(err))
 	}
 	return fields
+}
+
+const redactedURLPlaceholder = "[redacted url]"
+
+// redactedError renders err for a log line. A transport failure is a
+// *url.Error whose text embeds the whole request URL, and a presigned URL's
+// query is a bearer credential, so that error is rebuilt from scheme, host and
+// path only. Any other error has no URL of resty's making and is kept as is.
+func redactedError(err error) string {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err.Error()
+	}
+	return fmt.Sprintf("%s %q: %v", ue.Op, redactURL(ue.URL), ue.Err)
+}
+
+// redactURL keeps scheme, host and path; query, fragment and user info go.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return redactedURLPlaceholder
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
 }

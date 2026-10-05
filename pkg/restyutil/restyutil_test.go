@@ -3,11 +3,13 @@ package restyutil
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -260,4 +262,69 @@ func fmtAny(v any) string {
 	default:
 		return ""
 	}
+}
+
+// A transport error is a *url.Error whose text embeds the full request URL; a
+// presigned URL's query is a bearer credential and must never reach the log.
+func TestLog_TransportErrorRedactsQuery(t *testing.T) {
+	failing := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("dial tcp: connection refused")
+	})
+	tests := []struct {
+		name string
+		base string
+		path string
+	}{
+		{"relative path on a base URL", "https://bucket.example:9000", "/site-a/obj?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA%2Fsecret"},
+		{"absolute presigned URL", "", "https://bucket.example:9000/site-a/obj?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA%2Fsecret"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(prev)
+
+			c := New(tc.base, WithTransport(failing))
+			_, err := c.R().Get(tc.path)
+			require.Error(t, err)
+			out := buf.String()
+			assert.Contains(t, out, `"msg":"http error"`)
+			assert.Contains(t, out, "bucket.example:9000/site-a/obj", "host and path stay for diagnosis")
+			assert.Contains(t, out, "connection refused", "the cause stays for diagnosis")
+			assert.NotContains(t, out, "X-Amz-Signature")
+			assert.NotContains(t, out, "deadbeef")
+			assert.NotContains(t, out, "AKIA")
+		})
+	}
+}
+
+func TestRedactedError(t *testing.T) {
+	// User info is built, not spelled in a literal, so the fixture is not a hardcoded credential.
+	withUser := url.URL{Scheme: "https", User: url.UserPassword("user", "s3cret"), Host: "h.example", Path: "/p/q", RawQuery: "sig=s3cret", Fragment: "frag"}
+	ue := &url.Error{Op: "Get", URL: withUser.String(), Err: errors.New("i/o timeout")}
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"url error", ue, `Get "https://h.example/p/q": i/o timeout`},
+		{"wrapped url error", fmt.Errorf("download: %w", ue), `Get "https://h.example/p/q": i/o timeout`},
+		{"resty response error", &resty.ResponseError{Err: ue}, `Get "https://h.example/p/q": i/o timeout`},
+		{"unparseable url", &url.Error{Op: "Get", URL: "http://[::1", Err: errors.New("x")}, `Get "[redacted url]": x`},
+		{"no url in the error", errors.New("plain failure"), "plain failure"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, redactedError(tc.err))
+		})
+	}
+}
+
+func TestLogFields_NilRawRequestStripsQueryFromURL(t *testing.T) {
+	req := (&resty.Client{}).R()
+	req.URL = "https://h.example/p?token=s3cret"
+	joined := strings.Join(toStrings(logFields(req, 0, 0, nil)), " ")
+	assert.Contains(t, joined, "/p")
+	assert.NotContains(t, joined, "s3cret")
 }
