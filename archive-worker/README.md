@@ -29,8 +29,15 @@ Events are sealed into one segment when the first bound trips.
 | `ARCHIVE_PUT_TIMEOUT` | `10s` | One upload attempt |
 | `ARCHIVE_BULK_TIMEOUT` | `10s` | One index attempt |
 | `ARCHIVE_WRITE_ATTEMPTS` | `2` | Upload and index attempts before a NAK |
-| `CONSUMER_ACK_WAIT` | `60s` | Must exceed fill + attempts x (put + bulk timeouts); 50s at defaults |
-| `CONSUMER_MAX_ACK_PENDING` | `12000` | Should be >= replicas x 2 x `ARCHIVE_BATCH_EVENTS` (`ARCHIVE_REPLICAS` feeds this check) |
+| `CONSUMER_ACK_WAIT` | none, must be set | Must exceed fill + attempts x (put + bulk timeouts); 50s at defaults |
+| `CONSUMER_MAX_ACK_PENDING` | none, must be set | Should be >= replicas x 2 x `ARCHIVE_BATCH_EVENTS` (`ARCHIVE_REPLICAS` feeds this check) |
+
+`CONSUMER_ACK_WAIT` and `CONSUMER_MAX_ACK_PENDING` have no worker-specific defaults: the
+shared `CONSUMER_*` defaults (30s and 1000) are below what this worker needs, so a
+deployment that leaves them unset fails startup validation on the ack wait and warns on
+the ack-pending ceiling. Production sets `CONSUMER_ACK_WAIT=60s` and
+`CONSUMER_MAX_ACK_PENDING=12000` with `ARCHIVE_REPLICAS=3` (3 x 2 x 2000). The local
+compose file sets `60s`, `4000` and `ARCHIVE_REPLICAS=1`.
 
 Startup refuses a configuration where the worst-case batch time reaches the ack wait
 and warns when the ack-pending ceiling is below the formula.

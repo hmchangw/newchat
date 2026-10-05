@@ -64,6 +64,7 @@ func TestLoadOrCreateDEK(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		idx := NewMockindexStore(ctrl)
 		w := newStaticWrapper(t)
+		var gotWrapped []byte
 		idx.EXPECT().GetDoc(ctx, "audit-keys-site-a", "current").Return(nil, false, nil)
 		idx.EXPECT().Bulk(ctx, gomock.Any()).DoAndReturn(func(_ context.Context, a []searchengine.BulkAction) ([]searchengine.BulkResult, error) {
 			require.Len(t, a, 1)
@@ -74,11 +75,17 @@ func TestLoadOrCreateDEK(t *testing.T) {
 			require.NoError(t, json.Unmarshal(a[0].Doc, &d))
 			assert.Equal(t, "site-a", d.SiteID)
 			assert.NotEmpty(t, d.WrappedDek)
+			assert.Equal(t, now(), d.CreatedAt)
+			gotWrapped = d.WrappedDek
 			return []searchengine.BulkResult{{Status: 201}}, nil
 		})
 		dek, err := loadOrCreateDEK(ctx, idx, w, "site-a", now)
 		require.NoError(t, err)
 		assert.Len(t, dek, auditarchive.DEKSize)
+		assert.NotEqual(t, dek, gotWrapped, "the plaintext DEK must never be stored")
+		unwrapped, err := w.Unwrap(ctx, gotWrapped)
+		require.NoError(t, err)
+		assert.Equal(t, dek, unwrapped, "the stored document must wrap the returned DEK")
 	})
 
 	t.Run("create conflict re-reads the winner", func(t *testing.T) {

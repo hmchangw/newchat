@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,4 +55,47 @@ func TestCheckBatchAckCoupling(t *testing.T) {
 	w := checkBatchAckCoupling(2000, 1000, 3)
 	assert.Contains(t, w, "12000")
 	assert.Contains(t, w, "CONSUMER_MAX_ACK_PENDING")
+}
+
+// The shared stream.ConsumerSettings defaults (ACK_WAIT 30s, MAX_ACK_PENDING 1000)
+// are below what this worker needs, so CONSUMER_ACK_WAIT and CONSUMER_MAX_ACK_PENDING
+// must be set explicitly. This pins that requirement instead of hiding it behind validConfig().
+func TestConfig_ConsumerSettingsMustBeSet(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://nats:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("ARCHIVE_SEARCH_URL", "http://es:9200")
+	t.Setenv("ARCHIVE_S3_ENDPOINT", "minio:9000")
+	t.Setenv("ARCHIVE_S3_ACCESS_KEY", "ak")
+	t.Setenv("ARCHIVE_S3_SECRET_KEY", "sk")
+	t.Setenv("ARCHIVE_BUCKET", "archive-site-a")
+
+	t.Run("required vars only is rejected naming CONSUMER_ACK_WAIT", func(t *testing.T) {
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		err = cfg.validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CONSUMER_ACK_WAIT")
+		assert.NotEmpty(t, checkBatchAckCoupling(cfg.BatchEvents, cfg.Consumer.MaxAckPending, cfg.Replicas),
+			"the shared MAX_ACK_PENDING default is below replicas x 2 x ARCHIVE_BATCH_EVENTS")
+	})
+
+	t.Run("documented production values are accepted", func(t *testing.T) {
+		t.Setenv("CONSUMER_ACK_WAIT", "60s")
+		t.Setenv("CONSUMER_MAX_ACK_PENDING", "12000")
+		t.Setenv("ARCHIVE_REPLICAS", "3")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		require.NoError(t, cfg.validate())
+		assert.Empty(t, checkBatchAckCoupling(cfg.BatchEvents, cfg.Consumer.MaxAckPending, cfg.Replicas))
+	})
+
+	t.Run("local compose values are accepted", func(t *testing.T) {
+		t.Setenv("CONSUMER_ACK_WAIT", "60s")
+		t.Setenv("CONSUMER_MAX_ACK_PENDING", "4000")
+		t.Setenv("ARCHIVE_REPLICAS", "1")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		require.NoError(t, cfg.validate())
+		assert.Empty(t, checkBatchAckCoupling(cfg.BatchEvents, cfg.Consumer.MaxAckPending, cfg.Replicas))
+	})
 }

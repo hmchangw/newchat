@@ -26,6 +26,7 @@ services:
       - DEV_MODE=true
       - CONSUMER_ACK_WAIT=${CONSUMER_ACK_WAIT:-60s}
       - CONSUMER_MAX_ACK_PENDING=${CONSUMER_MAX_ACK_PENDING:-4000}
+      - ARCHIVE_REPLICAS=${ARCHIVE_REPLICAS:-1}
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro

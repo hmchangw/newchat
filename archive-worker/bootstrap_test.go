@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -11,6 +12,8 @@ import (
 	"go.uber.org/mock/gomock"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+
+	"github.com/hmchangw/chat/pkg/auditarchive"
 )
 
 type fakeStreams struct {
@@ -59,23 +62,36 @@ func TestBootstrapStreams(t *testing.T) {
 }
 
 func TestBootstrapIndex(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	idx := NewMockindexStore(ctrl)
 	ctx := context.Background()
-	idx.EXPECT().EnsureLifecyclePolicy(ctx, "audit-archive", gomock.Any()).Return(true, nil)
-	for _, name := range []string{"audit-events-site-a", "audit-members-site-a", "audit-blobs-site-a", "audit-keys-site-a"} {
-		idx.EXPECT().UpsertTemplate(ctx, name, gomock.Any()).Return(nil)
+
+	for _, devMode := range []bool{true, false} {
+		t.Run(fmt.Sprintf("policy and templates are sent with their real bodies devMode=%t", devMode), func(t *testing.T) {
+			idx := NewMockindexStore(gomock.NewController(t))
+			idx.EXPECT().EnsureLifecyclePolicy(ctx, "audit-archive", auditarchive.LifecyclePolicyBody("2555d")).Return(true, nil)
+			templates := auditarchive.Templates("site-a", devMode)
+			require.Len(t, templates, 4)
+			for _, tpl := range templates {
+				idx.EXPECT().UpsertTemplate(ctx, tpl.Name, tpl.Body).Return(nil)
+			}
+			require.NoError(t, bootstrapIndex(ctx, idx, "site-a", "2555d", devMode))
+		})
 	}
-	require.NoError(t, bootstrapIndex(ctx, idx, "site-a", "2555d", true))
+
+	t.Run("retention is applied to the policy body", func(t *testing.T) {
+		idx := NewMockindexStore(gomock.NewController(t))
+		idx.EXPECT().EnsureLifecyclePolicy(ctx, "audit-archive", auditarchive.LifecyclePolicyBody("30d")).Return(false, nil)
+		idx.EXPECT().UpsertTemplate(ctx, gomock.Any(), gomock.Any()).Return(nil).Times(4)
+		require.NoError(t, bootstrapIndex(ctx, idx, "site-a", "30d", false))
+	})
 
 	t.Run("policy failure stops before templates", func(t *testing.T) {
-		idx := NewMockindexStore(ctrl)
+		idx := NewMockindexStore(gomock.NewController(t))
 		idx.EXPECT().EnsureLifecyclePolicy(ctx, "audit-archive", gomock.Any()).Return(false, errors.New("ilm unavailable"))
 		assert.Error(t, bootstrapIndex(ctx, idx, "site-a", "2555d", true))
 	})
 
 	t.Run("template failure is returned", func(t *testing.T) {
-		idx := NewMockindexStore(ctrl)
+		idx := NewMockindexStore(gomock.NewController(t))
 		idx.EXPECT().EnsureLifecyclePolicy(ctx, "audit-archive", gomock.Any()).Return(false, nil)
 		idx.EXPECT().UpsertTemplate(ctx, gomock.Any(), gomock.Any()).Return(errors.New("es down"))
 		assert.Error(t, bootstrapIndex(ctx, idx, "site-a", "2555d", true))
