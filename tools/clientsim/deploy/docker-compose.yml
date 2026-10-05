@@ -27,6 +27,9 @@ services:
       # than hardcoded, so a DEV_MODE=false in the env_file above is not
       # silently ignored.
       DEV_MODE: "${CLIENTSIM_DEV_MODE:?set CLIENTSIM_DEV_MODE=true only on a throwaway local stack — dev mode signs any account}"
+      # auth-service refuses DEV_MODE=true without this acknowledgement; the
+      # CLIENTSIM_DEV_MODE gate above is the deliberate act, this stack is throwaway.
+      DEV_MODE_LOCAL_ONLY_ACK: "true"
       PORT: "8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]

@@ -25,6 +25,7 @@ import (
 type config struct {
 	Port                 string        `env:"PORT"                     envDefault:"8080"`
 	DevMode              bool          `env:"DEV_MODE"                 envDefault:"false"`
+	DevModeLocalOnlyAck  bool          `env:"DEV_MODE_LOCAL_ONLY_ACK"  envDefault:"false"`
 	AuthScopedSigningKey string        `env:"AUTH_SCOPED_SIGNING_KEY,required"`
 	AuthAccountPubKey    string        `env:"AUTH_ACCOUNT_PUB_KEY,required"`
 	NATSJWTExpiry        time.Duration `env:"NATS_JWT_EXPIRY"           envDefault:"2h"`
@@ -43,6 +44,16 @@ type config struct {
 	BotplatformURL string `env:"BOTPLATFORM_URL"`
 }
 
+// validateDevMode refuses the unauthenticated JWT path unless the deployment
+// explicitly declares itself local. A production manifest that copies
+// DEV_MODE=true by mistake exits instead of minting tokens for any account.
+func (c config) validateDevMode() error { //nolint:gocritic // hugeParam: value receiver keeps the check callable on a config literal
+	if c.DevMode && !c.DevModeLocalOnlyAck {
+		return fmt.Errorf("DEV_MODE=true requires DEV_MODE_LOCAL_ONLY_ACK=true; dev mode mints unauthenticated JWTs and is only for local environments")
+	}
+	return nil
+}
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("fatal error", "error", err)
@@ -54,6 +65,9 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.validateDevMode(); err != nil {
+		return fmt.Errorf("validate config: %w", err)
 	}
 
 	signingKP, err := nkeys.FromSeed([]byte(cfg.AuthScopedSigningKey))

@@ -16,6 +16,8 @@ services:
       - PORT=8080
       # Bypass OIDC; accept any account name. Flip to false to test OIDC.
       - DEV_MODE=${DEV_MODE:-true}
+      # Required by auth-service whenever DEV_MODE=true; this file is local-only.
+      - DEV_MODE_LOCAL_ONLY_ACK=true
       - NATS_JWT_EXPIRY=${NATS_JWT_EXPIRY:-2h}
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
