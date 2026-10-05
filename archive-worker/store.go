@@ -17,7 +17,7 @@ type indexStore interface {
 }
 
 // objectStore is the slice of the archive bucket the worker uses.
-type objectStore interface { //nolint:unused // first consumer is the segment writer, a later task
+type objectStore interface {
 	Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
 }
 
