@@ -295,7 +295,7 @@ func (l *blobLane) store(ctx context.Context, doc *auditarchive.BlobDoc, body io
 	// minio-go needs the object size up front for a single-part PUT, so the
 	// encrypted blob is buffered; the cap and worker count bound the memory.
 	var enc bytes.Buffer
-	sum, n, err := auditarchive.EncryptBlob(&enc, limited, l.cipher, doc.FileID, l.cfg.chunkBytes)
+	sum, n, err := auditarchive.EncryptBlob(&enc, limited, l.cipher, doc.FileID, "", l.cfg.chunkBytes)
 	if err != nil {
 		return fmt.Errorf("encrypt attachment %s: %w", doc.FileID, err)
 	}
@@ -309,7 +309,7 @@ func (l *blobLane) store(ctx context.Context, doc *auditarchive.BlobDoc, body io
 	if err := l.objects.Put(ctx, key, bytes.NewReader(enc.Bytes()), int64(enc.Len()), "application/octet-stream"); err != nil {
 		return fmt.Errorf("put attachment %s: %w", doc.FileID, err)
 	}
-	doc.BlobKey, doc.PlainSHA256, doc.SizeBytes, doc.ChunkBytes = key, sum, n, l.cfg.chunkBytes
+	doc.BlobKey, doc.PlainDigest, doc.SizeBytes, doc.ChunkBytes = key, sum, n, l.cfg.chunkBytes
 	l.metrics.blobs("archived", n)
 	return nil
 }

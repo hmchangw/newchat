@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"strconv"
 )
@@ -52,14 +53,21 @@ func NewCipher(dek []byte) (*Cipher, error) {
 	return &Cipher{aead: aead, rand: rand.Reader, macKey: macKey}, nil
 }
 
+// DigestPrefix tags every keyed digest the archive stores.
+const DigestPrefix = "hmac-sha256:"
+
 // Digest returns "hmac-sha256:<hex>" over b under a key derived from the DEK.
 // It is keyed so that a reader of the plaintext index metadata cannot confirm
 // a guessed message body offline against the stored digest.
 func (c *Cipher) Digest(b []byte) string {
-	m := hmac.New(sha256.New, c.macKey)
+	m := c.NewDigest()
 	m.Write(b) // hash.Hash.Write never returns an error
-	return "hmac-sha256:" + hex.EncodeToString(m.Sum(nil))
+	return DigestPrefix + hex.EncodeToString(m.Sum(nil))
 }
+
+// NewDigest returns a streaming HMAC-SHA256 under the same derived key as
+// Digest; DigestPrefix plus the hex of its Sum is the stored form.
+func (c *Cipher) NewDigest() hash.Hash { return hmac.New(sha256.New, c.macKey) }
 
 // Seal returns nonce || ciphertext || tag with a fresh random nonce.
 func (c *Cipher) Seal(plaintext, aad []byte) ([]byte, error) {
@@ -80,7 +88,7 @@ func (c *Cipher) Open(sealed, aad []byte) ([]byte, error) {
 	}
 	pt, err := c.aead.Open(nil, sealed[:ns], sealed[ns:], aad)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrAuthFailed, err)
+		return nil, fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}
 	return pt, nil
 }

@@ -2,12 +2,12 @@ package auditarchive
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // DefaultChunkBytes is the plaintext size of one blob chunk.
@@ -31,11 +31,54 @@ func readErr(err, structural error, what string) error {
 	return fmt.Errorf("auditarchive: read blob %s: %w", what, err)
 }
 
+// BlobHeader is the plaintext prefix of an encrypted blob. KeyID names the
+// wrapped DEK the chunks are sealed under, so a reader can pick the key
+// before decrypting; it may be empty.
+type BlobHeader struct {
+	Version    uint16
+	ChunkBytes uint32
+	KeyID      string
+}
+
+// ReadBlobHeader reads the header of an encrypted blob and leaves src at the
+// first chunk.
+func ReadBlobHeader(src io.Reader) (BlobHeader, error) {
+	be := binary.BigEndian
+	magic := make([]byte, len(blobMagic))
+	if _, err := io.ReadFull(src, magic); err != nil {
+		return BlobHeader{}, readErr(err, ErrBadSegment, "magic")
+	}
+	if !bytes.Equal(magic, blobMagic) {
+		return BlobHeader{}, fmt.Errorf("%w: bad blob magic", ErrBadSegment)
+	}
+	var h BlobHeader
+	if err := binary.Read(src, be, &h.Version); err != nil {
+		return BlobHeader{}, readErr(err, ErrBadSegment, "version")
+	}
+	if h.Version != FormatVersion {
+		return BlobHeader{}, fmt.Errorf("%w: unsupported blob version", ErrBadSegment)
+	}
+	if err := binary.Read(src, be, &h.ChunkBytes); err != nil {
+		return BlobHeader{}, readErr(err, ErrBadSegment, "chunk size")
+	}
+	var n uint16
+	if err := binary.Read(src, be, &n); err != nil {
+		return BlobHeader{}, readErr(err, ErrBadSegment, "key id length")
+	}
+	kid := make([]byte, n)
+	if _, err := io.ReadFull(src, kid); err != nil {
+		return BlobHeader{}, readErr(err, ErrBadSegment, "key id")
+	}
+	h.KeyID = string(kid)
+	return h, nil
+}
+
 // EncryptBlob encrypts src chunk by chunk so attachments of any size stream
 // through bounded memory. Each chunk's AAD carries its index; the empty
 // terminating chunk carries final=true, so dropping, reordering or
-// truncating chunks fails on decrypt.
-func EncryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string, chunkBytes int) (string, int64, error) {
+// truncating chunks fails on decrypt. It returns the keyed digest of the
+// plaintext (Cipher.NewDigest, "hmac-sha256:<hex>") and its length.
+func EncryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID, keyID string, chunkBytes int) (string, int64, error) {
 	if chunkBytes <= 0 {
 		return "", 0, fmt.Errorf("auditarchive: chunk size must be positive, got %d", chunkBytes)
 	}
@@ -44,20 +87,25 @@ func EncryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string, chunkBy
 	if chunkBytes > maxFrameBytes-sealOverhead {
 		return "", 0, fmt.Errorf("auditarchive: chunk size %d exceeds the %d limit", chunkBytes, maxFrameBytes-sealOverhead)
 	}
+	if len(keyID) > math.MaxUint16 {
+		return "", 0, fmt.Errorf("%w: key id (%d bytes) exceeds %d", ErrBadSegment, len(keyID), math.MaxUint16)
+	}
 	be := binary.BigEndian
 	var hdr bytes.Buffer
 	hdr.Write(blobMagic)
 	_ = binary.Write(&hdr, be, FormatVersion)
 	_ = binary.Write(&hdr, be, uint32(chunkBytes))
+	writeHeaderString(&hdr, keyID)
 	if _, err := dst.Write(hdr.Bytes()); err != nil {
 		return "", 0, fmt.Errorf("auditarchive: write blob header: %w", err)
 	}
-	sum := sha256.New()
+	sum := c.NewDigest()
 	buf := make([]byte, chunkBytes)
 	var total int64
 	var idx uint32
 	writeFrame := func(sealed []byte) error {
 		var l [4]byte
+		// #nosec G115 -- a sealed chunk is at most chunkBytes+sealOverhead <= maxFrameBytes (checked above), far below MaxUint32
 		be.PutUint32(l[:], uint32(len(sealed)))
 		if _, err := dst.Write(l[:]); err != nil {
 			return err
@@ -93,56 +141,43 @@ func EncryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string, chunkBy
 	if err := writeFrame(final); err != nil {
 		return "", 0, fmt.Errorf("auditarchive: write final chunk: %w", err)
 	}
-	return "sha256:" + hex.EncodeToString(sum.Sum(nil)), total, nil
+	return DigestPrefix + hex.EncodeToString(sum.Sum(nil)), total, nil
 }
 
-// DecryptBlob streams the plaintext to dst, verifying every chunk.
-func DecryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string) (string, int64, error) {
+// DecryptBlob streams the plaintext to dst, verifying every chunk. It returns
+// the keyed plaintext digest, the plaintext length and the header's key id.
+func DecryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string) (digest string, size int64, keyID string, err error) {
+	h, err := ReadBlobHeader(src)
+	if err != nil {
+		return "", 0, "", err
+	}
 	be := binary.BigEndian
-	magic := make([]byte, len(blobMagic))
-	if _, err := io.ReadFull(src, magic); err != nil {
-		return "", 0, readErr(err, ErrBadSegment, "magic")
-	}
-	if !bytes.Equal(magic, blobMagic) {
-		return "", 0, fmt.Errorf("%w: bad blob magic", ErrBadSegment)
-	}
-	var version uint16
-	var chunkBytes uint32
-	if err := binary.Read(src, be, &version); err != nil {
-		return "", 0, readErr(err, ErrBadSegment, "version")
-	}
-	if version != FormatVersion {
-		return "", 0, fmt.Errorf("%w: unsupported blob version", ErrBadSegment)
-	}
-	if err := binary.Read(src, be, &chunkBytes); err != nil {
-		return "", 0, readErr(err, ErrBadSegment, "chunk size")
-	}
-	sum := sha256.New()
+	sum := c.NewDigest()
 	var total int64
 	for idx := uint32(0); ; idx++ {
 		var n uint32
 		if err := binary.Read(src, be, &n); err != nil {
-			return "", 0, readErr(err, ErrBlobTruncated, fmt.Sprintf("chunk %d length", idx))
+			return "", 0, "", readErr(err, ErrBlobTruncated, fmt.Sprintf("chunk %d length", idx))
 		}
 		if n > maxFrameBytes {
-			return "", 0, fmt.Errorf("%w: chunk %d length %d", ErrBadSegment, idx, n)
+			return "", 0, "", fmt.Errorf("%w: chunk %d length %d", ErrBadSegment, idx, n)
 		}
 		sealed := make([]byte, n)
 		if _, err := io.ReadFull(src, sealed); err != nil {
-			return "", 0, readErr(err, ErrBlobTruncated, fmt.Sprintf("chunk %d", idx))
+			return "", 0, "", readErr(err, ErrBlobTruncated, fmt.Sprintf("chunk %d", idx))
 		}
 		pt, err := c.Open(sealed, ChunkAAD(fileID, idx, false))
 		if err != nil {
 			// Not a data chunk: it must be the terminator, or it is tampered.
 			if _, ferr := c.Open(sealed, ChunkAAD(fileID, idx, true)); ferr == nil {
-				return "sha256:" + hex.EncodeToString(sum.Sum(nil)), total, nil
+				return DigestPrefix + hex.EncodeToString(sum.Sum(nil)), total, h.KeyID, nil
 			}
-			return "", 0, err
+			return "", 0, "", err
 		}
 		sum.Write(pt)
 		total += int64(len(pt))
 		if _, err := dst.Write(pt); err != nil {
-			return "", 0, fmt.Errorf("auditarchive: write plaintext chunk %d: %w", idx, err)
+			return "", 0, "", fmt.Errorf("auditarchive: write plaintext chunk %d: %w", idx, err)
 		}
 	}
 }

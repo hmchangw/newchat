@@ -47,6 +47,7 @@ func segmentHeader(version uint16, count uint32) []byte {
 	b.WriteString("s")
 	_ = binary.Write(&b, binary.BigEndian, uint16(1))
 	b.WriteString("l")
+	_ = binary.Write(&b, binary.BigEndian, uint16(0)) // empty key id
 	_ = binary.Write(&b, binary.BigEndian, uint64(1))
 	_ = binary.Write(&b, binary.BigEndian, uint64(1))
 	_ = binary.Write(&b, binary.BigEndian, count)
@@ -69,9 +70,11 @@ func TestReadSegment_StructuralErrors(t *testing.T) {
 		{"header cut after version", withTrailer(segmentHeader(FormatVersion, 0)[:8])},
 		{"header cut in site", withTrailer(segmentHeader(FormatVersion, 0)[:10])},
 		{"header cut in lane", withTrailer(segmentHeader(FormatVersion, 0)[:13])},
+		{"header cut in keyId", withTrailer(segmentHeader(FormatVersion, 0)[:15])},
+		{"keyId longer than the header", withTrailer(append(segmentHeader(FormatVersion, 0)[:14], 0xff, 0xff))},
 		{"header cut in firstSeq", withTrailer(segmentHeader(FormatVersion, 0)[:16])},
 		{"header cut in lastSeq", withTrailer(segmentHeader(FormatVersion, 0)[:24])},
-		{"header cut in count", withTrailer(segmentHeader(FormatVersion, 0)[:32])},
+		{"header cut in count", withTrailer(segmentHeader(FormatVersion, 0)[:34])},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,23 +135,23 @@ func TestEncryptBlob_Failures(t *testing.T) {
 	require.NoError(t, err)
 	plain := bytes.Repeat([]byte{7}, 100)
 	var ok bytes.Buffer
-	_, _, err = EncryptBlob(&ok, bytes.NewReader(plain), c, "f", 64)
+	_, _, err = EncryptBlob(&ok, bytes.NewReader(plain), c, "f", "k", 64)
 	require.NoError(t, err)
 	for limit := 0; limit < ok.Len(); limit++ {
-		_, _, err := EncryptBlob(&failAfter{limit: limit}, bytes.NewReader(plain), c, "f", 64)
+		_, _, err := EncryptBlob(&failAfter{limit: limit}, bytes.NewReader(plain), c, "f", "k", 64)
 		assert.True(t, errors.Is(err, errBoom), "limit %d: %v", limit, err)
 	}
 	t.Run("source read error", func(t *testing.T) {
-		_, _, err := EncryptBlob(&bytes.Buffer{}, failReader{}, c, "f", 64)
+		_, _, err := EncryptBlob(&bytes.Buffer{}, failReader{}, c, "f", "k", 64)
 		assert.True(t, errors.Is(err, errBoom))
 	})
 	t.Run("rand failure while sealing", func(t *testing.T) {
 		bad, err := NewCipher(testDEK())
 		require.NoError(t, err)
 		bad.rand = failReader{}
-		_, _, err = EncryptBlob(&bytes.Buffer{}, bytes.NewReader(plain), bad, "f", 64)
+		_, _, err = EncryptBlob(&bytes.Buffer{}, bytes.NewReader(plain), bad, "f", "k", 64)
 		assert.True(t, errors.Is(err, errBoom))
-		_, _, err = EncryptBlob(&bytes.Buffer{}, bytes.NewReader(nil), bad, "f", 64)
+		_, _, err = EncryptBlob(&bytes.Buffer{}, bytes.NewReader(nil), bad, "f", "k", 64)
 		assert.True(t, errors.Is(err, errBoom), "terminator seal")
 	})
 }
@@ -157,40 +160,44 @@ func TestDecryptBlob_StructuralErrors(t *testing.T) {
 	c, err := NewCipher(testDEK())
 	require.NoError(t, err)
 	var enc bytes.Buffer
-	_, _, err = EncryptBlob(&enc, bytes.NewReader([]byte("hello")), c, "f", 64)
+	_, _, err = EncryptBlob(&enc, bytes.NewReader([]byte("hello")), c, "f", "k", 64)
 	require.NoError(t, err)
 	good := enc.Bytes()
 
 	t.Run("bad magic", func(t *testing.T) {
 		bad := append([]byte("XXXXXX"), good[6:]...)
-		_, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(bad), c, "f")
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(bad), c, "f")
 		assert.True(t, errors.Is(err, ErrBadSegment))
 	})
 	t.Run("unsupported version", func(t *testing.T) {
 		bad := append([]byte(nil), good...)
 		bad[7] = 9
-		_, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(bad), c, "f")
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(bad), c, "f")
 		assert.True(t, errors.Is(err, ErrBadSegment))
 	})
 	t.Run("header cut before chunk size", func(t *testing.T) {
-		_, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(good[:8]), c, "f")
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(good[:8]), c, "f")
+		assert.True(t, errors.Is(err, ErrBadSegment))
+	})
+	t.Run("header cut in key id", func(t *testing.T) {
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(good[:14]), c, "f")
 		assert.True(t, errors.Is(err, ErrBadSegment))
 	})
 	t.Run("oversize chunk length", func(t *testing.T) {
-		bad := append(append([]byte(nil), good[:12]...), 0xff, 0xff, 0xff, 0xff)
-		_, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(bad), c, "f")
+		bad := append(append([]byte(nil), good[:blobHeaderLen("k")]...), 0xff, 0xff, 0xff, 0xff)
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(bad), c, "f")
 		assert.True(t, errors.Is(err, ErrBadSegment))
 	})
 	t.Run("destination write error", func(t *testing.T) {
-		_, _, err := DecryptBlob(&failAfter{limit: 0}, bytes.NewReader(good), c, "f")
+		_, _, _, err := DecryptBlob(&failAfter{limit: 0}, bytes.NewReader(good), c, "f")
 		assert.True(t, errors.Is(err, errBoom))
 	})
 	t.Run("header only is truncated", func(t *testing.T) {
-		_, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(good[:12]), c, "f")
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(good[:blobHeaderLen("k")]), c, "f")
 		assert.True(t, errors.Is(err, ErrBlobTruncated))
 	})
 	t.Run("source ends mid header", func(t *testing.T) {
-		_, _, err := DecryptBlob(&bytes.Buffer{}, io.LimitReader(bytes.NewReader(good), 3), c, "f")
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, io.LimitReader(bytes.NewReader(good), 3), c, "f")
 		assert.True(t, errors.Is(err, ErrBadSegment))
 	})
 }

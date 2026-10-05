@@ -47,6 +47,29 @@ func TestTemplates(t *testing.T) {
 	assert.Equal(t, "binary", ev.Template.Mappings.Properties["encBody"]["type"])
 	assert.Equal(t, "long", ev.Template.Mappings.Properties["seq"]["type"])
 	assert.Equal(t, float64(0), ev.Template.Settings["number_of_replicas"], "dev mode has no replicas")
+	assert.NotContains(t, ev.Template.Mappings.Properties["messageId"], "ignore_above", "ids are bounded")
+
+	// Free-text keywords: an over-long value is stored in _source but not
+	// indexed, instead of failing the whole document with a 400.
+	freeText := map[string][]string{
+		"audit-members-site-a": {"roomName"},
+		"audit-blobs-site-a":   {"fileName", "contentType"},
+		"audit-events-site-a":  {"attachmentTypes"},
+	}
+	for tpl, fields := range freeText {
+		var body struct {
+			Template struct {
+				Mappings struct {
+					Properties map[string]map[string]any `json:"properties"`
+				} `json:"mappings"`
+			} `json:"template"`
+		}
+		require.NoError(t, json.Unmarshal(names[tpl], &body), tpl)
+		for _, f := range fields {
+			assert.Equal(t, "keyword", body.Template.Mappings.Properties[f]["type"], "%s.%s", tpl, f)
+			assert.Equal(t, float64(IgnoreAbove), body.Template.Mappings.Properties[f]["ignore_above"], "%s.%s", tpl, f)
+		}
+	}
 
 	var keys struct {
 		Template struct {
@@ -82,4 +105,11 @@ func TestSetLocation(t *testing.T) {
 	m.SetLocation("k2", 7)
 	assert.Equal(t, "k2", m.SegmentKey)
 	assert.Equal(t, int64(7), m.FrameOffset)
+}
+
+func TestBlobDoc_PlainDigestField(t *testing.T) {
+	b, err := json.Marshal(BlobDoc{FileID: "f1", PlainDigest: "hmac-sha256:ab"})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"plainDigest":"hmac-sha256:ab"`)
+	assert.NotContains(t, string(b), "plainSha256")
 }

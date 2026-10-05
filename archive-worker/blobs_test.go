@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -76,11 +74,6 @@ func (r *recordingIndex) docAt(t *testing.T, i int) auditarchive.BlobDoc {
 	var d auditarchive.BlobDoc
 	require.NoError(t, json.Unmarshal(r.docs[i].Doc, &d))
 	return d
-}
-
-func plainDigest(b []byte) string {
-	sum := sha256.Sum256(b)
-	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func TestDriveHostOf(t *testing.T) {
@@ -233,7 +226,7 @@ func TestBlobLane_ArchiveAttachment(t *testing.T) {
 		assert.Equal(t, "site-a-f1", idx.docs[0].DocID)
 		d := idx.docAt(t, 0)
 		assert.Equal(t, "site-a/blobs/f1", d.BlobKey)
-		assert.Equal(t, plainDigest(plain), d.PlainSHA256)
+		assert.Equal(t, c.Digest(plain), d.PlainDigest, "keyed digest of the plaintext")
 		assert.Equal(t, int64(len(plain)), d.SizeBytes)
 		assert.Equal(t, 4096, d.ChunkBytes)
 		assert.Equal(t, "image/png", d.ContentType)
@@ -248,7 +241,7 @@ func TestBlobLane_ArchiveAttachment(t *testing.T) {
 		l := newTestBlobLane(&fakeSource{data: map[string][]byte{"f1": plain}}, obj, &recordingIndex{}, c, 1<<20)
 		require.NoError(t, l.archiveAttachment(context.Background(), "m1", "r1", att))
 		var out bytes.Buffer
-		_, n, err := auditarchive.DecryptBlob(&out, &stored, c, "f1")
+		_, n, _, err := auditarchive.DecryptBlob(&out, &stored, c, "f1")
 		require.NoError(t, err)
 		assert.Equal(t, int64(len(plain)), n)
 		assert.Equal(t, plain, out.Bytes())

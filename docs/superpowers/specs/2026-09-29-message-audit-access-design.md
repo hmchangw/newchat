@@ -390,14 +390,20 @@ are logged, counted, and terminated.
 
 ### Segment format
 
-Key: `{site}/{yyyy}/{mm}/{dd}/{hh}/{lane}-{firstSeq}-{lastSeq}.seg`. Time-ordered by
-construction; room is not in the key because the index answers by-room questions. The
-lane (`events` or `members`) is in the key because the two lanes read different streams
-with independent sequence spaces.
+Key: `{site}/{yyyy}/{mm}/{dd}/{hh}/{lane}-{firstSeq}-{lastSeq}-{rand8hex}.seg`, the
+suffix 4 bytes from `crypto/rand` in hex. Time-ordered by construction; room is not in
+the key because the index answers by-room questions. The lane (`events` or `members`)
+is in the key because the two lanes read different streams with independent sequence
+spaces. The random suffix gives every write its own object, so no replay ever writes
+over an earlier one.
 
 Body:
 
-1. Plaintext header: format version, site, first and last stream sequence, record count.
+1. Plaintext header: format version, site, lane, key id, first and last stream
+   sequence, record count. Site, lane and key id are each a 2-byte length then the
+   bytes; the writer refuses values over 65535 bytes. The key id is the first 16 hex
+   characters of SHA-256 over the wrapped DEK the frames are sealed under, so a reader
+   knows which key to unwrap without trying them; readers accept an empty key id.
 2. One frame per event: 4-byte length prefix, then the archive record encrypted
    individually with the site's archive DEK and a fresh nonce.
 3. Trailer: SHA-256 over everything before it.
@@ -450,11 +456,10 @@ conflict on the same id. The bucket gains a duplicate frame, the index is unchan
 and a rebuild dedups by stream sequence. Duplicates cost storage, never correctness.
 The worker never issues an update or a delete against any index.
 
-A replay that re-seals the same stream sequences within the same clock hour produces the
-same segment key, so the versioned, locked bucket gains a second object version under it
-(the frames carry fresh nonces, so the bytes differ). Documents carry no version id, so a
-reader verifies the frame by `contentHash`, which it already does; the audit-service PR
-should consider recording the object version id.
+A replay that re-seals the same stream sequences always produces a new segment key,
+because of the random suffix, so it never adds an object version under a key an earlier
+attempt wrote. Every document therefore resolves to the exact object it was written
+against, and a reader still verifies the frame by `contentHash`.
 
 ### Behaviour when the bucket is unavailable
 
@@ -519,7 +524,7 @@ deleted at `ARCHIVE_INDEX_RETENTION`.
 | `senderAccount`, `senderId` | keyword | Author of the message, on every event |
 | `createdAt` | date | Message creation time, on every event, for range clamping and sort |
 | `threadParentId` | keyword | |
-| `attachmentCount`, `attachmentTypes` | integer, keyword | On `created` and `updated` |
+| `attachmentCount`, `attachmentTypes` | integer, keyword | On `created` and `updated`; `attachmentTypes` carries `ignore_above: 8191` |
 | `actorAccount` | keyword | On `pinned`, `unpinned`, `reacted`, `deleted`; for `pinned` and `unpinned` the pinner (`message.pinnedBy.account`), falling back to the author |
 | `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | Pointer to the sealed record; `contentHash` is the keyed `hmac-sha256:` digest of the record |
 | `encBody` | binary, not indexed | Ciphertext of body, cards, quoted parent; only on `created` and `updated` |
@@ -531,7 +536,7 @@ event (one document with empty `account` for `room_renamed`):
 | Field | ES type | Notes |
 |---|---|---|
 | `seq`, `eventType`, `eventAt` | long, keyword, date | `member_added`, `member_removed`, `room_renamed` |
-| `roomId`, `roomSiteId`, `account`, `roomType`, `roomName` | keyword | `roomSiteId` is the site that archives the room's messages, which for a remote room differs from the index's site; `account` empty on `room_renamed` |
+| `roomId`, `roomSiteId`, `account`, `roomType`, `roomName` | keyword | `roomSiteId` is the site that archives the room's messages, which for a remote room differs from the index's site; `account` empty on `room_renamed`; `roomName` carries `ignore_above: 8191` |
 | `segmentKey`, `frameOffset`, `contentHash` | keyword, long, keyword | `contentHash` as for events; every document of one event shares the event's record |
 
 **`audit-blobs-{site}`**, one document per attachment, id `{site}-{fileId}`:
@@ -539,8 +544,8 @@ event (one document with empty `account` for `room_renamed`):
 | Field | ES type | Notes |
 |---|---|---|
 | `fileId`, `messageId`, `roomId`, `siteId` | keyword | |
-| `fileName`, `contentType`, `sizeBytes` | keyword, keyword, long | From the attachment metadata; `sizeBytes` of `-1` means over the size cap, size unknown at source |
-| `blobKey`, `plainSha256`, `chunkBytes` | keyword, keyword, integer | Empty when skipped |
+| `fileName`, `contentType`, `sizeBytes` | keyword, keyword, long | From the attachment metadata; `fileName` and `contentType` carry `ignore_above: 8191`; `sizeBytes` of `-1` means over the size cap, size unknown at source |
+| `blobKey`, `plainDigest`, `chunkBytes` | keyword, keyword, integer | Empty when skipped; `plainDigest` is the keyed `hmac-sha256:` digest of the plaintext, under the same derived key as `contentHash` |
 | `skipped` | keyword | Absent, `size`, `missing`, or `legacy` |
 | `archivedAt` | date | |
 
@@ -552,6 +557,10 @@ event (one document with empty `account` for `room_renamed`):
 | `siteId` | keyword | |
 | `wrappedDek` | binary, not indexed | Output of the transit `datakey/wrapped` call |
 | `createdAt` | date | |
+
+Free-text keywords (`roomName`, `fileName`, `contentType`, `attachmentTypes`) are
+mapped with `ignore_above: 8191`: a longer value stays in `_source` but is not indexed,
+rather than failing the document with a 400 that would Term its event.
 
 `encBody` is meant to be kept for 180d. Because documents are immutable, stripping is a
 scheduled reindex job owned by the audit-service PR; ILM has no reindex action. The
@@ -582,7 +591,10 @@ unlike the segment lane, does honest long work per message. Per attachment it:
    worker sees them (`pkg/model/cassandra/attachment_legacy.go`).
 3. Streams it through chunked AES-GCM with the site's archive DEK, 4 MiB chunks, a
    fresh nonce per chunk, and the chunk index and file id as authenticated data, while
-   computing the plaintext SHA-256.
+   computing the keyed plaintext digest (`hmac-sha256:`, the same derived key as
+   `contentHash`, so the index never holds an unkeyed hash a reader could confirm a
+   guessed file against). The blob's plaintext header carries the format version, the
+   chunk size and the same key id as a segment header.
 4. PUTs the result once to `{site}/blobs/{fileId}` in the archive bucket, under the
    bucket's Object Lock rule. The encrypted blob is buffered in memory before the PUT,
    bounded by `ARCHIVE_BLOB_MAX_BYTES` x `ARCHIVE_BLOB_WORKERS` per pod.

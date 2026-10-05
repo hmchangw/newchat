@@ -47,7 +47,7 @@ func TestSeal(t *testing.T) {
 	items := []item{mkItem(7, 3), mkItem(5, 4), mkItem(9, 5)}
 	s, err := seal("site-a", "events", items, now)
 	require.NoError(t, err)
-	assert.Equal(t, "site-a/2026/10/05/14/events-5-9.seg", s.key, "key uses min and max seq")
+	assert.Regexp(t, `^site-a/2026/10/05/14/events-5-9-[0-9a-f]{8}\.seg$`, s.key, "key uses min and max seq plus a random suffix")
 
 	h, frames, err := auditarchive.ReadSegment(bytes.NewReader(s.body))
 	require.NoError(t, err)

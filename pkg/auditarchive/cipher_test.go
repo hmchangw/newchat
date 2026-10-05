@@ -76,6 +76,12 @@ func TestCipher_Digest(t *testing.T) {
 	t.Run("differs across inputs", func(t *testing.T) {
 		assert.NotEqual(t, d, c.Digest([]byte("record2")))
 	})
+	t.Run("NewDigest streams the same keyed digest", func(t *testing.T) {
+		h := c.NewDigest()
+		h.Write([]byte("rec"))
+		h.Write([]byte("ord"))
+		assert.Equal(t, d, DigestPrefix+hex.EncodeToString(h.Sum(nil)))
+	})
 	t.Run("is not the unkeyed sha256", func(t *testing.T) {
 		sum := sha256.Sum256([]byte("record"))
 		assert.NotContains(t, d, hex.EncodeToString(sum[:]))

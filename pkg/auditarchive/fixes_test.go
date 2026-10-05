@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"runtime"
 	"strings"
 	"testing"
@@ -81,7 +82,7 @@ func TestDecryptBlob_SourceErrorsAreNotStructuralErrors(t *testing.T) {
 	c, err := NewCipher(testDEK())
 	require.NoError(t, err)
 	var enc bytes.Buffer
-	_, _, err = EncryptBlob(&enc, bytes.NewReader(bytes.Repeat([]byte{3}, 100)), c, "f", 64)
+	_, _, err = EncryptBlob(&enc, bytes.NewReader(bytes.Repeat([]byte{3}, 100)), c, "f", "k", 64)
 	require.NoError(t, err)
 	good := enc.Bytes()
 
@@ -90,7 +91,7 @@ func TestDecryptBlob_SourceErrorsAreNotStructuralErrors(t *testing.T) {
 	for _, cut := range []int{3, 7, 10, 13, 20} {
 		t.Run(fmt.Sprintf("cut at byte %d", cut), func(t *testing.T) {
 			src := &errAfterReader{data: append([]byte(nil), good[:cut]...), err: errBoom}
-			_, _, err := DecryptBlob(&bytes.Buffer{}, src, c, "f")
+			_, _, _, err := DecryptBlob(&bytes.Buffer{}, src, c, "f")
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, errBoom), "must wrap the source error: %v", err)
 			assert.False(t, errors.Is(err, ErrBlobTruncated), "I/O failure is not truncation: %v", err)
@@ -100,27 +101,33 @@ func TestDecryptBlob_SourceErrorsAreNotStructuralErrors(t *testing.T) {
 }
 
 func TestWriteSegment_RejectsValuesTheReaderRefuses(t *testing.T) {
-	t.Run("site too long", func(t *testing.T) {
-		_, _, err := WriteSegment(&bytes.Buffer{}, Header{Site: strings.Repeat("s", 65536), Lane: "l"}, nil)
-		assert.Error(t, err)
-	})
-	t.Run("lane too long", func(t *testing.T) {
-		_, _, err := WriteSegment(&bytes.Buffer{}, Header{Site: "s", Lane: strings.Repeat("l", 65536)}, nil)
-		assert.Error(t, err)
-	})
-	t.Run("longest permitted site and lane round trip", func(t *testing.T) {
-		h := Header{Version: FormatVersion, Site: strings.Repeat("s", 65535), Lane: strings.Repeat("l", 65535)}
+	long := strings.Repeat("x", math.MaxUint16+1)
+	big := make([]byte, maxFrameBytes+1)
+	tests := []struct {
+		name   string
+		h      Header
+		frames [][]byte
+	}{
+		{"site too long", Header{Site: long, Lane: "l"}, nil},
+		{"lane too long", Header{Site: "s", Lane: long}, nil},
+		{"key id too long", Header{Site: "s", Lane: "l", KeyID: long}, nil},
+		{"frame larger than the reader bound", Header{Site: "s", Lane: "l", Count: 1}, [][]byte{big}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := WriteSegment(&bytes.Buffer{}, tc.h, tc.frames)
+			assert.True(t, errors.Is(err, ErrBadSegment), "got %v", err)
+		})
+	}
+	t.Run("longest permitted site, lane and key id round trip", func(t *testing.T) {
+		max16 := math.MaxUint16
+		h := Header{Version: FormatVersion, Site: strings.Repeat("s", max16), Lane: strings.Repeat("l", max16), KeyID: strings.Repeat("k", max16)}
 		var buf bytes.Buffer
 		_, _, err := WriteSegment(&buf, h, nil)
 		require.NoError(t, err)
 		got, _, err := ReadSegment(bytes.NewReader(buf.Bytes()))
 		require.NoError(t, err)
 		assert.Equal(t, h, got)
-	})
-	t.Run("frame larger than the reader bound", func(t *testing.T) {
-		big := make([]byte, maxFrameBytes+1)
-		_, _, err := WriteSegment(&bytes.Buffer{}, Header{Site: "s", Lane: "l", Count: 1}, [][]byte{big})
-		assert.Error(t, err)
 	})
 }
 
@@ -131,17 +138,20 @@ func TestEncryptBlob_ChunkSizeBound(t *testing.T) {
 	// frames above maxFrameBytes, so a chunk size that cannot fit is rejected
 	// before any buffer is allocated.
 	for _, size := range []int{maxFrameBytes + 1, maxFrameBytes, maxFrameBytes - 27} {
-		_, _, err := EncryptBlob(&bytes.Buffer{}, bytes.NewReader([]byte("x")), c, "f", size)
+		_, _, err := EncryptBlob(&bytes.Buffer{}, bytes.NewReader([]byte("x")), c, "f", "k", size)
 		assert.Error(t, err, "chunk size %d", size)
 	}
 }
 
-// blobFrames splits an encrypted blob into its 10-byte header and the
-// length-prefixed frames that follow, so tests can drop, swap or copy frames.
+// blobHeaderLen is magic, version, chunk size and the length-prefixed key id.
+func blobHeaderLen(keyID string) int { return 6 + 2 + 4 + 2 + len(keyID) }
+
+// blobFrames splits an encrypted blob into its header and the length-prefixed
+// frames that follow, so tests can drop, swap or copy frames.
 func blobFrames(t *testing.T, enc []byte) (header []byte, frames [][]byte) {
 	t.Helper()
-	header = enc[:12]
-	rest := enc[12:]
+	header = enc[:blobHeaderLen("k")]
+	rest := enc[blobHeaderLen("k"):]
 	for len(rest) > 0 {
 		n := int(rest[0])<<24 | int(rest[1])<<16 | int(rest[2])<<8 | int(rest[3])
 		frames = append(frames, rest[:4+n])
@@ -166,13 +176,13 @@ func TestBlob_ChunkStructureTampering(t *testing.T) {
 		plain[i] = byte(i)
 	}
 	var enc bytes.Buffer
-	_, _, err = EncryptBlob(&enc, bytes.NewReader(plain), c, "f1", 64)
+	_, _, err = EncryptBlob(&enc, bytes.NewReader(plain), c, "f1", "k", 64)
 	require.NoError(t, err)
 	header, frames := blobFrames(t, enc.Bytes())
 	require.Len(t, frames, 4, "three data chunks and the terminator")
 
 	decrypt := func(b []byte) error {
-		_, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(b), c, "f1")
+		_, _, _, err := DecryptBlob(&bytes.Buffer{}, bytes.NewReader(b), c, "f1")
 		return err
 	}
 

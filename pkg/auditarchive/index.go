@@ -58,7 +58,7 @@ type BlobDoc struct {
 	ContentType string    `json:"contentType" es:"keyword"`
 	SizeBytes   int64     `json:"sizeBytes"   es:"long"`
 	BlobKey     string    `json:"blobKey,omitempty"     es:"keyword"`
-	PlainSHA256 string    `json:"plainSha256,omitempty" es:"keyword"`
+	PlainDigest string    `json:"plainDigest,omitempty" es:"keyword"` // keyed: "hmac-sha256:<hex>", see Cipher.NewDigest
 	ChunkBytes  int       `json:"chunkBytes,omitempty"  es:"integer"`
 	Skipped     string    `json:"skipped,omitempty"     es:"keyword"` // "", "size", "missing", "legacy"
 	ArchivedAt  time.Time `json:"archivedAt"  es:"date"`
@@ -173,13 +173,34 @@ func templateBody(pattern string, props map[string]any, lifecycle, devMode bool)
 	return b
 }
 
+// IgnoreAbove caps how long a free-text keyword may be and still be indexed.
+// A longer value stays in _source but is not indexed, instead of failing the
+// whole document with a 400 (Lucene refuses terms over 32766 bytes; 8191
+// characters of 4-byte UTF-8 is the largest count that always fits).
+const IgnoreAbove = 8191
+
+// freeTextKeywords are the keyword fields whose values come from users or
+// clients rather than from ids the system mints.
+var freeTextKeywords = []string{"roomName", "fileName", "contentType", "attachmentTypes"}
+
+// properties derives T's mapping and caps every free-text keyword.
+func properties[T any]() map[string]any {
+	props := searchindex.EsPropertiesFromStruct[T]()
+	for _, f := range freeTextKeywords {
+		if p, ok := props[f].(map[string]any); ok && p["type"] == "keyword" {
+			p["ignore_above"] = IgnoreAbove
+		}
+	}
+	return props
+}
+
 // Templates returns the four index templates for one site. Only the daily
 // event and member indices carry the lifecycle policy.
 func Templates(site string, devMode bool) []Template {
 	return []Template{
-		{Name: "audit-events-" + site, Body: templateBody("audit-events-"+site+"-*", searchindex.EsPropertiesFromStruct[EventDoc](), true, devMode)},
-		{Name: "audit-members-" + site, Body: templateBody("audit-members-"+site+"-*", searchindex.EsPropertiesFromStruct[MemberDoc](), true, devMode)},
-		{Name: "audit-blobs-" + site, Body: templateBody(BlobsIndex(site), searchindex.EsPropertiesFromStruct[BlobDoc](), false, devMode)},
-		{Name: "audit-keys-" + site, Body: templateBody(KeysIndex(site), searchindex.EsPropertiesFromStruct[KeyDoc](), false, devMode)},
+		{Name: "audit-events-" + site, Body: templateBody("audit-events-"+site+"-*", properties[EventDoc](), true, devMode)},
+		{Name: "audit-members-" + site, Body: templateBody("audit-members-"+site+"-*", properties[MemberDoc](), true, devMode)},
+		{Name: "audit-blobs-" + site, Body: templateBody(BlobsIndex(site), properties[BlobDoc](), false, devMode)},
+		{Name: "audit-keys-" + site, Body: templateBody(KeysIndex(site), properties[KeyDoc](), false, devMode)},
 	}
 }

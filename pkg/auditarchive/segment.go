@@ -2,8 +2,10 @@ package auditarchive
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
@@ -24,14 +26,25 @@ var segmentMagic = []byte("AUDSEG")
 const maxFrameBytes = 64 << 20 // sanity bound on one frame's length prefix
 
 // Header is the plaintext prefix of a segment. It exposes only site, lane,
-// sequence range and count; which messages are inside stays in the frames.
+// key id, sequence range and count; which messages are inside stays in the
+// frames. KeyID names the wrapped DEK the frames are sealed under; readers
+// accept an empty value.
 type Header struct {
 	Version  uint16
 	Site     string
 	Lane     string
+	KeyID    string
 	FirstSeq uint64
 	LastSeq  uint64
 	Count    uint32
+}
+
+// KeyID is the first 16 hex characters of SHA-256 over the wrapped DEK. It
+// names a key without revealing it, so headers and escrow objects can say
+// which DEK sealed them.
+func KeyID(wrapped []byte) string {
+	sum := sha256.Sum256(wrapped)
+	return hex.EncodeToString(sum[:8])
 }
 
 type countingWriter struct {
@@ -49,17 +62,19 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 // WriteSegment emits header, frames and trailer. h.Count must equal
 // len(frames); h.Version is forced to FormatVersion.
-func WriteSegment(w io.Writer, h Header, frames [][]byte) ([]int64, [32]byte, error) {
+func WriteSegment(w io.Writer, h Header, frames [][]byte) ([]int64, [32]byte, error) { //nolint:gocritic // hugeParam: value param is the package API, and the writer forces h.Version on its own copy
 	var zero [32]byte
 	if int(h.Count) != len(frames) {
 		return nil, zero, fmt.Errorf("auditarchive: header count %d != %d frames", h.Count, len(frames))
 	}
-	if len(h.Site) > math.MaxUint16 || len(h.Lane) > math.MaxUint16 {
-		return nil, zero, fmt.Errorf("auditarchive: site (%d bytes) or lane (%d bytes) exceeds %d", len(h.Site), len(h.Lane), math.MaxUint16)
+	if len(h.Site) > math.MaxUint16 || len(h.Lane) > math.MaxUint16 || len(h.KeyID) > math.MaxUint16 {
+		return nil, zero, fmt.Errorf("%w: site (%d bytes), lane (%d bytes) or key id (%d bytes) exceeds %d", ErrBadSegment, len(h.Site), len(h.Lane), len(h.KeyID), math.MaxUint16)
 	}
 	for i, f := range frames {
+		// maxFrameBytes is far below math.MaxUint32, so this also bounds the
+		// uint32 length prefix written below.
 		if len(f) > maxFrameBytes {
-			return nil, zero, fmt.Errorf("auditarchive: frame %d is %d bytes, over the %d limit", i, len(f), maxFrameBytes)
+			return nil, zero, fmt.Errorf("%w: frame %d is %d bytes, over the %d limit", ErrBadSegment, i, len(f), maxFrameBytes)
 		}
 	}
 	h.Version = FormatVersion
@@ -68,10 +83,9 @@ func WriteSegment(w io.Writer, h Header, frames [][]byte) ([]int64, [32]byte, er
 	var hdr bytes.Buffer
 	hdr.Write(segmentMagic)
 	_ = binary.Write(&hdr, be, h.Version)
-	_ = binary.Write(&hdr, be, uint16(len(h.Site)))
-	hdr.WriteString(h.Site)
-	_ = binary.Write(&hdr, be, uint16(len(h.Lane)))
-	hdr.WriteString(h.Lane)
+	writeHeaderString(&hdr, h.Site)
+	writeHeaderString(&hdr, h.Lane)
+	writeHeaderString(&hdr, h.KeyID)
 	_ = binary.Write(&hdr, be, h.FirstSeq)
 	_ = binary.Write(&hdr, be, h.LastSeq)
 	_ = binary.Write(&hdr, be, h.Count)
@@ -82,6 +96,7 @@ func WriteSegment(w io.Writer, h Header, frames [][]byte) ([]int64, [32]byte, er
 	var lenBuf [4]byte
 	for i, f := range frames {
 		offsets[i] = cw.n
+		// #nosec G115 -- len(f) <= maxFrameBytes (64 MiB), checked above, fits uint32
 		be.PutUint32(lenBuf[:], uint32(len(f)))
 		if _, err := cw.Write(lenBuf[:]); err != nil {
 			return nil, zero, fmt.Errorf("auditarchive: write frame %d length: %w", i, err)
@@ -96,6 +111,14 @@ func WriteSegment(w io.Writer, h Header, frames [][]byte) ([]int64, [32]byte, er
 		return nil, zero, fmt.Errorf("auditarchive: write trailer: %w", err)
 	}
 	return offsets, trailer, nil
+}
+
+// writeHeaderString writes a u16 length prefix and the bytes. Callers have
+// checked len(v) <= math.MaxUint16; bytes.Buffer writes cannot fail.
+func writeHeaderString(b *bytes.Buffer, v string) {
+	// #nosec G115 -- every caller checks len(v) <= math.MaxUint16 first
+	_ = binary.Write(b, binary.BigEndian, uint16(len(v)))
+	b.WriteString(v)
 }
 
 // ReadSegment parses and verifies a whole segment.
@@ -133,10 +156,13 @@ func ReadSegment(r io.Reader) (Header, [][]byte, error) {
 		return Header{}, nil, fmt.Errorf("%w: unsupported version", ErrBadSegment)
 	}
 	if h.Site, err = readStr(); err != nil {
-		return Header{}, nil, fmt.Errorf("%w: site: %w", ErrBadSegment, err)
+		return Header{}, nil, fmt.Errorf("%w: site: %v", ErrBadSegment, err)
 	}
 	if h.Lane, err = readStr(); err != nil {
-		return Header{}, nil, fmt.Errorf("%w: lane: %w", ErrBadSegment, err)
+		return Header{}, nil, fmt.Errorf("%w: lane: %v", ErrBadSegment, err)
+	}
+	if h.KeyID, err = readStr(); err != nil {
+		return Header{}, nil, fmt.Errorf("%w: key id: %v", ErrBadSegment, err)
 	}
 	if err := binary.Read(rd, be, &h.FirstSeq); err != nil {
 		return Header{}, nil, fmt.Errorf("%w: firstSeq", ErrBadSegment)
@@ -149,6 +175,7 @@ func ReadSegment(r io.Reader) (Header, [][]byte, error) {
 	}
 	// Each frame needs at least its 4-byte length prefix, so a larger count
 	// cannot be honest; checking it also bounds the preallocation.
+	// #nosec G115 -- bytes.Reader.Len is never negative
 	if uint64(h.Count) > uint64(rd.Len())/4 {
 		return Header{}, nil, fmt.Errorf("%w: count %d exceeds what %d bytes can hold", ErrBadSegment, h.Count, rd.Len())
 	}
@@ -206,9 +233,14 @@ func readFullAt(ra io.ReaderAt, p []byte, offset int64) error {
 }
 
 // SegmentKey is the object key for a sealed batch, time-ordered by prefix.
+// The random suffix gives every write its own key, so a replay of the same
+// sequence range never lands on an object an earlier attempt wrote and the
+// documents of each attempt resolve to the object they were written against.
 func SegmentKey(site, lane string, at time.Time, firstSeq, lastSeq uint64) string {
+	var r [4]byte
+	_, _ = rand.Read(r[:]) // error discarded: crypto/rand.Read never returns one (it aborts the process instead)
 	u := at.UTC()
-	return fmt.Sprintf("%s/%04d/%02d/%02d/%02d/%s-%d-%d.seg", site, u.Year(), int(u.Month()), u.Day(), u.Hour(), lane, firstSeq, lastSeq)
+	return fmt.Sprintf("%s/%04d/%02d/%02d/%02d/%s-%d-%d-%s.seg", site, u.Year(), int(u.Month()), u.Day(), u.Hour(), lane, firstSeq, lastSeq, hex.EncodeToString(r[:]))
 }
 
 // BlobKey is the object key for an archived attachment.
