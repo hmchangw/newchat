@@ -118,6 +118,9 @@ by `CONSUMER_HEARTBEAT_MAX`.
 
 `VAULT_ADDR` is required; startup fails without it.
 
+Turning `ARCHIVE_BLOBS_ENABLED` off after it was on leaves the `archive-worker-blobs`
+durable on the server, collecting pending messages; operators should delete it.
+
 ## Attachment links
 
 `upload-service` writes only the relative form

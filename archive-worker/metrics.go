@@ -31,25 +31,25 @@ func newMetrics() (*metrics, error) {
 func newMetricsFrom(meter metric.Meter) (*metrics, error) {
 	var m metrics
 	var err error
-	if m.segmentsTotal, err = meter.Int64Counter("archive_segments_total"); err != nil {
+	if m.segmentsTotal, err = meter.Int64Counter("archive_segments_total", metric.WithDescription("Segments written to the archive bucket.")); err != nil {
 		return nil, fmt.Errorf("metric archive_segments_total: %w", err)
 	}
-	if m.segmentBytes, err = meter.Int64Histogram("archive_segment_bytes"); err != nil {
+	if m.segmentBytes, err = meter.Int64Histogram("archive_segment_bytes", metric.WithUnit("By"), metric.WithDescription("Encrypted size of each segment written.")); err != nil {
 		return nil, fmt.Errorf("metric archive_segment_bytes: %w", err)
 	}
-	if m.eventsTotal, err = meter.Int64Counter("archive_events_total"); err != nil {
+	if m.eventsTotal, err = meter.Int64Counter("archive_events_total", metric.WithDescription("Events settled, by outcome.")); err != nil {
 		return nil, fmt.Errorf("metric archive_events_total: %w", err)
 	}
-	if m.writeFailures, err = meter.Int64Counter("archive_write_failures_total"); err != nil {
+	if m.writeFailures, err = meter.Int64Counter("archive_write_failures_total", metric.WithDescription("Failed archive writes after retries, by store.")); err != nil {
 		return nil, fmt.Errorf("metric archive_write_failures_total: %w", err)
 	}
-	if m.blobsTotal, err = meter.Int64Counter("archive_blobs_total"); err != nil {
+	if m.blobsTotal, err = meter.Int64Counter("archive_blobs_total", metric.WithDescription("Attachments processed, by outcome.")); err != nil {
 		return nil, fmt.Errorf("metric archive_blobs_total: %w", err)
 	}
-	if m.blobBytesTotal, err = meter.Int64Counter("archive_blob_bytes_total"); err != nil {
+	if m.blobBytesTotal, err = meter.Int64Counter("archive_blob_bytes_total", metric.WithUnit("By"), metric.WithDescription("Bytes of attachments archived.")); err != nil {
 		return nil, fmt.Errorf("metric archive_blob_bytes_total: %w", err)
 	}
-	if m.redeliveries, err = meter.Int64Counter("archive_redeliveries_total"); err != nil {
+	if m.redeliveries, err = meter.Int64Counter("archive_redeliveries_total", metric.WithDescription("Messages delivered more than once.")); err != nil {
 		return nil, fmt.Errorf("metric archive_redeliveries_total: %w", err)
 	}
 	return &m, nil

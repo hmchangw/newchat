@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -26,19 +29,52 @@ func TestNewMetrics(t *testing.T) {
 }
 
 func TestMetrics_NilAndZeroAreSafe(t *testing.T) {
-	var nilM *metrics
-	nilM.segments(1, 10)
-	nilM.events("archived", 1)
-	nilM.writeFailure("index")
-	nilM.blobs("archived", 1)
-	nilM.redelivered(1)
+	record := func(m *metrics) {
+		m.segments(1, 10)
+		m.events("archived", 1)
+		m.writeFailure("index")
+		m.blobs("archived", 1)
+		m.redelivered(1)
+	}
+	assert.NotPanics(t, func() { record(nil) })
+	assert.NotPanics(t, func() { record(&metrics{}) })
+}
 
-	zero := &metrics{}
-	zero.segments(1, 10)
-	zero.events("archived", 1)
-	zero.writeFailure("index")
-	zero.blobs("archived", 1)
-	zero.redelivered(1)
+// failMeter fails creating the one instrument named failName.
+type failMeter struct {
+	noop.Meter
+	failName string
+}
+
+var errInstrument = errors.New("instrument refused")
+
+func (f failMeter) Int64Counter(name string, opts ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	if name == f.failName {
+		return nil, errInstrument
+	}
+	return f.Meter.Int64Counter(name, opts...)
+}
+
+func (f failMeter) Int64Histogram(name string, opts ...metric.Int64HistogramOption) (metric.Int64Histogram, error) {
+	if name == f.failName {
+		return nil, errInstrument
+	}
+	return f.Meter.Int64Histogram(name, opts...)
+}
+
+func TestNewMetricsFrom_InstrumentErrors(t *testing.T) {
+	for _, name := range []string{
+		"archive_segments_total", "archive_segment_bytes", "archive_events_total", "archive_write_failures_total",
+		"archive_blobs_total", "archive_blob_bytes_total", "archive_redeliveries_total",
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, err := newMetricsFrom(failMeter{failName: name})
+			require.Error(t, err)
+			assert.Nil(t, m)
+			assert.ErrorIs(t, err, errInstrument)
+			assert.Contains(t, err.Error(), name)
+		})
+	}
 }
 
 func TestMetrics_RecordsInstruments(t *testing.T) {

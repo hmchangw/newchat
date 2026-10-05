@@ -137,9 +137,7 @@ func run() error {
 	membersGuard := loopguard.New("members-lane", loopguard.SelfShutdown)
 	blobsGuard := loopguard.New("blobs-lane", loopguard.SelfShutdown)
 
-	// Events and members drop poison themselves (Term), so redelivery of a
-	// failing write is unlimited rather than capped by a delivery count.
-	laneSettings := stream.WithUnlimitedRedelivery(cfg.Consumer)
+	laneSettings := laneConsumerSettings(&cfg)
 	eventsFetcher, _, err := mkConsumer(stream.MessagesCanonical(cfg.SiteID).Name, eventsDurable, []string{subject.MsgCanonicalMessageWildcard(cfg.SiteID)}, laneSettings)
 	if err != nil {
 		return err
@@ -150,38 +148,36 @@ func run() error {
 	}
 
 	flushCfg := flushConfig{putTimeout: cfg.PutTimeout, bulkTimeout: cfg.BulkTimeout, attempts: cfg.WriteAttempts}
-	laneCfg := func(name string) laneConfig {
-		return laneConfig{site: cfg.SiteID, name: name, fetchBatch: cfg.FetchBatch, fillInterval: cfg.FillInterval, now: time.Now, metrics: m}
-	}
-	events := newLane(laneCfg("events"), eventsFetcher, buildEventItem, cipher,
+	events := newLane(newLaneConfig(&cfg, "events", m), eventsFetcher, buildEventItem, cipher,
 		newBatcher(cfg.BatchEvents, cfg.BatchBytes, cfg.FillInterval), newFlusher(objects, engine, flushCfg, m), eventsGuard)
-	members := newLane(laneCfg("members"), membersFetcher, buildMemberItem, cipher,
+	members := newLane(newLaneConfig(&cfg, "members", m), membersFetcher, buildMemberItem, cipher,
 		newBatcher(cfg.BatchEvents, cfg.BatchBytes, cfg.FillInterval), newFlusher(objects, engine, flushCfg, m), membersGuard)
 
-	lanes := newLaneGroup()
-	lanes.start(ctx, events.run)
-	lanes.start(ctx, members.run)
-
+	// Everything that can fail is created before any lane starts, so a failed
+	// consumer or health server never leaves running lanes behind.
+	runs := []func(context.Context, <-chan struct{}, chan<- struct{}){events.run, members.run}
 	checks := []health.Check{natsutil.HealthCheck(nc), eventsGuard.Check(), membersGuard.Check()}
 	guards := []*loopguard.Guard{eventsGuard, membersGuard}
 	if cfg.BlobsEnabled {
 		blobSettings := blobConsumerSettings(&cfg)
 		blobsFetcher, blobCC, err := mkConsumer(stream.MessagesCanonical(cfg.SiteID).Name, blobsDurable, []string{subject.MsgCanonicalCreated(cfg.SiteID)}, blobSettings)
 		if err != nil {
-			lanes.stopAll()
 			return err
 		}
 		cfg.Drive.LoadBaseURLs()
-		blobs := newBlobLane(newBlobLaneConfig(&cfg, blobSettings, &blobCC), blobsFetcher, &driveSource{client: drive.NewClient(&cfg.Drive)}, objects, engine, cipher, blobsGuard, m)
-		lanes.start(ctx, blobs.run)
+		blobs := newBlobLane(newBlobLaneConfig(&cfg, &blobCC), blobsFetcher, &driveSource{client: drive.NewClient(&cfg.Drive)}, objects, engine, cipher, blobsGuard, m)
+		runs = append(runs, blobs.run)
 		checks = append(checks, blobsGuard.Check())
 		guards = append(guards, blobsGuard)
 	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled, checks...)
 	if err != nil {
-		lanes.stopAll()
 		return fmt.Errorf("start health server: %w", err)
+	}
+	lanes := newLaneGroup()
+	for _, r := range runs {
+		lanes.start(ctx, r)
 	}
 	slog.Info("archive-worker started", "site", cfg.SiteID, "bucket", cfg.Bucket, "blobs", cfg.BlobsEnabled)
 
@@ -223,16 +219,31 @@ func blobConsumerSettings(cfg *config) stream.ConsumerSettings {
 	return stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff)
 }
 
+// laneConsumerSettings is the events and members consumers' settings: they
+// drop poison themselves (Term), so redelivery of a failing write is unlimited
+// rather than capped by a delivery count.
+func laneConsumerSettings(cfg *config) stream.ConsumerSettings {
+	return stream.WithUnlimitedRedelivery(cfg.Consumer)
+}
+
+func newLaneConfig(cfg *config, name string, m *metrics) laneConfig {
+	return laneConfig{site: cfg.SiteID, name: name, fetchBatch: cfg.FetchBatch, fillInterval: cfg.FillInterval, now: time.Now, metrics: m}
+}
+
 // newBlobLaneConfig wires the blob lane from the consumer actually created:
 // MaxDeliver is the applied value, and the heartbeat paces off the deadline
-// the server enforces, not the configured field.
-func newBlobLaneConfig(cfg *config, settings stream.ConsumerSettings, cc *jetstream.ConsumerConfig) blobLaneConfig {
+// the server enforces (BackOff[0] overwrites AckWait), not the configured field.
+func newBlobLaneConfig(cfg *config, cc *jetstream.ConsumerConfig) blobLaneConfig {
+	ackWait := cc.AckWait
+	if len(cc.BackOff) > 0 {
+		ackWait = cc.BackOff[0]
+	}
 	return blobLaneConfig{
 		site:         cfg.SiteID,
 		maxBytes:     cfg.BlobMaxBytes,
 		chunkBytes:   auditarchive.DefaultChunkBytes,
 		workers:      cfg.BlobWorkers,
-		ackWait:      settings.EffectiveAckWait(),
+		ackWait:      ackWait,
 		heartbeatMax: cfg.Consumer.HeartbeatMax,
 		maxDeliver:   cc.MaxDeliver,
 		now:          time.Now,

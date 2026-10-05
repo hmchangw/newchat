@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -51,7 +52,7 @@ func TestNewBlobLaneConfig(t *testing.T) {
 	settings := blobConsumerSettings(&cfg)
 	cc := consumerConfig(blobsDurable, nil, settings)
 
-	got := newBlobLaneConfig(&cfg, settings, &cc)
+	got := newBlobLaneConfig(&cfg, &cc)
 	assert.Equal(t, cc.MaxDeliver, got.maxDeliver, "wired from the consumer that was created")
 	assert.Equal(t, cc.BackOff[0], got.ackWait, "heartbeat paces off the deadline the server enforces")
 	assert.Equal(t, cfg.BlobAckWait, got.ackWait)
@@ -98,5 +99,46 @@ func TestLaneGroup(t *testing.T) {
 	})
 	t.Run("no lanes is an immediate success", func(t *testing.T) {
 		require.NoError(t, newLaneGroup().wait(context.Background()))
+	})
+}
+
+func TestLaneConsumerSettings(t *testing.T) {
+	cfg := validConfig()
+	cfg.Consumer.MaxDeliver = 4
+	s := laneConsumerSettings(&cfg)
+	assert.Equal(t, -1, s.MaxDeliver)
+	assert.Equal(t, cfg.Consumer.AckWait, s.AckWait)
+	assert.Equal(t, cfg.Consumer.MaxAckPending, s.MaxAckPending)
+	assert.Equal(t, 4, cfg.Consumer.MaxDeliver, "the shared config is not mutated")
+	assert.Equal(t, -1, consumerConfig(eventsDurable, nil, s).MaxDeliver)
+}
+
+func TestNewLaneConfig(t *testing.T) {
+	cfg := validConfig()
+	m := &metrics{}
+	for _, name := range []string{"events", "members"} {
+		t.Run(name, func(t *testing.T) {
+			got := newLaneConfig(&cfg, name, m)
+			assert.Equal(t, cfg.SiteID, got.site)
+			assert.Equal(t, name, got.name)
+			assert.Equal(t, cfg.FetchBatch, got.fetchBatch)
+			assert.Equal(t, cfg.FillInterval, got.fillInterval)
+			assert.Same(t, m, got.metrics)
+			assert.NotNil(t, got.now)
+		})
+	}
+}
+
+func TestNewBlobLaneConfig_AckWait(t *testing.T) {
+	cfg := validConfig()
+	t.Run("backoff head wins over ack wait", func(t *testing.T) {
+		cc := jetstream.ConsumerConfig{AckWait: time.Minute, BackOff: []time.Duration{3 * time.Minute, 6 * time.Minute}, MaxDeliver: 17}
+		got := newBlobLaneConfig(&cfg, &cc)
+		assert.Equal(t, 3*time.Minute, got.ackWait)
+		assert.Equal(t, 17, got.maxDeliver)
+	})
+	t.Run("no backoff falls back to ack wait", func(t *testing.T) {
+		cc := jetstream.ConsumerConfig{AckWait: time.Minute}
+		assert.Equal(t, time.Minute, newBlobLaneConfig(&cfg, &cc).ackWait)
 	})
 }
