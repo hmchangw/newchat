@@ -501,8 +501,9 @@ read-only at `min_age: 1d`, after which even creates are refused. Altering the i
 then takes cluster-admin rights, which is why the bucket remains the evidence copy:
 Elasticsearch has no equivalent of Object Lock.
 
-Three indices on each site's archive cluster, templates pushed by the worker's
-`bootstrap.go` when `BOOTSTRAP_STREAMS=true`, following the repo convention. Event
+Four indices on each site's archive cluster (events, members, blobs, keys). The
+worker's `bootstrap.go` pushes the templates and the lifecycle policy on every start,
+not only under `BOOTSTRAP_STREAMS`. Event
 indices are daily under an index lifecycle policy: hot, read-only at `min_age: 1d`,
 deleted at `ARCHIVE_INDEX_RETENTION`.
 
@@ -800,12 +801,13 @@ there is no body filter.
 | `AUDIT_CHECKPOINT_EVERY` | 1000 | |
 
 `archive-worker`: the §4 batching table plus `NATS_URL`, `NATS_CREDS_FILE`, `SITE_ID`,
-`ARCHIVE_SEARCH_URL`, `ARCHIVE_SEARCH_USERNAME`, `ARCHIVE_SEARCH_PASSWORD`,
+`ARCHIVE_SEARCH_URL`, `ARCHIVE_SEARCH_BACKEND` (default `elasticsearch`),
+`ARCHIVE_SEARCH_USERNAME`, `ARCHIVE_SEARCH_PASSWORD`, `ARCHIVE_SEARCH_TLS_SKIP_VERIFY`,
 `ARCHIVE_BUCKET`, `ARCHIVE_S3_*`, `VAULT_*`, `ATREST_VAULT_TRANSIT_KEY`,
 `ARCHIVE_INDEX_RETENTION`, `ARCHIVE_REQUIRE_OBJECT_LOCK`, `ARCHIVE_REPLICAS`,
 `ARCHIVE_FETCH_BATCH`, `ARCHIVE_BLOBS_ENABLED`, `ARCHIVE_BLOB_WORKERS`,
 `ARCHIVE_BLOB_MAX_BYTES`, `ARCHIVE_BLOB_ACK_WAIT`, `DRIVE_*` (as `upload-service`),
-`CONSUMER_*`, `BOOTSTRAP_STREAMS`.
+`CONSUMER_*`, `BOOTSTRAP_STREAMS`, `DEV_MODE`.
 
 Both services follow the repo layout: `main.go`, `handler.go`, `routes.go` (service
 only), `store.go` with mockgen, `store_mongo.go` (service only), `store_search.go`,

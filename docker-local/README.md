@@ -687,6 +687,10 @@ longer be unwrapped; reset the Elasticsearch volume with `down -v` as well.
 The worker connects with its own NATS user rather than `backend.creds`:
 `setup.sh` writes `archive-worker.creds`, scoped to the two streams it consumes
 (the production set is in `archive-worker/README.md`), and the worker's compose
-file mounts it. After pulling this change, re-run `./docker-local/setup.sh` once
-(`make fed-regen` for the federated stack); that rotates the NATS keys, so
-restart the deps stack afterwards.
+file mounts it. The first `make deps-up` after this change regenerates the NATS keys
+(it saves `.env` to `.env.bak` and stops the running deps first, so local NATS keys
+rotate and the stack restarts); `make fed-regen` does the same for the federated stack.
+
+The local worker runs with `ARCHIVE_BLOBS_ENABLED=false` because the stack has no Drive
+stub; set it to `true` with a real `DRIVE_URL` and `DRIVE_API_TOKEN` to exercise the
+attachment lane.

@@ -9,7 +9,7 @@ plane. Deployed once per site (`SITE_ID`); production runs three replicas.
 | Lane | Source | Writes |
 |---|---|---|
 | Messages | `MESSAGES-CANONICAL-{site}`: created, updated, deleted, pinned, unpinned, reacted | Sealed segments in the bucket, `audit-events-{site}` documents |
-| Members | `INBOX-{site}`: member added/removed, joined-at refreshed, room renamed, both lanes | Sealed segments in the bucket, `audit-members-{site}` documents |
+| Members | `INBOX-{site}`: member added/removed, room renamed, both lanes (joined-at refreshed is delivered but acked without being archived) | Sealed segments in the bucket, `audit-members-{site}` documents |
 | Attachments | `MESSAGES-CANONICAL-{site}` created events with attachments | Chunk-encrypted blob at `{site}/blobs/{fileId}`, `audit-blobs-{site}` document |
 
 Each archive record is encrypted with the site's archive DEK. The wrapped DEK is the
@@ -82,7 +82,7 @@ token cannot carry a partial wildcard, so spell the stream names out or use `*`:
 | publish | `$JS.API.CONSUMER.CREATE.S1.archive-worker-blobs` | attachment durable (only with `ARCHIVE_BLOBS_ENABLED`) |
 | publish | `$JS.API.CONSUMER.CREATE.S2.archive-worker-members` | members durable |
 | publish | `$JS.API.CONSUMER.MSG.NEXT.S1.archive-worker-events`, `...S1.archive-worker-blobs`, `...S2.archive-worker-members` | pull requests |
-| publish | `$JS.ACK.>` | ack, nak, in-progress and term of delivered messages (the subject carries a domain and account-hash token before the stream, so it cannot be narrowed by stream name) |
+| publish | `$JS.ACK.S1.archive-worker-events.>`, `$JS.ACK.S1.archive-worker-blobs.>`, `$JS.ACK.S2.archive-worker-members.>` | ack, nak, in-progress and term of delivered messages; the server addresses acks as `$JS.ACK.<stream>.<consumer>.<tail>` |
 | subscribe | `_INBOX.>` | API replies and pulled messages |
 
 The durables are created with a filter list, so the create subject has no filter

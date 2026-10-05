@@ -21,6 +21,8 @@ services:
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
       - ATREST_VAULT_TRANSIT_KEY=chat-audit-kek
+      # Off locally: no Drive stub exists (DRIVE_URL points at a nonexistent drive-stub), so the blob lane would NAK-loop.
+      - ARCHIVE_BLOBS_ENABLED=${ARCHIVE_BLOBS_ENABLED:-false}
       - DRIVE_URL=${DRIVE_URL:-http://drive-stub:8080}
       - DRIVE_API_TOKEN=${DRIVE_API_TOKEN:-dev-only}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}

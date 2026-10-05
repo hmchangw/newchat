@@ -226,7 +226,14 @@ endif
 # transit keys, locked archive buckets).
 deps-up:
 	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(ARCHIVE_CREDS) ] || [ ! -f $(NATS_CONF) ] || [ ! -f $(ENV_FILE) ]; then \
-	  echo "First-time setup: generating nats.conf + backend.creds + .env..."; \
+	  if [ -f $(ENV_FILE) ]; then \
+	    cp $(ENV_FILE) $(ENV_FILE).bak; \
+	    echo "WARNING: $(ENV_FILE) is about to be regenerated with new NATS keys; previous copy saved to $(ENV_FILE).bak."; \
+	    echo "         Re-apply any local edits (e.g. DEV_MODE=false) after setup. Running deps are stopped first: a NATS"; \
+	    echo "         started with the old operator would reject every service using the new credentials."; \
+	    docker compose -f $(DEPS_COMPOSE) down; \
+	  fi; \
+	  echo "First-time setup: generating nats.conf + backend.creds + archive-worker.creds + .env..."; \
 	  ./docker-local/setup.sh; \
 	fi
 	docker compose -f $(DEPS_COMPOSE) up -d --wait

@@ -112,9 +112,9 @@ docker run --rm \
     # which only the BOOTSTRAP_STREAMS=true dev path uses; see
     # archive-worker/README.md. Every durable is created with a filter list,
     # so the create subject carries no filter suffix.
-    # $JS.ACK carries a domain and account-hash token ahead of the stream on
-    # current servers, so it cannot be scoped by stream name.
-    set -- --allow-sub "_INBOX.>" --allow-pub "\$JS.ACK.>"
+    # Acks go to $JS.ACK.<stream>.<consumer>.<tail>, so each durable is
+    # granted its own ack subject.
+    set -- --allow-sub "_INBOX.>"
     for site in site-local site-remote; do
       CANON="MESSAGES-CANONICAL-${site}"
       INBOX="INBOX-${site}"
@@ -128,7 +128,10 @@ docker run --rm \
         --allow-pub "\$JS.API.CONSUMER.CREATE.${INBOX}.archive-worker-members" \
         --allow-pub "\$JS.API.CONSUMER.MSG.NEXT.${CANON}.archive-worker-events" \
         --allow-pub "\$JS.API.CONSUMER.MSG.NEXT.${CANON}.archive-worker-blobs" \
-        --allow-pub "\$JS.API.CONSUMER.MSG.NEXT.${INBOX}.archive-worker-members"
+        --allow-pub "\$JS.API.CONSUMER.MSG.NEXT.${INBOX}.archive-worker-members" \
+        --allow-pub "\$JS.ACK.${CANON}.archive-worker-events.>" \
+        --allow-pub "\$JS.ACK.${CANON}.archive-worker-blobs.>" \
+        --allow-pub "\$JS.ACK.${INBOX}.archive-worker-members.>"
     done
     nsc add user --account chatapp --name archive-worker
     nsc edit user --account chatapp --name archive-worker "$@"
