@@ -3,6 +3,7 @@ package drive
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -208,6 +209,9 @@ func (c *Client) fetchPresignedURL(host, groupID, fileID string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("network error calling signer service: %w", err)
 	}
+	if resp.StatusCode() == http.StatusNotFound {
+		return "", fmt.Errorf("signer service returned status %d: %s: %w", resp.StatusCode(), result.Error, ErrNotFound)
+	}
 	if resp.IsError() {
 		return "", fmt.Errorf("signer service returned status %d: %s", resp.StatusCode(), result.Error)
 	}
@@ -228,12 +232,18 @@ func (c *Client) GetGroupImage(host, groupID, fileID string) (*GetGroupImageResp
 		SetDoNotParseResponse(true).
 		Get(signedURL)
 	if err != nil {
+		// The presigned URL's query is a bearer credential and callers log
+		// this error, so a *url.Error is unwrapped to its cause without it.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return nil, fmt.Errorf("download image: %w", err)
 	}
 	if resp.IsError() {
 		defer resp.RawBody().Close()
 		if resp.StatusCode() == http.StatusNotFound {
-			return nil, fmt.Errorf("image not found")
+			return nil, fmt.Errorf("image not found: %w", ErrNotFound)
 		}
 		return nil, fmt.Errorf("failed to fetch image from storage, status: %d", resp.StatusCode())
 	}

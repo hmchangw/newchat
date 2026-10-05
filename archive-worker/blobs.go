@@ -37,7 +37,11 @@ type blobLaneConfig struct {
 	workers      int
 	ackWait      time.Duration
 	heartbeatMax time.Duration
-	now          func() time.Time
+	// maxDeliver is the consumer's MaxDeliver; on its last delivery a failing
+	// message is Termed and logged instead of nak'd into the void. Zero or
+	// negative means unlimited.
+	maxDeliver int
+	now        func() time.Time
 }
 
 // blobLane archives each created message's attachments as chunk-encrypted
@@ -72,9 +76,11 @@ func newBlobLane(cfg blobLaneConfig, fetcher msgFetcher, src blobSource, objects
 	}
 }
 
-// run is the consume loop: fetch up to workers messages and archive each on a
-// bounded worker. On stop or context cancel it waits for in-flight work; a
-// terminal fetch error (consumer deleted/not found) does the same, reports
+// run is the consume loop. A worker slot is reserved before each Fetch and
+// the Fetch asks for exactly as many messages as there are free slots, so a
+// delivered message never waits for a worker with its AckWait running and no
+// heartbeat. On stop or context cancel it waits for in-flight work; a terminal
+// fetch error (consumer deleted/not found) does the same, reports
 // guard.Stopped(err) and returns.
 func (l *blobLane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<- struct{}) {
 	defer close(doneCh)
@@ -96,10 +102,35 @@ func (l *blobLane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<
 		if stopped() {
 			return
 		}
-		batch, err := l.fetcher.Fetch(ctx, l.cfg.workers, jetstream.FetchMaxWait(maxFetchWait))
+		// Block for one slot, then take whatever else is free.
+		select {
+		case sem <- struct{}{}:
+		case <-stopCh:
+			return
+		case <-ctx.Done():
+			return
+		}
+		reserved := 1
+		for reserved < l.cfg.workers {
+			select {
+			case sem <- struct{}{}:
+				reserved++
+				continue
+			default:
+			}
+			break
+		}
+
+		batch, err := l.fetcher.Fetch(ctx, reserved, jetstream.FetchMaxWait(maxFetchWait))
+		started := 0
 		if err == nil {
 			for fm := range batch.Messages() {
-				sem <- struct{}{}
+				if started >= reserved {
+					// The server returned more than requested; take a slot for
+					// the extra rather than run past the worker bound.
+					sem <- struct{}{}
+				}
+				started++
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -107,6 +138,12 @@ func (l *blobLane) run(ctx context.Context, stopCh <-chan struct{}, doneCh chan<
 					jobguard.Guard("archive blob", func() { l.handle(fm.Ctx, fm.Msg) })
 				}()
 			}
+		}
+		// Slots reserved for messages that never arrived go back.
+		for i := started; i < reserved; i++ {
+			<-sem
+		}
+		if err == nil {
 			// Only the batch's own error can be benign: a Fetch call that
 			// itself fails always takes the pause below.
 			if err = batch.Error(); benignBatchErr(err) {
@@ -175,9 +212,12 @@ func (l *blobLane) handle(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	for i := range atts {
+		if atts[i].ID == "" {
+			slog.WarnContext(ctx, "attachment has no id, skipping", "lane", "blobs", "messageId", ev.Message.ID, "roomId", ev.Message.RoomID)
+			continue
+		}
 		if err := l.archiveWithHeartbeat(ctx, msg, ev.Message.ID, ev.Message.RoomID, atts[i]); err != nil {
-			slog.WarnContext(ctx, "attachment not archived, will redeliver", "lane", "blobs", "messageId", ev.Message.ID, "fileId", atts[i].ID, "error", err)
-			jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, "archive attachment failed")
+			l.fail(ctx, msg, ev.Message.ID, ev.Message.RoomID, len(atts), atts[i].ID, err)
 			return
 		}
 	}
@@ -190,6 +230,20 @@ func (l *blobLane) archiveWithHeartbeat(ctx context.Context, msg jetstream.Msg, 
 	stop := jsretry.Heartbeat(ctx, msg, jsretry.HeartbeatBudget{Every: jsretry.HeartbeatInterval(l.cfg.ackWait), Max: l.cfg.heartbeatMax})
 	defer stop()
 	return l.archiveAttachment(ctx, msgID, roomID, att)
+}
+
+// fail settles a message whose attachment hit a retryable error: a Nak with
+// backoff, or, on the consumer's last delivery, an explicit Term so the give-up
+// is logged instead of vanishing.
+func (l *blobLane) fail(ctx context.Context, msg jetstream.Msg, msgID, roomID string, attachments int, fileID string, err error) {
+	if md, mdErr := msg.Metadata(); mdErr == nil && jsretry.IsLastAttempt(md.NumDelivered, l.cfg.maxDeliver) {
+		slog.WarnContext(ctx, "attachment not archived on the last delivery, dropping", "lane", "blobs", "disposition", "drop",
+			"messageId", msgID, "roomId", roomID, "attachments", attachments, "fileId", fileID, "error", err)
+		l.term(ctx, msg)
+		return
+	}
+	slog.WarnContext(ctx, "attachment not archived, will redeliver", "lane", "blobs", "messageId", msgID, "fileId", fileID, "error", err)
+	jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, "archive attachment failed")
 }
 
 func (l *blobLane) term(ctx context.Context, msg jetstream.Msg) {
@@ -245,7 +299,9 @@ func (l *blobLane) store(ctx context.Context, doc *auditarchive.BlobDoc, body io
 		return fmt.Errorf("encrypt attachment %s: %w", doc.FileID, err)
 	}
 	if n > l.cfg.maxBytes {
-		doc.Skipped, doc.SizeBytes = skipSize, n
+		// The read stopped at the cap, so the real size is unknown: -1 means
+		// "over the cap, size unknown".
+		doc.Skipped, doc.SizeBytes = skipSize, -1
 		return nil
 	}
 	key := auditarchive.BlobKey(l.cfg.site, doc.FileID)

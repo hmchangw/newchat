@@ -22,13 +22,14 @@ type fakeMsg struct {
 	nakDelay      time.Duration
 	naked         bool
 	headers       nats.Header
+	delivered     uint64
 }
 
 func (m *fakeMsg) Subject() string      { return m.subject }
 func (m *fakeMsg) Data() []byte         { return m.data }
 func (m *fakeMsg) Headers() nats.Header { return m.headers }
 func (m *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
-	return &jetstream.MsgMetadata{Stream: m.stream, Sequence: jetstream.SequencePair{Stream: m.seq}}, nil
+	return &jetstream.MsgMetadata{Stream: m.stream, Sequence: jetstream.SequencePair{Stream: m.seq}, NumDelivered: m.delivered}, nil
 }
 func (m *fakeMsg) Ack() error                         { m.acked = true; return nil }
 func (m *fakeMsg) Term() error                        { m.termed = true; return nil }

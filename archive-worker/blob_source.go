@@ -57,21 +57,10 @@ func (s *driveSource) Open(_ context.Context, roomID string, att cassandra.Attac
 	}
 	resp, err := s.client.GetGroupImage(host, roomID, att.ID)
 	if err != nil {
-		if errors.Is(err, drive.ErrHostNotAllowed) || driveNotFound(err) {
+		if errors.Is(err, drive.ErrHostNotAllowed) || errors.Is(err, drive.ErrNotFound) {
 			return nil, 0, "", fmt.Errorf("%w: %w", errBlobMissing, err)
 		}
 		return nil, 0, "", fmt.Errorf("fetch attachment %s from drive: %w", att.ID, err)
 	}
 	return resp.Reader, resp.ContentLength, resp.ContentType, nil
-}
-
-// driveNotFound reports a Drive 404 so a deleted file is recorded as missing
-// instead of being retried until the redelivery budget runs out. pkg/drive
-// exposes no sentinel for it: the signer's 404 surfaces as "status 404" and a
-// storage 404 as "image not found", so this is the one place errors are
-// matched by text. A wording change in pkg/drive fails safe, because the file
-// is then retried rather than skipped.
-func driveNotFound(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "signer service returned status 404") || strings.Contains(msg, "image not found")
 }

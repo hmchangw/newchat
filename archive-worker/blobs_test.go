@@ -268,7 +268,9 @@ func TestBlobLane_ArchiveAttachment(t *testing.T) {
 		l := newTestBlobLane(&fakeSource{data: map[string][]byte{"f1": plain}, unknownSize: true}, obj, idx, c, 100)
 		require.NoError(t, l.archiveAttachment(context.Background(), "m1", "r1", att))
 		assert.Empty(t, obj.puts)
-		assert.Equal(t, "size", idx.docAt(t, 0).Skipped)
+		d := idx.docAt(t, 0)
+		assert.Equal(t, "size", d.Skipped)
+		assert.Equal(t, int64(-1), d.SizeBytes, "-1 means over the cap, size unknown")
 	})
 	t.Run("exactly at the cap is archived", func(t *testing.T) {
 		obj, idx := &fakeObjects{}, &recordingIndex{}
@@ -422,6 +424,16 @@ func TestBlobLane_Run_Settlement(t *testing.T) {
 			wantFirst: "missing",
 		},
 		{
+			name: "an attachment without an id is skipped and the rest archived",
+			msg: func(t *testing.T) *fakeMsg {
+				return attMsg(t, 1, model.EventCreated, cassandra.Attachment{Title: "no id"}, driveAtt("a"))
+			},
+			source:   &fakeSource{data: map[string][]byte{"a": []byte("aa")}},
+			wantAck:  true,
+			wantPuts: []string{"site-a/blobs/a"},
+			wantDocs: 1,
+		},
+		{
 			name:     "an edit is not archived again",
 			msg:      func(t *testing.T) *fakeMsg { return attMsg(t, 1, model.EventUpdated, driveAtt("a")) },
 			source:   &fakeSource{data: map[string][]byte{"a": []byte("aa")}},
@@ -473,53 +485,59 @@ func TestBlobLane_Run_FetchErrors(t *testing.T) {
 
 	t.Run("terminal fetch error stops the guard", func(t *testing.T) {
 		for _, terr := range []error{jetstream.ErrConsumerNotFound, jetstream.ErrConsumerDeleted, jetstream.ErrStreamNotFound} {
-			fired := make(chan struct{}, 1)
-			guard := loopguard.New("b", func() { fired <- struct{}{} })
-			l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 1, now: time.Now}, errFetcher{err: terr}, src, &fakeObjects{}, &recordingIndex{}, c, guard, &metrics{})
-			done := make(chan struct{})
-			go l.run(context.Background(), make(chan struct{}), done)
-			<-done
-			assert.ErrorIs(t, guard.Check().Probe(context.Background()), terr)
-			select {
-			case <-fired:
-			default:
-				t.Error("unexpected-stop hook did not run")
-			}
+			t.Run(terr.Error(), func(t *testing.T) {
+				fired := make(chan struct{}, 1)
+				guard := loopguard.New("b", func() { fired <- struct{}{} })
+				l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 1, now: time.Now}, errFetcher{err: terr}, src, &fakeObjects{}, &recordingIndex{}, c, guard, &metrics{})
+				done := make(chan struct{})
+				go l.run(context.Background(), make(chan struct{}), done)
+				<-done
+				assert.ErrorIs(t, guard.Check().Probe(context.Background()), terr)
+				select {
+				case <-fired:
+				default:
+					t.Error("unexpected-stop hook did not run")
+				}
+			})
 		}
 	})
 	t.Run("terminal batch error settles delivered messages then stops the guard", func(t *testing.T) {
 		for _, terr := range []error{jetstream.ErrConsumerDeleted, jetstream.ErrBadRequest, jetstream.ErrConsumerNotFound} {
-			msg := attMsg(t, 1, model.EventCreated, driveAtt("a"))
-			fired := make(chan struct{}, 1)
-			guard := loopguard.New("b", func() { fired <- struct{}{} })
-			sf := scriptedErr(terr, []jetstream.Msg{msg})
-			l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 1, now: time.Now}, sf, src, &fakeObjects{}, &recordingIndex{}, c, guard, &metrics{})
-			done := make(chan struct{})
-			go l.run(context.Background(), make(chan struct{}), done)
-			<-done
-			assert.Equal(t, int32(1), sf.calls.Load(), "the loop stops instead of re-fetching a dead consumer")
-			assert.True(t, msg.acked, "messages delivered with the failing batch are archived first")
-			assert.ErrorIs(t, guard.Check().Probe(context.Background()), terr)
-			select {
-			case <-fired:
-			default:
-				t.Error("unexpected-stop hook did not run")
-			}
+			t.Run(terr.Error(), func(t *testing.T) {
+				msg := attMsg(t, 1, model.EventCreated, driveAtt("a"))
+				fired := make(chan struct{}, 1)
+				guard := loopguard.New("b", func() { fired <- struct{}{} })
+				sf := scriptedErr(terr, []jetstream.Msg{msg})
+				l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 1, now: time.Now}, sf, src, &fakeObjects{}, &recordingIndex{}, c, guard, &metrics{})
+				done := make(chan struct{})
+				go l.run(context.Background(), make(chan struct{}), done)
+				<-done
+				assert.Equal(t, int32(1), sf.calls.Load(), "the loop stops instead of re-fetching a dead consumer")
+				assert.True(t, msg.acked, "messages delivered with the failing batch are archived first")
+				assert.ErrorIs(t, guard.Check().Probe(context.Background()), terr)
+				select {
+				case <-fired:
+				default:
+					t.Error("unexpected-stop hook did not run")
+				}
+			})
 		}
 	})
 	t.Run("benign batch errors keep the lane running", func(t *testing.T) {
 		for _, berr := range []error{nats.ErrTimeout, jetstream.ErrNoMessages, jetstream.ErrNoHeartbeat} {
-			msg := attMsg(t, 1, model.EventCreated, driveAtt("a"))
-			guard := loopguard.New("b", func() {})
-			sf := scriptedErr(berr, []jetstream.Msg{msg})
-			l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 1, now: time.Now}, sf, src, &fakeObjects{}, &recordingIndex{}, c, guard, &metrics{})
-			stop, done := make(chan struct{}), make(chan struct{})
-			go l.run(context.Background(), stop, done)
-			sf.waitIdle(t)
-			close(stop)
-			<-done
-			assert.True(t, msg.acked)
-			assert.NoError(t, guard.Check().Probe(context.Background()))
+			t.Run(berr.Error(), func(t *testing.T) {
+				msg := attMsg(t, 1, model.EventCreated, driveAtt("a"))
+				guard := loopguard.New("b", func() {})
+				sf := scriptedErr(berr, []jetstream.Msg{msg})
+				l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 1, now: time.Now}, sf, src, &fakeObjects{}, &recordingIndex{}, c, guard, &metrics{})
+				stop, done := make(chan struct{}), make(chan struct{})
+				go l.run(context.Background(), stop, done)
+				sf.waitIdle(t)
+				close(stop)
+				<-done
+				assert.True(t, msg.acked)
+				assert.NoError(t, guard.Check().Probe(context.Background()))
+			})
 		}
 	})
 	t.Run("an unknown batch error pauses before the next fetch", func(t *testing.T) {
@@ -567,4 +585,191 @@ func TestNewBlobLane_Defaults(t *testing.T) {
 	assert.Equal(t, 1, l.cfg.workers)
 	assert.NotNil(t, l.cfg.now)
 	assert.Equal(t, defaultFetchRetry, l.fetchRetry)
+}
+
+// gatedSource blocks Open until released, signalling each entry, so a test can
+// hold a worker slot busy.
+type gatedSource struct {
+	inner   blobSource
+	entered chan string
+	release chan struct{}
+}
+
+func (g *gatedSource) Open(ctx context.Context, roomID string, att cassandra.Attachment) (io.ReadCloser, int64, string, error) { //nolint:gocritic // hugeParam: signature fixed by the blobSource interface
+	g.entered <- att.ID
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, 0, "", ctx.Err()
+	}
+	return g.inner.Open(ctx, roomID, att)
+}
+
+// notifyFetcher reports each Fetch (and its requested size) before delegating.
+type notifyFetcher struct {
+	inner msgFetcher
+	calls chan int
+}
+
+func (f *notifyFetcher) Fetch(ctx context.Context, n int, o ...jetstream.FetchOpt) (msgBatch, error) {
+	select {
+	case f.calls <- n:
+	default:
+	}
+	return f.inner.Fetch(ctx, n, o...)
+}
+
+func TestBlobLane_Run_ReservesWorkersBeforeFetching(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	m1 := attMsg(t, 1, model.EventCreated, driveAtt("a"))
+	m2 := attMsg(t, 2, model.EventCreated, driveAtt("b"))
+	gate := &gatedSource{inner: &fakeSource{data: map[string][]byte{"a": []byte("aa"), "b": []byte("bb")}}, entered: make(chan string, 2), release: make(chan struct{})}
+	nf := &notifyFetcher{inner: scripted([]jetstream.Msg{m1}, []jetstream.Msg{m2}), calls: make(chan int, 16)}
+	l := newTestBlobLane(gate, &fakeObjects{}, &recordingIndex{}, c, 1<<20)
+	l.fetcher = nf
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+
+	assert.Equal(t, 1, <-nf.calls, "the first fetch asks for one message: one free slot")
+	assert.Equal(t, "a", <-gate.entered)
+	select {
+	case n := <-nf.calls:
+		t.Fatalf("fetched %d more message(s) while the only worker slot was busy", n)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(gate.release)
+	select {
+	case <-nf.calls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no fetch after the slot was released")
+	}
+	close(stop)
+	<-done
+	assert.True(t, m1.acked)
+	assert.True(t, m2.acked)
+}
+
+func TestBlobLane_Run_FetchesAsManyAsFreeSlots(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, workers: 3, now: time.Now}, nil, &fakeSource{}, &fakeObjects{}, &recordingIndex{}, c, loopguard.New("b", func() {}), &metrics{})
+	nf := &notifyFetcher{inner: scripted(), calls: make(chan int, 16)}
+	l.fetcher = nf
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+	assert.Equal(t, 3, <-nf.calls)
+	close(stop)
+	<-done
+}
+
+func TestBlobLane_Run_StopWaitsForInFlight(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	m1 := attMsg(t, 1, model.EventCreated, driveAtt("a"))
+	gate := &gatedSource{inner: &fakeSource{data: map[string][]byte{"a": []byte("aa")}}, entered: make(chan string, 1), release: make(chan struct{})}
+	l := newTestBlobLane(gate, &fakeObjects{}, &recordingIndex{}, c, 1<<20)
+	l.fetcher = scripted([]jetstream.Msg{m1})
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+
+	<-gate.entered
+	close(stop)
+	select {
+	case <-done:
+		t.Fatal("run returned while a worker was still archiving")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(gate.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after the worker finished")
+	}
+	assert.True(t, m1.acked, "the in-flight message is settled before run returns")
+}
+
+func TestBlobLane_Run_StopWhileWaitingForSlot(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	m1 := attMsg(t, 1, model.EventCreated, driveAtt("a"))
+	gate := &gatedSource{inner: &fakeSource{data: map[string][]byte{"a": []byte("aa")}}, entered: make(chan string, 1), release: make(chan struct{})}
+	nf := &notifyFetcher{inner: scripted([]jetstream.Msg{m1}), calls: make(chan int, 16)}
+	l := newTestBlobLane(gate, &fakeObjects{}, &recordingIndex{}, c, 1<<20)
+	l.fetcher = nf
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+	<-gate.entered
+	<-nf.calls // the single fetch; the loop is now blocked waiting for the slot
+	close(stop)
+	close(gate.release)
+	<-done
+	assert.Empty(t, nf.calls, "no fetch after stop")
+	assert.True(t, m1.acked)
+}
+
+// heartbeatMsg counts InProgress calls and records the ack order.
+type heartbeatMsg struct {
+	*fakeMsg
+	inProgress chan struct{}
+}
+
+func (h *heartbeatMsg) InProgress() error {
+	select {
+	case h.inProgress <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func TestBlobLane_Run_HeartbeatsWhileArchiving(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	m := &heartbeatMsg{fakeMsg: attMsg(t, 1, model.EventCreated, driveAtt("a")), inProgress: make(chan struct{}, 4)}
+	gate := &gatedSource{inner: &fakeSource{data: map[string][]byte{"a": []byte("aa")}}, entered: make(chan string, 1), release: make(chan struct{})}
+	l := newBlobLane(blobLaneConfig{site: "site-a", maxBytes: 1 << 20, chunkBytes: 4096, workers: 1, ackWait: 3 * time.Second, heartbeatMax: time.Minute, now: time.Now},
+		scripted([]jetstream.Msg{m}), gate, &fakeObjects{}, &recordingIndex{}, c, loopguard.New("b", func() {}), &metrics{})
+	stop, done := make(chan struct{}), make(chan struct{})
+	go l.run(context.Background(), stop, done)
+
+	<-gate.entered
+	select {
+	case <-m.inProgress: // ackWait/3 is the one-second floor in jsretry
+	case <-time.After(5 * time.Second):
+		t.Fatal("no heartbeat while the attachment was downloading")
+	}
+	assert.False(t, m.acked, "the message is still unsettled while the heartbeat runs")
+	close(gate.release)
+	close(stop)
+	<-done
+	assert.True(t, m.acked)
+}
+
+func TestBlobLane_Run_LastDeliveryIsTermedAndLogged(t *testing.T) {
+	c, err := auditarchive.NewCipher(testDEK())
+	require.NoError(t, err)
+	tests := []struct {
+		name       string
+		delivered  uint64
+		maxDeliver int
+		wantTerm   bool
+		wantNak    bool
+	}{
+		{name: "before the last delivery it naks", delivered: 2, maxDeliver: 3, wantNak: true},
+		{name: "on the last delivery it terms", delivered: 3, maxDeliver: 3, wantTerm: true},
+		{name: "unlimited redelivery never terms", delivered: 99, maxDeliver: -1, wantNak: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := attMsg(t, 1, model.EventCreated, driveAtt("a"))
+			msg.delivered = tt.delivered
+			l := newTestBlobLane(&fakeSource{err: errors.New("drive 503")}, &fakeObjects{}, &recordingIndex{}, c, 1<<20)
+			l.cfg.maxDeliver = tt.maxDeliver
+			runBlobLane(t, l, scripted([]jetstream.Msg{msg}))
+			assert.Equal(t, tt.wantTerm, msg.termed, "termed")
+			assert.Equal(t, tt.wantNak, msg.naked, "naked")
+			assert.False(t, msg.acked)
+		})
+	}
 }
