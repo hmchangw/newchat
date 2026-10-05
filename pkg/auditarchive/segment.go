@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"time"
 )
 
@@ -52,6 +53,14 @@ func WriteSegment(w io.Writer, h Header, frames [][]byte) ([]int64, [32]byte, er
 	var zero [32]byte
 	if int(h.Count) != len(frames) {
 		return nil, zero, fmt.Errorf("auditarchive: header count %d != %d frames", h.Count, len(frames))
+	}
+	if len(h.Site) > math.MaxUint16 || len(h.Lane) > math.MaxUint16 {
+		return nil, zero, fmt.Errorf("auditarchive: site (%d bytes) or lane (%d bytes) exceeds %d", len(h.Site), len(h.Lane), math.MaxUint16)
+	}
+	for i, f := range frames {
+		if len(f) > maxFrameBytes {
+			return nil, zero, fmt.Errorf("auditarchive: frame %d is %d bytes, over the %d limit", i, len(f), maxFrameBytes)
+		}
 	}
 	h.Version = FormatVersion
 	cw := &countingWriter{w: w, h: sha256.New()}
@@ -138,6 +147,11 @@ func ReadSegment(r io.Reader) (Header, [][]byte, error) {
 	if err := binary.Read(rd, be, &h.Count); err != nil {
 		return Header{}, nil, fmt.Errorf("%w: count", ErrBadSegment)
 	}
+	// Each frame needs at least its 4-byte length prefix, so a larger count
+	// cannot be honest; checking it also bounds the preallocation.
+	if uint64(h.Count) > uint64(rd.Len())/4 {
+		return Header{}, nil, fmt.Errorf("%w: count %d exceeds what %d bytes can hold", ErrBadSegment, h.Count, rd.Len())
+	}
 	frames := make([][]byte, 0, h.Count)
 	for i := uint32(0); i < h.Count; i++ {
 		var n uint32
@@ -160,7 +174,7 @@ func ReadSegment(r io.Reader) (Header, [][]byte, error) {
 // not verify the trailer; callers verify the frame itself with Cipher.Open.
 func ReadFrameAt(ra io.ReaderAt, offset int64) ([]byte, error) {
 	var lenBuf [4]byte
-	if _, err := ra.ReadAt(lenBuf[:], offset); err != nil {
+	if err := readFullAt(ra, lenBuf[:], offset); err != nil {
 		return nil, fmt.Errorf("auditarchive: read frame length at %d: %w", offset, err)
 	}
 	n := binary.BigEndian.Uint32(lenBuf[:])
@@ -168,10 +182,27 @@ func ReadFrameAt(ra io.ReaderAt, offset int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: frame length %d", ErrBadSegment, n)
 	}
 	f := make([]byte, n)
-	if _, err := ra.ReadAt(f, offset+4); err != nil && (!errors.Is(err, io.EOF) || n != 0) {
+	if n == 0 {
+		return f, nil
+	}
+	if err := readFullAt(ra, f, offset+4); err != nil {
 		return nil, fmt.Errorf("auditarchive: read frame at %d: %w", offset, err)
 	}
 	return f, nil
+}
+
+// readFullAt fills p from offset. io.ReaderAt may return io.EOF together with
+// a complete read when the data ends exactly at the end of p, so only a short
+// count is a failure.
+func readFullAt(ra io.ReaderAt, p []byte, offset int64) error {
+	n, err := ra.ReadAt(p, offset)
+	if n == len(p) {
+		return nil
+	}
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 // SegmentKey is the object key for a sealed batch, time-ordered by prefix.

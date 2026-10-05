@@ -18,6 +18,19 @@ var ErrBlobTruncated = errors.New("auditarchive: blob ended before its final chu
 
 var blobMagic = []byte("AUDBLB")
 
+// sealOverhead is what Cipher.Seal adds to a plaintext: 12-byte nonce, 16-byte tag.
+const sealOverhead = 12 + 16
+
+// readErr classifies a failed read of a blob: end of data is the structural
+// error, anything else is an I/O failure that keeps its cause so a retryable
+// fault is not mistaken for tampering.
+func readErr(err, structural error, what string) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("%w: %s", structural, what)
+	}
+	return fmt.Errorf("auditarchive: read blob %s: %w", what, err)
+}
+
 // EncryptBlob encrypts src chunk by chunk so attachments of any size stream
 // through bounded memory. Each chunk's AAD carries its index; the empty
 // terminating chunk carries final=true, so dropping, reordering or
@@ -25,6 +38,11 @@ var blobMagic = []byte("AUDBLB")
 func EncryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string, chunkBytes int) (string, int64, error) {
 	if chunkBytes <= 0 {
 		return "", 0, fmt.Errorf("auditarchive: chunk size must be positive, got %d", chunkBytes)
+	}
+	// The sealed chunk adds a nonce and tag, and DecryptBlob refuses frames
+	// above maxFrameBytes, so a larger chunk would be written but unreadable.
+	if chunkBytes > maxFrameBytes-sealOverhead {
+		return "", 0, fmt.Errorf("auditarchive: chunk size %d exceeds the %d limit", chunkBytes, maxFrameBytes-sealOverhead)
 	}
 	be := binary.BigEndian
 	var hdr bytes.Buffer
@@ -82,30 +100,36 @@ func EncryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string, chunkBy
 func DecryptBlob(dst io.Writer, src io.Reader, c *Cipher, fileID string) (string, int64, error) {
 	be := binary.BigEndian
 	magic := make([]byte, len(blobMagic))
-	if _, err := io.ReadFull(src, magic); err != nil || !bytes.Equal(magic, blobMagic) {
+	if _, err := io.ReadFull(src, magic); err != nil {
+		return "", 0, readErr(err, ErrBadSegment, "magic")
+	}
+	if !bytes.Equal(magic, blobMagic) {
 		return "", 0, fmt.Errorf("%w: bad blob magic", ErrBadSegment)
 	}
 	var version uint16
 	var chunkBytes uint32
-	if err := binary.Read(src, be, &version); err != nil || version != FormatVersion {
+	if err := binary.Read(src, be, &version); err != nil {
+		return "", 0, readErr(err, ErrBadSegment, "version")
+	}
+	if version != FormatVersion {
 		return "", 0, fmt.Errorf("%w: unsupported blob version", ErrBadSegment)
 	}
 	if err := binary.Read(src, be, &chunkBytes); err != nil {
-		return "", 0, fmt.Errorf("%w: blob chunk size", ErrBadSegment)
+		return "", 0, readErr(err, ErrBadSegment, "chunk size")
 	}
 	sum := sha256.New()
 	var total int64
 	for idx := uint32(0); ; idx++ {
 		var n uint32
 		if err := binary.Read(src, be, &n); err != nil {
-			return "", 0, fmt.Errorf("%w: chunk %d", ErrBlobTruncated, idx)
+			return "", 0, readErr(err, ErrBlobTruncated, fmt.Sprintf("chunk %d length", idx))
 		}
 		if n > maxFrameBytes {
 			return "", 0, fmt.Errorf("%w: chunk %d length %d", ErrBadSegment, idx, n)
 		}
 		sealed := make([]byte, n)
 		if _, err := io.ReadFull(src, sealed); err != nil {
-			return "", 0, fmt.Errorf("%w: chunk %d", ErrBlobTruncated, idx)
+			return "", 0, readErr(err, ErrBlobTruncated, fmt.Sprintf("chunk %d", idx))
 		}
 		pt, err := c.Open(sealed, ChunkAAD(fileID, idx, false))
 		if err != nil {
