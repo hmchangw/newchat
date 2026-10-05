@@ -1,0 +1,37 @@
+name: archive-worker
+
+services:
+  archive-worker:
+    build:
+      context: ../..
+      dockerfile: archive-worker/deploy/Dockerfile
+    pull_policy: build
+    environment:
+      - OTEL_SERVICE_NAME=archive-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
+      - ARCHIVE_SEARCH_URL=${ARCHIVE_SEARCH_URL:-http://elasticsearch:9200}
+      - ARCHIVE_S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-minio:9000}
+      - ARCHIVE_S3_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - ARCHIVE_S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - ARCHIVE_BUCKET=${ARCHIVE_BUCKET:-archive-${SITE_ID:-site-local}}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
+      - ATREST_VAULT_TRANSIT_KEY=chat-audit-kek
+      - DRIVE_URL=${DRIVE_URL:-http://drive-stub:8080}
+      - DRIVE_API_TOKEN=${DRIVE_API_TOKEN:-dev-only}
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      - DEV_MODE=true
+      - CONSUMER_ACK_WAIT=${CONSUMER_ACK_WAIT:-60s}
+      - CONSUMER_MAX_ACK_PENDING=${CONSUMER_MAX_ACK_PENDING:-4000}
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
+    volumes:
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true
