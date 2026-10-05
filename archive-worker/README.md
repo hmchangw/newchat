@@ -75,6 +75,25 @@ worker verifies it exists. `INBOX-{site}` belongs to `inbox-worker` and is only 
 verified. On every start the worker creates the `audit-archive` lifecycle policy if it
 is absent (operator edits survive) and upserts the four index templates.
 
+## Elasticsearch write role (ops step)
+
+The worker only ever creates documents, so its steady-state identity should not be
+able to overwrite or delete archived ones. Provision a role such as this through the
+security API and bind the worker's `ARCHIVE_SEARCH_USERNAME` user to it:
+
+```
+PUT /_security/role/audit-writer
+{"indices":[{"names":["audit-*"],"privileges":["create_doc","auto_configure"]}]}
+```
+
+`create_doc` permits `op_type=create` (every bulk action the worker sends) and refuses
+index-over-existing and delete. Startup also upserts index templates and the lifecycle
+policy and reads the key document, which need `manage_index_templates`, `manage_ilm`
+and `read` on `audit-keys-*`; grant those to a separate bootstrap identity or add them
+to the role if one identity is used. The integration suite exercises the `create_doc`
+refusal only when the test cluster has security enabled, which it does not today, so it
+skips that case.
+
 ## Metrics
 
 Recorded through the OpenTelemetry meter `archive-worker`: `archive_segments_total`,
