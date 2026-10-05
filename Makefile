@@ -7,6 +7,7 @@
 DEPS_COMPOSE     := docker-local/compose.deps.yaml
 SERVICES_COMPOSE := docker-local/compose.services.yaml
 NATS_CREDS       := docker-local/backend.creds
+ARCHIVE_CREDS    := docker-local/archive-worker.creds
 NATS_CONF        := docker-local/nats.conf
 ENV_FILE         := docker-local/.env
 # Compose auto-loads .env only from the project directory, so `up SERVICE=<name>`
@@ -37,7 +38,7 @@ FED_O11Y_COMPOSE := docker-local/compose.fed-o11y.yaml
 # "Is a directory". sys.creds is the SYS-account credential the site-remote
 # spoke's second leafnode remote needs — without it JetStream will not start.
 FED_SYS_CREDS    := docker-local/sys.creds
-FED_GENERATED    := $(FED_NATS_LOCAL) $(FED_NATS_REMOTE) $(FED_ENV_LOCAL) $(FED_ENV_REMOTE) $(FED_SYS_CREDS)
+FED_GENERATED    := $(FED_NATS_LOCAL) $(FED_NATS_REMOTE) $(FED_ENV_LOCAL) $(FED_ENV_REMOTE) $(FED_SYS_CREDS) $(ARCHIVE_CREDS)
 
 # Services site-remote starts. Empty = every service. Set to trim the remote
 # peer; see the tier table in docker-local/README.md for what each drop costs.
@@ -224,7 +225,7 @@ endif
 # healthcheck passes, then runs the init one-shots (cassandra schema, vault
 # transit keys, locked archive buckets).
 deps-up:
-	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(NATS_CONF) ] || [ ! -f $(ENV_FILE) ]; then \
+	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(ARCHIVE_CREDS) ] || [ ! -f $(NATS_CONF) ] || [ ! -f $(ENV_FILE) ]; then \
 	  echo "First-time setup: generating nats.conf + backend.creds + .env..."; \
 	  ./docker-local/setup.sh; \
 	fi
@@ -244,8 +245,8 @@ require-deps:
 	@docker container inspect -f '{{.State.Running}}' $(NATS_CONTAINER) 2>/dev/null | grep -q true || { \
 	  echo "Deps are not running. Run 'make deps-up' first."; exit 1; \
 	}
-	@test -f $(NATS_CREDS) && test -f $(NATS_CONF) && test -f $(ENV_FILE) || { \
-	  echo "Missing $(NATS_CREDS), $(NATS_CONF) or $(ENV_FILE). Run './docker-local/setup.sh'."; exit 1; \
+	@test -f $(NATS_CREDS) && test -f $(ARCHIVE_CREDS) && test -f $(NATS_CONF) && test -f $(ENV_FILE) || { \
+	  echo "Missing $(NATS_CREDS), $(ARCHIVE_CREDS), $(NATS_CONF) or $(ENV_FILE). Run './docker-local/setup.sh'."; exit 1; \
 	}
 
 # Start microservices. With SERVICE=<name>, starts just that service's compose;

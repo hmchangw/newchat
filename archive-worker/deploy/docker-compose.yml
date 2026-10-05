@@ -10,7 +10,8 @@ services:
       - OTEL_SERVICE_NAME=archive-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
-      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      # Its own NATS user, not the stack-wide NATS_CREDS_FILE (backend.creds, all subjects).
+      - NATS_CREDS_FILE=${ARCHIVE_NATS_CREDS_FILE:-/etc/nats/archive-worker.creds}
       - SITE_ID=${SITE_ID:-site-local}
       - ARCHIVE_SEARCH_URL=${ARCHIVE_SEARCH_URL:-http://elasticsearch:9200}
       - ARCHIVE_S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-minio:9000}
@@ -29,7 +30,7 @@ services:
       - ARCHIVE_REPLICAS=${ARCHIVE_REPLICAS:-1}
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
     volumes:
-      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
+      - ../../docker-local/archive-worker.creds:${ARCHIVE_NATS_CREDS_FILE:-/etc/nats/archive-worker.creds}:ro
     networks:
       - chat-local
 

@@ -3,6 +3,7 @@
 .env.bak
 nats.conf
 backend.creds
+archive-worker.creds
 nats-site-local.conf
 nats-site-remote.conf
 .env.site-local

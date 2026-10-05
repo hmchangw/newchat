@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Generates NATS operator + account keys and writes nats.conf, backend.creds,
-# and .env for the shared local-dev NATS instance.
+# archive-worker.creds and .env for the shared local-dev NATS instance.
 #
 # Uses the nats-box Docker image so it works on any OS (Mac, Ubuntu, etc.)
 # without requiring local nsc/nk installation.
@@ -16,6 +16,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 NATS_CONF="$SCRIPT_DIR/nats.conf"
 BACKEND_CREDS="$SCRIPT_DIR/backend.creds"
 SYS_CREDS="$SCRIPT_DIR/sys.creds"
+ARCHIVE_WORKER_CREDS="$SCRIPT_DIR/archive-worker.creds"
 FRONTEND_ENV_FILE="$REPO_ROOT/chat-frontend/.env.local"
 NATS_BOX_IMAGE="natsio/nats-box:latest"
 
@@ -102,6 +103,37 @@ docker run --rm \
     nsc edit user --account chatapp --name backend --allow-sub ">" --allow-pub ">"
     nsc generate creds --account chatapp --name backend > /output/backend.creds
 
+    # archive-worker: pull consumers on MESSAGES-CANONICAL and INBOX only, so
+    # it never runs on the all-subjects backend credential. No chat.user.>
+    # right: this worker never calls history. A JetStream API subject token
+    # cannot hold a partial wildcard (MESSAGES-CANONICAL-* would match
+    # nothing), so the stream names are spelled out per local-dev site. A
+    # production user needs the same set minus STREAM.CREATE and STREAM.UPDATE,
+    # which only the BOOTSTRAP_STREAMS=true dev path uses; see
+    # archive-worker/README.md. Every durable is created with a filter list,
+    # so the create subject carries no filter suffix.
+    # $JS.ACK carries a domain and account-hash token ahead of the stream on
+    # current servers, so it cannot be scoped by stream name.
+    set -- --allow-sub "_INBOX.>" --allow-pub "\$JS.ACK.>"
+    for site in site-local site-remote; do
+      CANON="MESSAGES-CANONICAL-${site}"
+      INBOX="INBOX-${site}"
+      set -- "$@" \
+        --allow-pub "\$JS.API.STREAM.INFO.${CANON}" \
+        --allow-pub "\$JS.API.STREAM.INFO.${INBOX}" \
+        --allow-pub "\$JS.API.STREAM.CREATE.${CANON}" \
+        --allow-pub "\$JS.API.STREAM.UPDATE.${CANON}" \
+        --allow-pub "\$JS.API.CONSUMER.CREATE.${CANON}.archive-worker-events" \
+        --allow-pub "\$JS.API.CONSUMER.CREATE.${CANON}.archive-worker-blobs" \
+        --allow-pub "\$JS.API.CONSUMER.CREATE.${INBOX}.archive-worker-members" \
+        --allow-pub "\$JS.API.CONSUMER.MSG.NEXT.${CANON}.archive-worker-events" \
+        --allow-pub "\$JS.API.CONSUMER.MSG.NEXT.${CANON}.archive-worker-blobs" \
+        --allow-pub "\$JS.API.CONSUMER.MSG.NEXT.${INBOX}.archive-worker-members"
+    done
+    nsc add user --account chatapp --name archive-worker
+    nsc edit user --account chatapp --name archive-worker "$@"
+    nsc generate creds --account chatapp --name archive-worker > /output/archive-worker.creds
+
     # SYS-account user for the federated stack only. JetStream refuses to start
     # on a server with a cluster identity unless the SYSTEM account has a
     # solicited leafnode (or routes), so the site-remote spoke opens a second
@@ -112,7 +144,10 @@ docker run --rm \
 
 cp "$SETUP_TMP_DIR/backend.creds" "$BACKEND_CREDS"
 cp "$SETUP_TMP_DIR/sys.creds" "$SYS_CREDS"
+cp "$SETUP_TMP_DIR/archive-worker.creds" "$ARCHIVE_WORKER_CREDS"
 chmod 644 "$SYS_CREDS"
+# Same reasoning as backend.creds below: read by the non-root worker container.
+chmod 644 "$ARCHIVE_WORKER_CREDS"
 # 0644, not 0600: service containers run as non-root (uid 10001) and
 # bind-mount this file read-only at /etc/nats/backend.creds, so the
 # in-container user must be able to read it. Acceptable only because
@@ -244,6 +279,7 @@ EOF
 echo "Wrote $NATS_CONF"
 echo "Wrote $BACKEND_CREDS"
 echo "Wrote $SYS_CREDS"
+echo "Wrote $ARCHIVE_WORKER_CREDS"
 echo "Wrote $ENV_FILE"
 echo "Wrote $FRONTEND_ENV_FILE (preserved if it already existed)"
 echo ""

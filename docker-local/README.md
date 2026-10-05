@@ -22,7 +22,7 @@ make up                   # every microservice (foreground; Ctrl-C stops)
 make ui-up                # chat-frontend :3000, admin-frontend :3001
 ```
 
-`make deps-up` runs `setup.sh` for you if `nats.conf`, `backend.creds` or `.env`
+`make deps-up` runs `setup.sh` for you if `nats.conf`, `backend.creds`, `archive-worker.creds` or `.env`
 are missing. `make seed` is safe to re-run — it upserts by stable ID and never
 drops a database or collection, so hand-added dev data survives.
 `make seed-reset` deletes the seeded rows first.
@@ -677,9 +677,16 @@ bucket and `audit-*` Elasticsearch indices. The init profile (`vault-init`,
 Object-Lock buckets `archive-site-local` and `archive-site-remote`, each with
 versioning on and a 1-day COMPLIANCE default retention. Locked objects cannot
 be deleted for a day, so `docker compose down -v` is the way to reset the
-archive locally. Reset the Elasticsearch volume along with it: a Vault restart
-(or `down -v`) replaces `chat-audit-kek`, and the wrapped archive DEK kept in
-`audit-keys-<site>` can no longer be unwrapped.
+archive locally. Vault dev mode is in-memory, so a Vault restart replaces
+`chat-audit-kek` and the wrapped archive DEK kept in `audit-keys-<site>` can no
+longer be unwrapped; reset the Elasticsearch volume with `down -v` as well.
 
 `minio-init` runs `mc` from the same `pgsty/minio` image as the server (it ships
 `mc`), so no separate client image is pulled.
+
+The worker connects with its own NATS user rather than `backend.creds`:
+`setup.sh` writes `archive-worker.creds`, scoped to the two streams it consumes
+(the production set is in `archive-worker/README.md`), and the worker's compose
+file mounts it. After pulling this change, re-run `./docker-local/setup.sh` once
+(`make fed-regen` for the federated stack); that rotates the NATS keys, so
+restart the deps stack afterwards.

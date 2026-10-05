@@ -68,6 +68,29 @@ worker and the central audit service. The worker's role needs `datakey` and `enc
 on it and uses Vault only to create or unwrap its site's DEK. `chat-kek` is never
 involved.
 
+## NATS permissions
+
+Run the worker on its own NATS user, never the all-subjects backend credential. It
+needs no `chat.user.>` rights (it never calls history). Production set, per site
+(`S1` = `MESSAGES-CANONICAL-{site}`, `S2` = `INBOX-{site}`); a JetStream API subject
+token cannot carry a partial wildcard, so spell the stream names out or use `*`:
+
+| Direction | Subject | Used for |
+|---|---|---|
+| publish | `$JS.API.STREAM.INFO.S1`, `$JS.API.STREAM.INFO.S2` | startup stream verification |
+| publish | `$JS.API.CONSUMER.CREATE.S1.archive-worker-events` | events durable |
+| publish | `$JS.API.CONSUMER.CREATE.S1.archive-worker-blobs` | attachment durable (only with `ARCHIVE_BLOBS_ENABLED`) |
+| publish | `$JS.API.CONSUMER.CREATE.S2.archive-worker-members` | members durable |
+| publish | `$JS.API.CONSUMER.MSG.NEXT.S1.archive-worker-events`, `...S1.archive-worker-blobs`, `...S2.archive-worker-members` | pull requests |
+| publish | `$JS.ACK.>` | ack, nak, in-progress and term of delivered messages (the subject carries a domain and account-hash token before the stream, so it cannot be narrowed by stream name) |
+| subscribe | `_INBOX.>` | API replies and pulled messages |
+
+The durables are created with a filter list, so the create subject has no filter
+suffix. Add `$JS.API.STREAM.CREATE.S1` and `$JS.API.STREAM.UPDATE.S1` only where
+`BOOTSTRAP_STREAMS=true` (local dev); production streams belong to ops. The worker
+never deletes a consumer or a stream. `docker-local/setup.sh` generates this user
+as `archive-worker.creds` for both local-dev sites.
+
 ## Streams and indexes
 
 `BOOTSTRAP_STREAMS=true` (dev) creates `MESSAGES-CANONICAL-{site}`; otherwise the
